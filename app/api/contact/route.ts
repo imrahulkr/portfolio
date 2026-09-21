@@ -30,7 +30,6 @@ export async function POST(request: Request) {
       body: new URLSearchParams({ secret: recaptchaSecret, response: recaptchaToken }),
     });
     const verifyBody = await verifyRes.json();
-    console.log("recaptcha verify response:", verifyBody);
     if (!verifyBody.success || verifyBody.action !== "contact" || verifyBody.score < 0.5) {
       return NextResponse.json({ error: "Verification failed — please try again." }, { status: 400 });
     }

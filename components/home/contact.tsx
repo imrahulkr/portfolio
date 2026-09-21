@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import Script from "next/script";
-import { FiSend } from "react-icons/fi";
+import { FiSend, FiCheck } from "react-icons/fi";
 import { siteConfig } from "@/data/site-config";
 
 type Status = "idle" | "sending" | "sent" | "error";
@@ -83,9 +83,7 @@ export function Contact() {
         </p>
 
         {status === "sent" ? (
-          <p role="status" className="text-sm text-accent">
-            Thanks for reaching out — I&apos;ll get back to you soon.
-          </p>
+          <SentConfirmation />
         ) : (
           <form onSubmit={handleSubmit} aria-busy={status === "sending"} className="flex flex-col gap-4 text-left">
             <p className="text-xs text-text-soft" aria-hidden="true">* Required</p>
@@ -159,5 +157,31 @@ export function Contact() {
         </div>
       </div>
     </section>
+  );
+}
+
+function SentConfirmation() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setVisible(true));
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  return (
+    <div
+      role="status"
+      className={`rounded-2xl border border-border bg-surface px-8 py-10 text-center motion-safe:transition-all motion-safe:duration-500 motion-safe:ease-out ${
+        visible ? "opacity-100 scale-100" : "opacity-0 scale-95"
+      }`}
+    >
+      <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-accent/10">
+        <FiCheck aria-hidden className="h-7 w-7 text-accent" />
+      </div>
+      <p className="font-heading text-lg font-semibold text-text mb-1.5">Message sent!</p>
+      <p className="text-sm text-text-soft max-w-prose mx-auto">
+        Thanks for reaching out — I&apos;ve received your message and will get back to you within 24-48 hours.
+      </p>
+    </div>
   );
 }
