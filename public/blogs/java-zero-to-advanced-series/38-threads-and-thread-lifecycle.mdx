@@ -1,0 +1,160 @@
+---
+title: "Threads & the Thread Lifecycle"
+description: "Creating threads via Thread and Runnable, the six thread states, thread priorities, and daemon threads."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Concurrency & Multithreading"
+chapter: 38
+totalChapters: 65
+slug: "threads-and-thread-lifecycle"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "concurrency", "threads"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## Creating a Thread: Two Approaches
+
+```java
+// Approach 1 — extend Thread directly
+public class MyThread extends Thread {
+    @Override
+    public void run() {
+        System.out.println("Running in: " + Thread.currentThread().getName());
+    }
+}
+new MyThread().start();
+
+// Approach 2 — implement Runnable (preferred)
+public class MyTask implements Runnable {
+    @Override
+    public void run() {
+        System.out.println("Running in: " + Thread.currentThread().getName());
+    }
+}
+new Thread(new MyTask()).start();
+
+// Modern, concise form with a lambda (Runnable is a functional interface)
+new Thread(() -> System.out.println("Running in: " + Thread.currentThread().getName())).start();
+```
+
+**Prefer `Runnable` over extending `Thread`:** Java only allows single class inheritance, so extending `Thread` uses up your one `extends` slot, preventing the class from extending anything else. Implementing `Runnable` keeps the "task to run" separate from "the mechanism that runs it," and that same `Runnable` can be submitted to an `ExecutorService` (Chapter 40) instead of manually managing raw threads at all — which is what real-world code almost always does.
+
+## `start()` vs. `run()` — A Critical Distinction
+
+```java
+Thread t = new Thread(() -> System.out.println("Hello from: " + Thread.currentThread().getName()));
+
+t.run();     // WRONG for concurrency — just a normal, synchronous method call on the CURRENT thread
+t.start();   // CORRECT — creates a genuine new OS-backed thread, which then calls run() on ITS OWN stack
+```
+
+Calling `run()` directly is a common beginner mistake — it doesn't create a new thread at all; it's just an ordinary method invocation that executes synchronously on whatever thread called it. Only `start()` actually asks the JVM to allocate a new thread of execution.
+
+## The Thread Lifecycle
+
+```
+NEW -> RUNNABLE -> (BLOCKED / WAITING / TIMED_WAITING) -> TERMINATED
+```
+
+![Diagram: thread state transition diagram showing NEW transitioning to RUNNABLE on start(), RUNNABLE cycling with BLOCKED/WAITING/TIMED_WAITING, and finally reaching TERMINATED](/diagrams/ch38-thread-lifecycle-states.svg)
+
+- **`NEW`** — created via `new Thread(...)`, but `start()` hasn't been called yet.
+- **`RUNNABLE`** — eligible to run; may actually be executing on a CPU core, or simply waiting for the OS scheduler to give it a time slice (Java doesn't distinguish these as separate states).
+- **`BLOCKED`** — waiting to acquire a lock held by another thread (e.g., waiting to enter a `synchronized` block — Chapter 39).
+- **`WAITING`** — waiting indefinitely for another thread to explicitly notify it (via `Object.wait()` with no timeout, `Thread.join()` with no timeout).
+- **`TIMED_WAITING`** — like `WAITING`, but with a specified maximum wait duration (`Thread.sleep(ms)`, `wait(ms)`, `join(ms)`).
+- **`TERMINATED`** — `run()` has completed, either normally or by throwing an uncaught exception; a terminated thread can never be restarted.
+
+```java
+Thread t = new Thread(() -> {
+    try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+});
+System.out.println(t.getState());   // NEW
+t.start();
+System.out.println(t.getState());   // RUNNABLE (or TIMED_WAITING if it already reached sleep())
+t.join();
+System.out.println(t.getState());   // TERMINATED
+```
+
+## `join()` — Waiting for Another Thread to Finish
+
+```java
+Thread worker = new Thread(() -> {
+    // long-running work
+});
+worker.start();
+worker.join();   // blocks the CALLING thread until "worker" terminates
+System.out.println("Worker finished, continuing main thread");
+```
+
+Without `join()`, the main thread might finish (and, for the JVM's default behavior, potentially exit) before a spawned worker thread completes its work — `join()` establishes an explicit happens-before relationship (Chapter 39 covers the memory-model implications) ensuring the calling thread waits.
+
+## Daemon Threads
+
+```java
+Thread backgroundTask = new Thread(() -> { /* ... */ });
+backgroundTask.setDaemon(true);   // must be called BEFORE start()
+backgroundTask.start();
+```
+
+A **daemon thread** doesn't prevent the JVM from exiting — once all non-daemon ("user") threads finish, the JVM shuts down immediately, abruptly terminating any still-running daemon threads without running their remaining code or `finally` blocks. Daemon threads are appropriate for background housekeeping tasks (like a periodic cache-cleanup thread) that shouldn't keep the application alive on their own, but are inappropriate for anything requiring guaranteed, graceful completion (like flushing data to disk).
+
+## Thread Priority — A Hint, Not a Guarantee
+
+```java
+Thread t = new Thread(() -> { /* ... */ });
+t.setPriority(Thread.MAX_PRIORITY);   // 1 (MIN) to 10 (MAX), default is 5 (NORM_PRIORITY)
+```
+
+Thread priority is only a **hint** to the underlying OS scheduler, and its actual effect (if any) is highly platform-dependent — modern Java code almost never relies on thread priority for correctness or meaningful performance tuning; it's largely a legacy mechanism from an earlier, simpler concurrency model.
+
+## Key Takeaways
+
+- Prefer implementing `Runnable` over extending `Thread` — it preserves your single-inheritance slot and integrates with the `ExecutorService` framework.
+- Calling `run()` directly executes synchronously on the current thread; only `start()` creates a genuine new thread.
+- The thread lifecycle is NEW → RUNNABLE → (BLOCKED/WAITING/TIMED_WAITING) → TERMINATED — a terminated thread can never restart.
+- Daemon threads don't block JVM exit and can be abruptly killed mid-execution — reserve them for non-critical background work.
+
+---
+
+## Interview Questions
+
+**1. Why is implementing `Runnable` generally preferred over extending `Thread` directly?**
+Extending `Thread` consumes the class's single allowed superclass slot (Java doesn't support multiple class inheritance), preventing it from extending anything else useful. Implementing `Runnable` instead keeps the task definition separate from the thread-execution mechanism, and that same `Runnable` can be submitted directly to an `ExecutorService` (Chapter 40) — the standard, real-world approach — rather than being tied to manually managing raw `Thread` objects.
+
+**2. What's the critical difference between calling `thread.start()` and calling `thread.run()` directly?**
+`start()` asks the JVM to allocate a genuine new OS-backed thread of execution, which then invokes `run()` on that new thread's own call stack, running concurrently with the caller. Calling `run()` directly is just an ordinary synchronous method call executed on whatever thread made the call — no new thread is created at all, and the calling thread blocks until `run()` completes, exactly like calling any other regular method.
+
+**3. What happens if you call `start()` twice on the same `Thread` object?**
+It throws `IllegalThreadStateException` — a `Thread` object can only be started once during its lifetime; after it terminates (or even while it's still running from the first `start()` call), attempting to call `start()` again is invalid and immediately rejected.
+
+**4. List the six thread states and briefly describe each.**
+`NEW` (created, not yet started), `RUNNABLE` (eligible to execute, whether actually running or waiting for a CPU time slice), `BLOCKED` (waiting to acquire a lock held by another thread), `WAITING` (waiting indefinitely for another thread's explicit signal), `TIMED_WAITING` (like WAITING, but bounded by a specified timeout), and `TERMINATED` (finished executing, permanently, either normally or via an uncaught exception).
+
+**5. What is the purpose of `Thread.join()`, and what would happen without it in a scenario where the main thread spawns a worker thread and then needs the worker's results?**
+`join()` blocks the calling thread until the target thread terminates, providing a way to explicitly wait for another thread's completion. Without it, the calling thread has no built-in way to know when the worker thread has finished — it might proceed to use results the worker hasn't actually produced yet, or (in the case of the main thread) the JVM might even begin shutting down before the worker completes, depending on whether the worker is a daemon thread.
+
+**6. What is a daemon thread, and what happens to it when the JVM decides to exit?**
+A daemon thread is marked (via `setDaemon(true)`, before `start()`) as not counting toward keeping the JVM alive — once every non-daemon thread has finished, the JVM exits immediately, and any still-running daemon threads are abruptly terminated without completing their remaining code, running `finally` blocks, or performing any other cleanup.
+
+**7. Why is it inappropriate to use a daemon thread for something like flushing buffered data to disk before shutdown?**
+Because daemon threads can be killed at any arbitrary point in their execution the moment the JVM decides to exit, with no guarantee of completing their current work or running cleanup code — critical operations requiring guaranteed completion need a non-daemon thread (or an explicit, coordinated shutdown sequence that waits for the work to finish, such as `ExecutorService.awaitTermination()`, covered in Chapter 40) rather than relying on a daemon thread's best-effort execution.
+
+**8. Is `Thread.setPriority()` something modern Java code should rely on for correctness or meaningful performance behavior?**
+No — thread priority is only advisory, a hint passed to the underlying OS scheduler, and its actual effect (if any at all) varies significantly across different operating systems and JVM implementations. Modern concurrent Java code essentially never depends on thread priority for correct or predictable behavior, favoring proper synchronization and higher-level concurrency utilities (Chapters 39–42) instead.
+
+**9. What happens if a thread's `run()` method throws an uncaught exception?**
+The thread terminates immediately (transitioning to `TERMINATED`), and the exception is handled by the thread's configured `UncaughtExceptionHandler` (which, by default, simply prints the stack trace to standard error) — critically, this uncaught exception does **not** propagate to any other thread, including the thread that originally created and started this one; it's entirely isolated to the thread where it occurred.
+
+**10. Why must `setDaemon(true)` be called before `start()`, not after?**
+A thread's daemon status is fixed at the moment it actually begins execution — attempting to change it after the thread has already started throws `IllegalThreadStateException`, since the JVM needs to know upfront, before the thread starts running, whether it should be counted toward the "keep the JVM alive" determination.
+
+**11. What does `Thread.currentThread()` return, and what's a common use for it?**
+It returns a reference to the `Thread` object representing whichever thread is currently executing the code that calls it. A common use is logging or debugging — printing `Thread.currentThread().getName()` to identify which thread produced a particular log line, which is especially useful when diagnosing concurrent code where multiple threads interleave their output.
+
+**12. If a thread is in the `TIMED_WAITING` state due to `Thread.sleep(5000)`, can it be woken up early?**
+Yes — calling `interrupt()` on that sleeping thread causes `Thread.sleep()` to immediately throw `InterruptedException`, waking the thread early rather than waiting out the full duration. This is the standard mechanism for cooperatively signaling a thread that it should stop what it's doing, though the sleeping (or otherwise blocked/waiting) thread's code must explicitly catch `InterruptedException` and decide how to respond — interruption in Java is a cooperative request, not a forced termination.

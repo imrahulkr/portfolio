@@ -1,0 +1,223 @@
+---
+title: "Creational Design Patterns: Singleton, Factory, Builder"
+description: "Thread-safe Singleton implementations, Factory Method vs Abstract Factory, and the Builder pattern for complex object construction."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Design Patterns & Clean Code"
+chapter: 55
+totalChapters: 65
+slug: "creational-design-patterns"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "design-patterns", "singleton", "factory", "builder"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## What Creational Patterns Address
+
+Creational patterns deal with **object creation mechanisms**, aiming to create objects in a way appropriate to the situation — hiding creation logic, controlling instantiation, or making construction more flexible than a raw `new` call allows.
+
+## Singleton — Exactly One Instance
+
+Ensures a class has exactly one instance, globally accessible.
+
+```java
+public class ConfigManager {
+    private static volatile ConfigManager instance;
+    private final Map<String, String> settings = new HashMap<>();
+
+    private ConfigManager() { }   // private constructor — prevents external instantiation
+
+    public static ConfigManager getInstance() {
+        if (instance == null) {                      // first check (no lock) — avoids locking on every call
+            synchronized (ConfigManager.class) {
+                if (instance == null) {                // second check (WITH lock) — avoids a race between two threads
+                    instance = new ConfigManager();
+                }
+            }
+        }
+        return instance;
+    }
+}
+```
+
+This is **double-checked locking** — the `volatile` keyword is essential here (Chapter 39): without it, another thread could observe a partially-constructed `ConfigManager` object due to instruction reordering, since object construction and reference assignment aren't guaranteed to appear atomic/ordered to other threads without it.
+
+**The much simpler, JVM-guaranteed-thread-safe alternative — an enum:**
+
+```java
+public enum ConfigManager {
+    INSTANCE;
+
+    private final Map<String, String> settings = new HashMap<>();
+
+    public String get(String key) { return settings.get(key); }
+}
+
+ConfigManager.INSTANCE.get("env");
+```
+
+As covered in Chapter 15, enum constants are created exactly once by the JVM's class-loading mechanism itself, entirely thread-safely, with no manual locking needed — and this approach also automatically protects against reflection-based and deserialization-based Singleton-breaking attacks that a hand-rolled class must specifically guard against. **This is Joshua Bloch's (author of Effective Java) widely-recommended best practice for implementing Singleton in Java.**
+
+![Diagram: comparison of double-checked locking Singleton requiring explicit volatile and synchronized keywords versus an enum Singleton relying on the JVM's own thread-safe class-loading guarantee](/diagrams/ch55-singleton-approaches-comparison.svg)
+
+## Factory Method — Delegating Instantiation to Subclasses
+
+Defines an interface for creating an object, but lets implementing classes decide which concrete class to instantiate.
+
+```java
+public interface Notification {
+    void send(String message);
+}
+
+public class EmailNotification implements Notification {
+    public void send(String message) { System.out.println("Email: " + message); }
+}
+
+public class SmsNotification implements Notification {
+    public void send(String message) { System.out.println("SMS: " + message); }
+}
+
+public class NotificationFactory {
+    public static Notification create(String type) {
+        return switch (type) {
+            case "email" -> new EmailNotification();
+            case "sms" -> new SmsNotification();
+            default -> throw new IllegalArgumentException("Unknown type: " + type);
+        };
+    }
+}
+```
+
+```java
+Notification notification = NotificationFactory.create("email");
+notification.send("Hello!");
+```
+
+The caller depends only on the `Notification` interface and the factory — never directly on a concrete class — making it trivial to add new notification types without changing any calling code (aligning directly with the Open/Closed Principle, covered in Chapter 57).
+
+## Abstract Factory — Families of Related Objects
+
+Provides an interface for creating **families** of related objects without specifying their concrete classes — one level above a single Factory Method.
+
+```java
+public interface UIFactory {
+    Button createButton();
+    Checkbox createCheckbox();
+}
+
+public class DarkThemeFactory implements UIFactory {
+    public Button createButton() { return new DarkButton(); }
+    public Checkbox createCheckbox() { return new DarkCheckbox(); }
+}
+
+public class LightThemeFactory implements UIFactory {
+    public Button createButton() { return new LightButton(); }
+    public Checkbox createCheckbox() { return new LightCheckbox(); }
+}
+```
+
+```java
+UIFactory factory = darkModeEnabled ? new DarkThemeFactory() : new LightThemeFactory();
+Button button = factory.createButton();       // guaranteed to be a matching, consistent theme's button
+Checkbox checkbox = factory.createCheckbox(); // and checkbox — no risk of mismatching Dark/Light components
+```
+
+The key value: it guarantees the *whole family* of created objects is mutually consistent (all Dark, or all Light) — using a plain Factory Method per component risks accidentally mixing a `DarkButton` with a `LightCheckbox`.
+
+## Builder — Constructing Complex Objects Step by Step
+
+Solves the "telescoping constructor" problem, where a class with many optional parameters ends up with an unwieldy number of overloaded constructors.
+
+```java
+public class Pizza {
+    private final String size;          // required
+    private final boolean cheese;       // optional
+    private final boolean pepperoni;    // optional
+    private final boolean mushrooms;    // optional
+
+    private Pizza(Builder builder) {
+        this.size = builder.size;
+        this.cheese = builder.cheese;
+        this.pepperoni = builder.pepperoni;
+        this.mushrooms = builder.mushrooms;
+    }
+
+    public static class Builder {
+        private final String size;       // required, set via constructor
+        private boolean cheese = false;
+        private boolean pepperoni = false;
+        private boolean mushrooms = false;
+
+        public Builder(String size) { this.size = size; }
+
+        public Builder cheese(boolean value) { this.cheese = value; return this; }        // returns "this" for chaining
+        public Builder pepperoni(boolean value) { this.pepperoni = value; return this; }
+        public Builder mushrooms(boolean value) { this.mushrooms = value; return this; }
+
+        public Pizza build() { return new Pizza(this); }
+    }
+}
+```
+
+```java
+Pizza pizza = new Pizza.Builder("Large")
+        .cheese(true)
+        .pepperoni(true)
+        .build();   // mushrooms defaults to false — no need to specify every option
+```
+
+Each `Builder` method returns `this`, enabling **method chaining (a fluent interface)** — this pattern is exactly what libraries like `StringBuilder` (Chapter 16) and Java's `HttpRequest.newBuilder()` (Chapter 30) already use, and it's precisely what Lombok's `@Builder` annotation generates automatically to eliminate this boilerplate.
+
+## Key Takeaways
+
+- Prefer an enum-based Singleton over manual double-checked locking — it's simpler and inherently thread-safe, reflection-safe, and serialization-safe.
+- Factory Method decouples callers from concrete classes; Abstract Factory extends this to guarantee consistent *families* of related objects.
+- Builder solves the telescoping-constructor problem for classes with many optional parameters, using fluent method chaining.
+- These patterns exist to make object creation more flexible and maintainable — not to be applied reflexively to every class regardless of actual need.
+
+---
+
+## Interview Questions
+
+**1. Why is double-checked locking for a Singleton considered tricky to implement correctly, and what keyword is essential to it?**
+Without `volatile` on the instance field, a thread could observe a reference to a `ConfigManager` object that has been assigned but whose constructor hasn't fully finished running from that thread's perspective, due to the JVM/CPU being permitted to reorder instructions absent a proper happens-before relationship (Chapter 39). `volatile` establishes that necessary ordering guarantee, ensuring any thread that sees the non-null instance reference also sees a fully-initialized object.
+
+**2. Why is an enum-based Singleton generally recommended over a hand-written double-checked-locking class?**
+The JVM guarantees enum constants are created exactly once, during class loading, in an inherently thread-safe manner with no manual synchronization code required at all — eliminating the entire double-checked-locking complexity. It also automatically protects against two subtle ways a hand-rolled Singleton can be broken: reflection-based instantiation (calling a private constructor via `setAccessible(true)`) and deserialization creating a second instance — both of which a manually-written Singleton class must specifically guard against, while an enum sidesteps both for free.
+
+**3. What problem does the Factory Method pattern solve?**
+It decouples the code that needs an object from the concrete class that gets instantiated — calling code depends only on a common interface/abstract type and a factory, never directly on a specific concrete implementation class, making it possible to introduce new concrete types later without modifying any of the existing calling code.
+
+**4. What's the key difference between Factory Method and Abstract Factory?**
+Factory Method typically creates a single kind of product (one method, one product hierarchy). Abstract Factory creates entire *families* of related products through a single factory interface with multiple creation methods, specifically guaranteeing that all the objects produced by one concrete factory implementation are mutually consistent with each other (e.g., all matching a "Dark theme," never accidentally mixing components from different families).
+
+**5. What real-world problem motivated the Abstract Factory example with `DarkThemeFactory`/`LightThemeFactory`?**
+Using separate, independent Factory Methods for buttons and checkboxes individually risks accidentally combining a `DarkButton` with a `LightCheckbox` if the calling code doesn't carefully coordinate which factory it uses for each component. Abstract Factory groups the creation of all related components behind one factory object, so simply choosing which single factory instance to use up front guarantees every component it subsequently creates belongs to the same, consistent family.
+
+**6. What is the "telescoping constructor" problem, and how does the Builder pattern solve it?**
+It's the situation where a class with many optional constructor parameters ends up needing numerous overloaded constructors to cover different combinations of which parameters are actually being specified, becoming unwieldy and error-prone (especially with several parameters of the same type, risking accidental argument-order mistakes). The Builder pattern solves this by using a separate builder object with individually-named, chainable setter-like methods for each optional parameter, letting callers specify exactly the options they care about, in any order, with the rest defaulting sensibly, then finalizing construction with a single `build()` call.
+
+**7. Why does each method in a typical Builder implementation return `this`?**
+Returning `this` enables method chaining (a fluent interface) — each configuration call can be chained directly onto the previous one on a single expression (`new Builder().option1(x).option2(y).build()`), rather than requiring a separate statement and explicit variable reference for every individual configuration step.
+
+**8. Can a Builder enforce that certain fields are required while others remain optional?**
+Yes — typically by accepting required fields as constructor parameters to the `Builder` class itself (so they must be provided to even create a builder instance at all), while optional fields are set via separate chainable methods with sensible defaults if left unset, exactly as shown with `Pizza.Builder`'s required `size` constructor parameter versus its optional `cheese`/`pepperoni`/`mushrooms` methods.
+
+**9. What is the relationship between the Builder pattern and Lombok's `@Builder` annotation?**
+Lombok's `@Builder` annotation automatically generates the exact boilerplate a hand-written Builder implementation requires (the nested builder class, chainable setter methods, and a `build()` method) directly from a class's fields via annotation processing, eliminating the need to manually write and maintain that repetitive code by hand while achieving the identical resulting API and behavior.
+
+**10. Why is `private final` used for `Pizza`'s fields in the Builder example, and how does the private constructor participate in constructing an immutable object?**
+`private final` fields, set only once during construction and never exposed via setters, make the resulting `Pizza` object immutable after construction — directly reflecting the immutability principles discussed for records (Chapter 51) and general encapsulation (Chapter 9). The private constructor accepts a fully-configured `Builder` instance and copies its accumulated field values into the final `Pizza` object's own immutable fields in one step, ensuring `Pizza` itself can never be instantiated except through the builder's controlled, validated process.
+
+**11. Should the Singleton pattern be considered a generally desirable, frequently-applicable pattern in modern application design?**
+It's often viewed with some caution in modern practice — a global, single, mutable instance can make unit testing harder (since tests can't easily substitute a different instance or reset state cleanly between tests) and can introduce hidden, implicit dependencies between unrelated parts of a codebase. In frameworks like Spring, the "singleton scope" (the default bean scope) achieves the same one-instance-per-application-context effect through dependency injection instead, which is generally considered a cleaner, more testable alternative to manually implementing the classic Singleton pattern directly in application code.
+
+**12. How does dependency injection (as used extensively in Spring) relate to the Factory pattern conceptually?**
+Both decouple the code that *uses* an object from the code that *creates* it — a factory explicitly creates and hands back an object on request, while a dependency injection container automatically constructs and supplies (injects) required dependencies into a class without that class needing to know how those dependencies are actually constructed at all. In a sense, a DI container acts as a highly generalized, configuration-driven factory for an entire application's object graph, rather than requiring hand-written factory classes for each individual type.
+
+**13. Why might using the Abstract Factory pattern be considered overkill for a simple application with only one, fixed "family" of related objects that will never change?**
+Abstract Factory's main value is enabling runtime or configuration-driven switching between multiple interchangeable families of related objects (like themes, or different database vendor implementations) — if an application genuinely only ever needs exactly one fixed set of related objects with no foreseeable need for alternatives, introducing the full abstract factory interface and family-specific factory implementations adds structural complexity and indirection without a corresponding practical benefit, and simpler direct construction (or a plain Factory Method, if even that much flexibility is needed) would likely be a better fit.

@@ -1,0 +1,238 @@
+---
+title: "Spring Data JPA Basics: Entities, Repositories & Hibernate Essentials"
+description: "Persist and retrieve real data with almost no boilerplate — how @Entity, Spring Data repositories, and Hibernate fit together underneath a Spring Boot application."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 9
+tags: ["Spring Boot", "Spring Data JPA", "Hibernate"]
+---
+
+Everything so far has used a service layer that "just returns" data. It's time to persist it for real. This chapter covers JPA and Hibernate fundamentals through Spring Data — enough to build genuine CRUD functionality; Chapter 10 goes deeper into querying.
+
+## JPA, Hibernate, and Spring Data — three different things
+
+It's a common interview point of confusion, so it's worth being precise:
+
+- **JPA (Jakarta Persistence API)** is a *specification* — a set of interfaces and annotations (`@Entity`, `EntityManager`, JPQL) describing how Java objects map to relational tables. It defines no implementation itself.
+- **Hibernate** is the most widely used *implementation* of that specification — the actual code that translates your `@Entity` classes and JPQL queries into SQL against a real database. Spring Boot uses Hibernate by default.
+- **Spring Data JPA** sits on top of both — it eliminates the boilerplate of writing `EntityManager` code yourself, by generating repository implementations from interfaces you declare.
+
+```
+┌─────────────────────────────────────┐
+│           Spring Data JPA            │   ← generates repository implementations
+├─────────────────────────────────────┤
+│         JPA (the specification)      │   ← @Entity, EntityManager, JPQL
+├─────────────────────────────────────┤
+│      Hibernate (the implementation)  │   ← turns JPA calls into real SQL
+├─────────────────────────────────────┤
+│              JDBC / Database          │
+└─────────────────────────────────────┘
+```
+
+## Setting up
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-jpa</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.postgresql</groupId>
+    <artifactId>postgresql</artifactId>
+    <scope>runtime</scope>
+</dependency>
+```
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/mydb
+    username: app
+    password: secret
+  jpa:
+    hibernate:
+      ddl-auto: validate   # never 'update' in production — see Best Practices below
+    show-sql: true
+```
+
+With this on the classpath, `DataSourceAutoConfiguration` and JPA-related auto-configuration (Chapter 4) wire up a `DataSource`, an `EntityManagerFactory`, and a `PlatformTransactionManager` automatically.
+
+## Defining an entity
+
+```java
+@Entity
+@Table(name = "orders")
+public class Order {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private String customerName;
+
+    @Enumerated(EnumType.STRING)
+    private OrderStatus status;
+
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<OrderItem> items = new ArrayList<>();
+
+    private BigDecimal total;
+
+    protected Order() { }   // required by JPA — never called directly by application code
+
+    public Order(String customerName) {
+        this.customerName = customerName;
+        this.status = OrderStatus.PENDING;
+    }
+
+    // getters, and any behavior methods — omitted for brevity
+}
+```
+
+```java
+@Entity
+public class OrderItem {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne
+    @JoinColumn(name = "order_id")
+    private Order order;
+
+    private Long productId;
+    private int quantity;
+}
+```
+
+- `@Id`/`@GeneratedValue` marks the primary key and how it's generated (`IDENTITY` delegates to the database's auto-increment).
+- `@Enumerated(EnumType.STRING)` stores enums as readable strings (`"PENDING"`) rather than the default ordinal integer, which silently breaks if you ever reorder the enum's constants.
+- `@OneToMany`/`@ManyToOne` define the relationship; `mappedBy` on the `@OneToMany` side means `OrderItem.order` owns the foreign key — the `orders` table doesn't get an extra join column.
+- The no-args constructor is required by the JPA specification (Hibernate needs it to instantiate entities via reflection) — mark it `protected`, not `public`, so application code is nudged toward the meaningful constructor instead.
+
+## Declaring a repository
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long> {
+}
+```
+
+That's the entire implementation. `JpaRepository<Order, Long>` (entity type, ID type) already provides `save()`, `findById()`, `findAll()`, `delete()`, `count()`, and more — Spring Data generates a working implementation of this interface at startup; you never write a class that implements it.
+
+```java
+@Service
+class OrderService {
+
+    private final OrderRepository orderRepository;
+
+    OrderService(OrderRepository orderRepository) {
+        this.orderRepository = orderRepository;
+    }
+
+    OrderResponse findById(Long id) {
+        Order order = orderRepository.findById(id)
+            .orElseThrow(() -> new OrderNotFoundException(id));
+        return toResponse(order);
+    }
+
+    OrderResponse create(CreateOrderRequest request) {
+        Order order = new Order(request.customerName());
+        return toResponse(orderRepository.save(order));
+    }
+}
+```
+
+Notice `findById` returns `Optional<Order>` — Spring Data uses `Optional` precisely so "not found" is an explicit, compiler-enforced case rather than a `null` that's easy to forget to check.
+
+## Derived query methods
+
+Spring Data can generate query implementations directly from a method name, with no query body at all:
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long> {
+
+    List<Order> findByStatus(OrderStatus status);
+
+    List<Order> findByCustomerNameContainingIgnoreCase(String namePart);
+
+    Optional<Order> findFirstByCustomerNameOrderByIdDesc(String customerName);
+
+    boolean existsByCustomerNameAndStatus(String customerName, OrderStatus status);
+}
+```
+
+Spring Data parses the method name (`findBy`, `Containing`, `IgnoreCase`, `OrderBy`, `Desc`, `existsBy`, and dozens of other keywords) into the corresponding JPQL query at startup — no annotation, no implementation, and it fails fast (an application startup error) if the method name doesn't correspond to real entity fields. Chapter 10 covers `@Query`, Specifications, and pagination for anything this naming convention can't express cleanly.
+
+## Best practices & gotchas
+
+- **Never use `ddl-auto: update` (or `create`) in production.** It lets Hibernate silently alter your production schema based on entity changes — unpredictable and dangerous. Use `validate` (fails startup if entities and schema disagree) in every real environment, and manage actual schema changes explicitly with Flyway or Liquibase (Chapter 12).
+- **Always use `@Enumerated(EnumType.STRING)`, never the default `ORDINAL`.** Ordinal storage saves the enum's position as an integer — reordering or inserting a new constant later silently corrupts existing data with no error at all.
+- **Return DTOs from the service layer, never entities**, exactly as emphasized in Chapter 6 — this becomes more important now: returning an entity risks lazy-loading exceptions or accidental full-object serialization outside a transaction.
+- **Watch derived query method names as they grow.** `findByCustomerNameAndStatusAndCreatedAtBetween(...)` is valid but unreadable — once a query needs more than two or three conditions, `@Query` (Chapter 10) is usually clearer.
+- **Understand that `save()` on an entity with an existing ID performs an `UPDATE`, not an `INSERT`.** Spring Data JPA decides this based on whether the entity's ID is `null` (new) or set (existing) — a common source of confusion when manually constructing an entity with a client-supplied ID.
+
+## Quick reference
+
+| Concept | Purpose |
+|---|---|
+| `@Entity` | Marks a class as a JPA-managed persistent type |
+| `@Id` / `@GeneratedValue` | Primary key and its generation strategy |
+| `@OneToMany` / `@ManyToOne` / `@ManyToMany` | Entity relationships |
+| `JpaRepository<T, ID>` | Base interface providing CRUD out of the box |
+| Derived query methods | Query implementations generated from method names |
+| `ddl-auto: validate` | Verifies entities match the schema; never auto-alters it |
+| Flyway/Liquibase | The correct way to manage real schema changes (Chapter 12) |
+
+## Wrapping up
+
+You can now persist and retrieve real entities with almost no boilerplate — the repository interface pattern is Spring Data JPA's core value proposition. Derived query methods cover a lot of ground, but real applications need more expressive querying, pagination, and projections. That's **Chapter 10**.
+
+## Interview Questions
+
+**1. What's the difference between JPA, Hibernate, and Spring Data JPA?**
+JPA is a specification defining how Java objects map to relational data, with no implementation of its own. Hibernate is the most common implementation of that specification, actually translating entity operations and JPQL into SQL. Spring Data JPA sits on top of both, eliminating boilerplate by generating repository implementations from interfaces, so you don't write `EntityManager` code directly for standard CRUD and query operations.
+
+**2. What does `JpaRepository<Order, Long>` give you without writing any implementation?**
+Standard CRUD operations — `save()`, `findById()`, `findAll()`, `deleteById()`, `count()`, `existsById()` — plus pagination and sorting support inherited from `PagingAndSortingRepository`, all implemented automatically by Spring Data at application startup via a dynamic proxy, with zero hand-written implementation code.
+
+**3. Why does `findById()` return `Optional<Order>` instead of `Order` (possibly `null`)?**
+To make the "entity might not exist" case explicit and compiler-visible, rather than relying on callers to remember to null-check. `Optional` forces a deliberate decision at the call site — `.orElseThrow(...)`, `.map(...)`, or an explicit `.isPresent()` check — reducing the risk of an unchecked `NullPointerException` later.
+
+**4. How do derived query methods work — how does Spring Data know what SQL to generate from a method name like `findByCustomerNameContainingIgnoreCase`?**
+Spring Data parses the method name against a defined grammar of keywords (`findBy`, property names matching entity fields, `Containing`, `IgnoreCase`, `And`, `Or`, `OrderBy`, `Desc`, etc.) at application startup, and builds the corresponding JPQL query from that structure. If a method name references a property that doesn't exist on the entity, the application fails to start with a clear error — the check happens at startup, not silently at runtime.
+
+**5. What's the difference between `@OneToMany(mappedBy = "order")` and having no `mappedBy`?**
+`mappedBy = "order"` declares that the *other* side of the relationship (`OrderItem.order`, a `@ManyToOne` field) owns the foreign key — meaning the `orders` table gets no extra join column; the foreign key lives on `order_items`. Omitting `mappedBy` on a `@OneToMany` (using a plain bidirectional or unidirectional mapping) typically causes Hibernate to create and manage an additional join table or join column, which is usually not what's intended for a straightforward parent-child relationship.
+
+**6. Why should `@Enumerated(EnumType.STRING)` always be used instead of the default?**
+The default, `EnumType.ORDINAL`, stores an enum constant's *position* in its declaration (0, 1, 2...) as the database value. If the enum's constants are ever reordered, or a new constant is inserted anywhere but the end, every previously stored ordinal now silently refers to the wrong constant — with no error, just corrupted data. `EnumType.STRING` stores the constant's name instead, which is stable regardless of how the enum's declaration order changes later.
+
+**7. Why is `spring.jpa.hibernate.ddl-auto=update` considered dangerous in production?**
+It lets Hibernate automatically alter the database schema at startup to match your current entity definitions — adding columns, sometimes changing types — without review, a migration script, or a rollback path. In production this risks unexpected, unreviewed schema changes and potential data loss; schema changes should instead go through an explicit, version-controlled migration tool like Flyway or Liquibase (Chapter 12), with `ddl-auto` set to `validate` or `none`.
+
+**8. What does `ddl-auto: validate` do differently from `update`?**
+`validate` checks, at startup, that the existing database schema is compatible with your entity mappings, and fails the application from starting at all if they disagree — it never modifies the schema itself. This makes schema drift a loud, immediate startup failure instead of a silent runtime surprise, while still keeping the actual schema change process entirely in the hands of an explicit migration tool.
+
+**9. What happens when you call `save()` on an entity — how does Spring Data JPA decide whether to `INSERT` or `UPDATE`?**
+Spring Data JPA inspects the entity's ID field: if it's `null` (or, for non-primitive/wrapper IDs, considered "new" by the configured `Persistable` logic), it performs an `INSERT`; if the ID is already set, it performs a `merge`, which Hibernate translates into an `UPDATE` (after first checking whether a row with that ID exists). This is why manually setting a client-supplied ID on a "new" entity before calling `save()` can unexpectedly behave like an update rather than an insert.
+
+**10. What is the purpose of the required no-args constructor on a JPA entity?**
+JPA implementations like Hibernate need to instantiate entity objects via reflection when loading data from the database, before any field values are known — this requires a no-argument constructor to exist, even if application code never calls it directly. Marking it `protected` rather than `public` satisfies this requirement while still steering application code toward the meaningful, business-intent constructor.
+
+**11. What's the difference between `@ManyToOne` and `@OneToMany`, using the `Order`/`OrderItem` example?**
+`OrderItem` has `@ManyToOne` on its `order` field, meaning many `OrderItem` rows can reference one `Order` — and this side owns the foreign key (`order_id` on the `order_items` table). `Order` has `@OneToMany(mappedBy = "order")` on its `items` field, representing the inverse, non-owning side of the same relationship — Hibernate uses `mappedBy` to know it should look at `OrderItem.order` to determine the actual foreign key rather than creating a separate join table.
+
+**12. What does `cascade = CascadeType.ALL` and `orphanRemoval = true` do on the `Order.items` relationship?**
+`CascadeType.ALL` means operations performed on the `Order` (persist, merge, remove, etc.) automatically cascade to its associated `OrderItem`s — saving a new `Order` with new `OrderItem`s in its `items` list persists all of them together in one call, with no need to save each `OrderItem` separately. `orphanRemoval = true` additionally ensures that removing an `OrderItem` from the `items` list (without deleting the `Order` itself) deletes that orphaned `OrderItem` row from the database.
+
+**13. When would a derived query method name become a bad idea, even though it technically works?**
+Once a query needs more than two or three conditions, or needs a join, subquery, or aggregation the naming convention doesn't cleanly express, the method name becomes long and hard to read at a glance (e.g., `findByCustomerNameAndStatusAndCreatedAtBetweenOrderByCreatedAtDesc`). At that point, an explicit `@Query` annotation (Chapter 10) with a readable JPQL or native query is clearer and easier to maintain.
+
+**14. Why shouldn't a `@RestController` return a JPA `@Entity` directly, especially now that entities have relationships?**
+Serializing an entity directly can trigger lazy-loading of its associations outside of an active transaction/persistence context, throwing a `LazyInitializationException`, or — if the association is eager or gets initialized in time — can produce deeply nested, potentially circular JSON that leaks internal structure never meant to be part of the public API. Mapping to a dedicated response DTO avoids both problems and keeps the API contract independent of the entity's internal shape.
+
+**15. What determines which database Spring Boot's JPA auto-configuration connects to, and what auto-configures if you add an H2 dependency with no explicit `spring.datasource.url`?**
+The `spring.datasource.*` properties (`url`, `username`, `password`) determine the target database when explicitly set. If no URL is configured but an embedded database driver like H2 is on the classpath, Spring Boot's `DataSourceAutoConfiguration` automatically configures an in-memory embedded database instead — commonly used for local development and tests without needing a real database running at all.

@@ -1,0 +1,230 @@
+---
+title: "Securing Microservices: mTLS, OAuth2 Client Credentials & JWT Propagation"
+description: "Chapter 15 secured a request from an external client. This chapter secures everything that happens after — the internal calls between order-service, inventory-service, and every other service in the chain."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 33
+tags: ["Spring Boot", "Microservices Security", "mTLS", "OAuth2"]
+---
+
+Chapter 15 covered securing the boundary between an external client and the system — typically the gateway, per Chapter 26. This chapter covers what secures the calls *behind* that boundary: `order-service` calling `inventory-service`, `inventory-service` calling `payment-service`, and so on, none of which are directly exposed to the public internet but all of which still need genuine security.
+
+## Why "it's internal, so it's safe" is a dangerous assumption
+
+A common but risky assumption is that traffic between services, staying within a private network, doesn't need the same security rigor as external traffic. This ignores **defense in depth** — if any single service or the network itself is ever compromised, unsecured internal traffic gives an attacker free lateral movement across the entire system. Zero-trust architecture treats every call, internal or external, as needing verification.
+
+## Option 1: Propagating the user's identity forward
+
+The simplest approach for calls made *on behalf of* an authenticated user: forward the same JWT the gateway already validated (Chapter 15) to downstream services.
+
+```java
+@Service
+class OrderService {
+
+    Mono<InventoryResponse> checkStock(Long productId, String incomingToken) {
+        return webClientBuilder.build()
+            .get()
+            .uri("http://inventory-service/api/inventory/{id}", productId)
+            .header("Authorization", "Bearer " + incomingToken)
+            .retrieve()
+            .bodyToMono(InventoryResponse.class);
+    }
+}
+```
+
+```java
+@Component
+class TokenPropagationInterceptor implements ClientHttpRequestInterceptor {
+
+    @Override
+    public ClientHttpResponse intercept(HttpRequest request, byte[] body, ClientHttpRequestExecution execution) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth instanceof JwtAuthenticationToken jwtAuth) {
+            request.getHeaders().add("Authorization", "Bearer " + jwtAuth.getToken().getTokenValue());
+        }
+        return execution.execute(request, body);
+    }
+}
+```
+
+`inventory-service` then validates that forwarded token exactly as it would any directly-received request (Chapter 15's resource-server setup), and — crucially — can make its own authorization decisions based on the *original user's* identity and roles, not just "some internal service called me." This preserves end-to-end user context across the entire call chain.
+
+## Option 2: Service-to-service identity with OAuth2 Client Credentials
+
+Not every internal call happens on behalf of a specific user — a scheduled job (Chapter 21) in `inventory-service` calling `notification-service` has no user context to propagate at all. The **OAuth2 Client Credentials grant** issues a token representing the *calling service itself* as the identity, rather than a user.
+
+```yaml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          inventory-service-client:
+            client-id: inventory-service
+            client-secret: ${INVENTORY_SERVICE_SECRET}
+            authorization-grant-type: client_credentials
+            scope: notification:send
+        provider:
+          my-provider:
+            token-uri: https://auth.example.com/oauth2/token
+```
+
+```java
+@Service
+class NotificationClient {
+
+    private final OAuth2AuthorizedClientManager authorizedClientManager;
+
+    void sendNotification(NotificationRequest request) {
+        OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest
+            .withClientRegistrationId("inventory-service-client")
+            .principal("inventory-service")
+            .build();
+        OAuth2AuthorizedClient client = authorizedClientManager.authorize(authorizeRequest);
+        String token = client.getAccessToken().getTokenValue();
+
+        webClient.post()
+            .uri("http://notification-service/api/notifications")
+            .header("Authorization", "Bearer " + token)
+            .bodyValue(request)
+            .retrieve();
+    }
+}
+```
+
+```
+inventory-service                              notification-service
+    │ 1. request a token AS ITSELF                    │
+    │    (client_id + client_secret)                  │
+    ▼                                                  │
+Auth Server ──2. issues a token identifying──▶         │
+              "inventory-service" as the caller,       │
+              scoped to "notification:send"            │
+    │                                                  │
+    │ 3. calls with that token ───────────────────────▶│ validates: is this
+                                                        │ caller "inventory-service"
+                                                        │ and does it have the
+                                                        │ "notification:send" scope?
+```
+
+This is the same resource-server validation pattern from Chapter 15, just with the token representing a *service identity* rather than a *user identity* — and **scopes** (`notification:send`) let `notification-service` enforce exactly what `inventory-service` is allowed to do, rather than granting it blanket trust.
+
+## Option 3: mTLS — verifying the connection itself
+
+**Mutual TLS (mTLS)** goes a layer below application-level tokens entirely: both the client *and* the server present certificates during the TLS handshake, so each side cryptographically verifies the other's identity before any application data is even exchanged.
+
+```yaml
+server:
+  ssl:
+    client-auth: need           # require the CLIENT to present a certificate too
+    trust-store: classpath/truststore.p12
+    key-store: classpath/keystore.p12
+```
+
+```
+Normal TLS:                          mTLS:
+Client verifies server's cert         Client verifies server's cert
+Server does NOT verify client         Server ALSO verifies client's cert
+(anyone can connect and talk           (only holders of a certificate signed
+ HTTPS to the server)                   by a trusted CA can connect at all)
+```
+
+mTLS is commonly deployed at the infrastructure level — a **service mesh** (Istio, Linkerd) can enforce mTLS between every service in a cluster automatically, without individual services needing to implement certificate handling themselves — making it a natural fit specifically for securing the network layer uniformly across an entire system, complementing rather than replacing the application-level token approaches above.
+
+## Best practices & gotchas
+
+- **Never assume internal network traffic is inherently safe.** Defense in depth means every service should independently verify who's calling it, regardless of whether the call originated from outside or inside the network perimeter.
+- **Choose the right identity model per call type.** Propagate the user's JWT for calls made on the user's behalf (preserving their specific authorization context); use Client Credentials for calls with no user context at all (scheduled jobs, background processing); consider mTLS as a network-layer complement to either, not a replacement.
+- **Scope service-to-service tokens narrowly.** `inventory-service`'s token for calling `notification-service` should carry only the specific scope it actually needs (`notification:send`), not blanket access — exactly the least-privilege principle from Chapter 16's RBAC/ABAC discussion, applied to services instead of users.
+- **A service mesh can offload mTLS enforcement from application code entirely**, which is often the more practical choice at scale than every individual service implementing certificate handling manually — know that this option exists rather than assuming mTLS must always be hand-rolled in application code.
+- **Token propagation needs to happen consistently across every outbound call**, exactly like the trace-context propagation gotcha from Chapter 31 — a single unpropagated call silently breaks the security chain (and the user-context chain) at that specific point, which is easy to miss until it causes an authorization bug or, worse, a security gap.
+
+## Quick reference
+
+| Approach | Identity represented | Best for |
+|---|---|---|
+| JWT propagation | The original end user | Calls made on behalf of a specific user |
+| OAuth2 Client Credentials | The calling service itself | Calls with no user context (jobs, background processing) |
+| mTLS | The connection/network identity | Network-layer trust, often via a service mesh |
+
+## Wrapping up
+
+Securing a microservices system means securing every hop, not just the front door — this chapter closes that gap using the exact same Spring Security foundations from Part 4, extended across service boundaries. **Chapter 34** is Part 7's capstone: designing a complete microservices system that pulls together everything from Chapters 23 through 33.
+
+## Interview Questions
+
+**1. Why is "internal network traffic doesn't need the same security as external traffic" considered a dangerous assumption?**
+It ignores the defense-in-depth principle — if any single component, credential, or the network perimeter itself is ever compromised (which does happen in practice), unsecured internal traffic would give an attacker unrestricted lateral movement across every other service in the system, with no additional barrier to slow or stop them. Treating internal calls with the same rigor as external ones (zero-trust) means a single compromise doesn't automatically cascade into full system compromise.
+
+*Follow-up: What's a realistic scenario where a compromised component might allow an attacker to reach the "internal" network in the first place, despite it not being directly exposed to the public internet?* A vulnerability in any single externally-facing component — a misconfigured service accidentally exposed, a compromised dependency in one service's supply chain, or a compromised employee credential granting VPN/internal network access — could give an attacker a foothold inside what was assumed to be a trusted internal network; zero-trust security assumes this kind of breach is a realistic possibility rather than something perimeter security alone reliably prevents.
+
+**2. What's the difference in purpose between propagating a user's JWT and using OAuth2 Client Credentials for a service-to-service call?**
+Propagating the user's JWT preserves the original end user's identity and authorization context through the call chain — appropriate when a downstream service's authorization decision should depend on *who the original user is* (their roles, their own resource ownership). OAuth2 Client Credentials instead establishes an identity for the *calling service itself*, appropriate when there's no user context at all (a scheduled job, background processing) or when the downstream authorization decision should be based on which service is calling, not which user originally triggered it.
+
+*Follow-up: Could a single call chain reasonably need both — the calling service's own identity and the original user's identity — represented together?* Yes — some systems combine both, forwarding the user's JWT for user-context authorization decisions while also using a distinct service identity (perhaps as an additional header or a separate token) to verify which specific service is making the call, since these represent two genuinely different questions ("who is this action being performed for" and "which service is actually making this network request") that a downstream service might need to answer both of, depending on its specific authorization requirements.
+
+**3. Why does a scheduled job (like the one covered in Chapter 21) calling another service typically need OAuth2 Client Credentials rather than JWT propagation?**
+A scheduled job isn't triggered by any specific user's request — it runs independently on its own timeline with no incoming user session or JWT to propagate at all; there's simply no user identity available in that context to forward. Client Credentials solves this by letting the job's own service authenticate as itself, representing "this call is being made by `inventory-service`'s scheduled job," which is the only identity actually available and meaningful in that scenario.
+
+*Follow-up: If `notification-service` receives a call from `inventory-service`'s scheduled job using a Client Credentials token, what kind of authorization decision might it reasonably make differently than it would for a call carrying a propagated user JWT?* It might restrict the scheduled job's Client Credentials token to only the specific scopes needed for that automated process (e.g., only `notification:send-batch` for a bulk automated notification), and might apply different rate limits, logging, or monitoring for service-identity-authenticated calls compared to user-JWT-authenticated ones — since a service's automated calls often have different expected volume and behavior patterns than a specific user's individual interactive requests.
+
+**4. What does "scope" mean in the context of an OAuth2 Client Credentials token, and why does this chapter recommend scoping tokens narrowly?**
+A scope represents a specific, limited permission or capability a token grants — `notification:send` in this chapter's example grants only the ability to trigger sending a notification, not broad, unrestricted access to every capability `notification-service` might expose. Scoping narrowly follows the least-privilege principle (echoing Chapter 16's RBAC/ABAC discussion): if `inventory-service`'s credentials or token were ever somehow compromised, the resulting damage is limited to only what that narrow scope actually permits, rather than granting broad, unrestricted access to everything `notification-service` can do.
+
+*Follow-up: What would be the risk of issuing every internal service a token with unrestricted, all-scopes access for convenience, rather than carefully scoping each service's tokens to only what it actually needs?* A single compromised service's credentials would then grant an attacker access to every capability across every downstream service accepting that broad token, rather than being contained to just the specific, narrow actions that service's legitimate business need actually requires — turning what should be a contained, limited-impact compromise into a much broader one, defeating much of the practical security benefit that per-service, scoped tokens are meant to provide in the first place.
+
+**5. What is mTLS, and how does it differ from the standard TLS used for typical HTTPS connections?**
+In standard TLS, only the client verifies the server's certificate (confirming it's talking to the legitimate server), while the server generally doesn't verify anything about the client's identity beyond the connection itself. Mutual TLS (mTLS) requires *both* sides to present and verify certificates — the server also verifies the client's certificate — meaning only clients holding a certificate signed by a mutually trusted certificate authority can even establish a connection at all, providing cryptographic identity verification at the network/transport layer itself, before any application-level token or authentication even comes into play.
+
+*Follow-up: Since mTLS verifies identity at the connection level, does it eliminate the need for application-level authentication like JWT validation?* Not necessarily — mTLS and application-level tokens (JWT propagation, Client Credentials) address different, complementary layers of trust: mTLS confirms "this connection is genuinely between two services holding valid, trusted certificates," while an application-level token still carries additional context (which specific user, which specific scopes/permissions) that mTLS alone doesn't convey — many systems use both together, with mTLS securing the transport layer uniformly and tokens carrying the more granular, context-specific authorization information on top of that secured connection.
+
+**6. What is a service mesh, and how does it relate to implementing mTLS across a microservices system?**
+A service mesh (like Istio or Linkerd) is infrastructure that manages service-to-service communication concerns — including automatically establishing and enforcing mTLS between every service in the mesh — typically implemented via lightweight proxies (sidecars) deployed alongside each service instance, handling the certificate management and mTLS handshake transparently at the network layer without individual services needing to implement any of that certificate-handling logic in their own application code.
+
+*Follow-up: What's the practical benefit of enforcing mTLS via a service mesh compared to having every individual Spring Boot service implement its own certificate configuration (as shown in this chapter's `server.ssl` example)?* A service mesh centralizes and automates certificate issuance, rotation, and mTLS enforcement uniformly across every service in the cluster, without each individual team/service needing to correctly implement, configure, and maintain their own certificate handling (a task that's easy to get subtly wrong and tedious to keep consistent across many services) — at the cost of adding the mesh itself as a piece of infrastructure the team needs to operate, but generally providing more consistent, centrally-managed security enforcement than expecting every service to correctly self-implement the same thing independently.
+
+**7. Why does the chapter describe token propagation as having "exactly the same gotcha" as trace-context propagation from Chapter 31?**
+Both rely on every outbound call in a chain correctly and consistently forwarding some piece of context (a trace ID in Chapter 31's case, an authentication token in this chapter's case) — if any single service in a multi-hop call chain fails to propagate that context on an outbound call it makes (perhaps because it's using a client that bypasses the standard, instrumented/interceptor-equipped mechanism), the chain breaks silently at exactly that point, with no obvious immediate error, but a real gap in either observability (Chapter 31) or, in this chapter's case, security continuity.
+
+*Follow-up: What would be a security consequence, specifically, of a service failing to propagate a user's JWT on one specific outbound call within a longer chain?* The downstream service receiving that un-propagated call would either reject it outright (if it correctly requires authentication and finds none present, which is at least a visible, safe failure), or — more dangerously, if that downstream service was misconfigured to trust any internal caller without independently verifying credentials — it might process the request without any real authorization check against the original user's actual identity and permissions at all, potentially allowing an action the original user was never actually authorized to perform, since their identity/context was lost partway through the chain.
+
+**8. Why might a system choose to combine JWT propagation, OAuth2 Client Credentials, and mTLS together, rather than relying on just one of the three?**
+Each addresses a different aspect of the overall security picture: JWT propagation preserves user-specific authorization context through user-initiated call chains; Client Credentials establishes service identity for calls with no user context; and mTLS secures the underlying network connection itself, verifying that services are genuinely talking to other legitimate, trusted services regardless of what application-level token is (or isn't) present. Using all three together provides defense in depth across different layers, rather than relying on a single mechanism to carry the full weight of the system's internal security.
+
+*Follow-up: If a system could only realistically implement one of these three approaches due to resource or complexity constraints, which would you argue provides the most foundational protection, and why?* This is genuinely context-dependent, but mTLS (often via a service mesh, minimizing the implementation burden on individual services) is sometimes argued as the most foundational layer, since it provides baseline protection against unauthorized network-level access regardless of whether every individual application-level token-passing detail has been implemented perfectly everywhere — though this foundational protection doesn't substitute for the finer-grained, context-specific authorization that JWT propagation and Client Credentials scopes provide, so it's best understood as a strong base layer rather than a complete, sufficient solution on its own.
+
+**9. How does this chapter's approach to securing service-to-service calls relate to the API Gateway's role in centralizing authentication, as covered in Chapter 26?**
+The gateway (Chapter 26) centralizes and validates authentication once, at the system's external boundary — but that validation doesn't automatically extend to every subsequent internal call a request triggers as it flows through multiple backend services; this chapter's mechanisms (JWT propagation, Client Credentials, mTLS) are specifically what extends verified identity and trust *past* the gateway, into and through the internal service-to-service call chain the gateway's own validation doesn't directly cover.
+
+*Follow-up: Does having a gateway that validates authentication at the perimeter mean internal services can skip re-validating a propagated JWT themselves, trusting the gateway already checked it?* Generally, no — per the zero-trust and defense-in-depth principles emphasized throughout this chapter, each internal service should still independently validate a propagated JWT it receives (using the same resource-server pattern from Chapter 15) rather than blindly trusting that "the gateway already checked this," since that blind trust is exactly the kind of assumption that breaks down if the internal network is ever compromised or if a request somehow reaches a service without having actually passed through the gateway's validation in the first place (echoing the concern raised in Chapter 26 about backend services trusting gateway-validated traffic without independent verification).
+
+**10. What's the relationship between "least privilege" (mentioned regarding OAuth2 scopes) and the RBAC/ABAC authorization models covered in Chapter 16?**
+Least privilege is the same underlying security principle — granting only the minimum access actually needed for a specific purpose — applied here to service identities and their scoped tokens, exactly as Chapter 16's RBAC (roles) and ABAC (attribute-based rules) applied it to user authorization; whether the entity being granted access is a human user or an automated service, the same principle of minimizing granted permissions to only what's genuinely necessary reduces the potential impact of any single credential or identity being compromised.
+
+*Follow-up: Could OAuth2 scopes for service-to-service calls be thought of as a form of RBAC applied to services rather than users?* Yes, reasonably — a scope like `notification:send` functions analogously to a role or permission grant in RBAC, just assigned to a service's client credentials rather than a human user's account; the underlying mechanism (checking whether the presented token carries a specific granted permission before allowing a specific action) is conceptually very similar to how Chapter 14's `hasRole('ADMIN')` or Chapter 16's `@PreAuthorize` checks work for user-based authorization, just applied to inter-service trust instead of user-to-resource trust.
+
+**11. Why is it important that `notification-service` in the Client Credentials example independently validates the incoming token's scope, rather than simply trusting that any successfully-authenticated caller is allowed to send notifications?**
+Successful authentication only confirms *who* is calling (in this case, that it's genuinely `inventory-service`, and not an impostor) — it says nothing on its own about *what that caller is authorized to do*. Without an explicit scope check, any successfully-authenticated service (not just ones that legitimately need to send notifications) could potentially call the notification-sending endpoint, since authentication alone wouldn't distinguish between "an authenticated caller" and "an authenticated caller who is specifically permitted to trigger notifications" — exactly the same authentication-vs-authorization distinction established back in Chapter 14, now applied to service-to-service calls.
+
+*Follow-up: What Spring Security mechanism from earlier chapters would `notification-service` likely use to enforce this scope check on the incoming request?* The same `authorizeHttpRequests` or `@PreAuthorize`-based authorization mechanisms from Chapters 14 and 16 — configuring the security filter chain (or a method-level check) to require the presence of the specific `notification:send` scope/authority in the validated token, exactly analogous to requiring a specific role for a user-authenticated request, just checking for a scope claim within a service-identity token instead.
+
+**12. Why might a team be tempted to skip implementing proper service-to-service security during initial microservices development, and what's the risk of that approach?**
+Early in a system's development, the internal network might genuinely be small, simple, and seemingly low-risk, and implementing full service-to-service security (token propagation, Client Credentials setup, potentially mTLS) adds real upfront complexity and development time that can feel unnecessary when "it's just internal services talking to each other during development." The risk is that retrofitting proper security into a system after many services already exist and interact in undisciplined, unauthenticated ways is considerably harder and more disruptive than building it in from the start — and a system that's grown without this discipline is genuinely vulnerable in production to exactly the lateral-movement risk described at the start of this chapter, not just a theoretical concern.
+
+*Follow-up: How does this echo a broader theme already established across Chapters 23 and elsewhere in Part 7 regarding the trade-offs of microservices adoption?* This mirrors the "honest trade-offs, not a one-directional upgrade" framing from Chapter 23 — just as splitting into microservices has real, upfront costs that need to be deliberately budgeted for (operational overhead, distributed data consistency, and now, comprehensive internal security), skipping the security investment because it feels unnecessary early on is the same kind of premature-optimization-in-reverse mistake as splitting into microservices without a genuine driver in the first place: deferring a real, known cost doesn't make it disappear, it just makes it more expensive and disruptive to address later.
+
+**13. If `order-service` calls `inventory-service`, which then calls `pricing-service`, and the original request carries a user's JWT — should `inventory-service` forward that same JWT to `pricing-service`, or should it use its own Client Credentials identity instead?**
+This depends on whether `pricing-service`'s authorization decision should depend on the original user's identity/permissions or on which service is calling it — if pricing rules or access depend on the specific user (e.g., a special negotiated price tier for that particular customer), forwarding the original JWT preserves that necessary context; if `pricing-service`'s response is the same regardless of which user ultimately triggered the request (a generic price lookup with no user-specific variation), using `inventory-service`'s own Client Credentials identity is simpler and avoids unnecessarily propagating user-specific tokens through calls that don't actually need that context.
+
+*Follow-up: What's a security argument for forwarding the original JWT even when the immediate call doesn't strictly need user-specific data, purely for downstream auditability?* Forwarding the original user's identity throughout the entire call chain — even through calls that don't themselves make user-specific decisions — preserves a complete, accurate audit trail showing exactly which original user ultimately triggered every downstream action across the whole system, which can be valuable for compliance, security investigation, and understanding real usage patterns, even in cases where the immediate authorization decision at a given hop doesn't specifically depend on that user context.
+
+**14. How would you explain, to a developer new to microservices, why a call between two internal services needs authentication at all, given that a firewall or network policy already restricts which services can even reach each other?**
+Network-level restrictions (firewalls, network policies) control *which network paths exist at all* — they don't verify *who or what is actually making a specific request* once a network path does exist between two services; if an attacker manages to compromise any service or gain any foothold within the permitted network boundary (a real possibility this chapter's earlier discussion covered), network policy alone provides no further verification of the calling identity or its actual authorization for the specific action being attempted — application-level authentication and authorization (this chapter's mechanisms) provide that additional, necessary layer of verification that network policy alone cannot.
+
+*Follow-up: Is there ever a genuinely low-risk scenario where relying purely on network-level restrictions without additional application-level authentication might be considered acceptable?* Possibly for extremely low-stakes, non-sensitive internal operations within a very tightly controlled, small-scale environment with strong compensating controls (thorough network segmentation, strict access controls to the environment itself, no sensitive data involved) — but this is a narrow, carefully-justified exception rather than a general recommendation, and as a system and its internal network grow in complexity and the number of services/teams involved, the case for relying on network isolation alone weakens considerably, which is exactly why this chapter recommends application-level security as the default, not the exception.
+
+**15. Summarize how this chapter's three approaches (JWT propagation, OAuth2 Client Credentials, mTLS) together address the security gap left open by Chapters 15 and 26's focus on the external-facing boundary.**
+Chapters 15 and 26 secured the perimeter — validating and authenticating requests as they enter the system through the gateway. This chapter extends that same rigor inward, ensuring every subsequent internal call — whether made on behalf of a user (JWT propagation), by an automated process with no user context (Client Credentials), or simply establishing basic network-level trust between services (mTLS) — is independently verified rather than implicitly trusted just because it originates from inside the network perimeter, directly addressing the zero-trust, defense-in-depth principle this chapter opened with.
+
+*Follow-up: Looking back across Chapters 23 through 33, how does this chapter's security focus fit into the overall progression of problems Part 7 has addressed?* Chapters 23–32 progressively built the infrastructure and patterns needed to split a system into independently deployable, discoverable, configurable, resilient, and consistency-managed services — but none of that infrastructure inherently makes the resulting system secure; this chapter completes the picture by ensuring that the same distributed architecture, now fully functional and observable (Chapter 31) and consistency-aware (Chapter 32), is also genuinely trustworthy at every internal boundary, setting up Chapter 34's capstone to pull every one of these concerns together into one coherent, complete system design.

@@ -1,0 +1,81 @@
+---
+title: "Chapter 95: Interview Grab Bag 2 — LLM/GenAI Fundamentals, Fine-Tuning & Serving"
+description: "A dedicated interview-question chapter covering Parts 8-10: LLM foundations, fine-tuning and adaptation, and inference/serving at scale — cross-cutting questions spanning the LLM-infrastructure arc."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 15
+partTitle: "Dedicated Interview-Only Chapters"
+chapter: 95
+totalChapters: 96
+tags: ["ai-system-design", "interview-prep", "llm-fundamentals", "fine-tuning", "llm-serving", "grab-bag"]
+---
+
+## Introduction
+
+This chapter continues Chapter 94's format — pure interview questions, no new material — drawing exclusively from Parts 8-10 (Chapters 36-57): LLM foundations, fine-tuning and adaptation, and LLM inference and serving at scale. As with Chapter 94, questions here deliberately cross Part boundaries within this arc, testing integrative understanding of how foundational LLM concepts connect to fine-tuning decisions and serving-infrastructure trade-offs.
+
+---
+
+## Interview Questions
+
+**1. Why is hallucination described as an inherent characteristic of how LLMs generate text, rather than a bug that better training can fully eliminate?**
+An LLM generates the statistically most plausible next token given its training, with no built-in mechanism to verify factual correctness against ground truth at generation time — this means even a well-trained model will occasionally generate fluent, plausible-sounding but factually incorrect content, since fluency and factual correctness are optimized somewhat independently, requiring grounding techniques (RAG) or careful evaluation rather than expecting training alone to eliminate the phenomenon entirely.
+
+**2. Why does RAG address hallucination more directly than simply using a larger, more capable base model?**
+A larger model still relies on its own parametric knowledge, which is fixed at training time and inherently bounded — RAG instead grounds generation in externally retrieved, verifiable content at inference time, addressing the root cause (lack of access to current, specific, verifiable information) rather than hoping increased scale alone reduces the frequency of fabrication.
+*Follow-up: When would a larger base model still be the more appropriate choice over RAG?*
+When the task requires reasoning or synthesis capability rather than access to specific factual knowledge — RAG helps with knowledge grounding but doesn't improve a model's underlying reasoning ability, meaning a harder reasoning task might genuinely benefit more from a more capable base model than from additional retrieved context.
+
+**3. Why does the choice between full fine-tuning and parameter-efficient fine-tuning (PEFT, e.g., LoRA) hinge primarily on available compute and the risk of catastrophic forgetting?**
+Full fine-tuning updates every model parameter, requiring substantial compute and carrying real risk of degrading the model's general capabilities outside the fine-tuning domain (catastrophic forgetting); PEFT techniques update only a small number of additional parameters, dramatically reducing compute cost and largely preserving the base model's original capabilities, making PEFT the generally preferred default unless a specific need demonstrably requires full fine-tuning's greater capacity for change.
+
+**4. Why might RLHF (reinforcement learning from human feedback) be necessary even after supervised fine-tuning has already been applied?**
+Supervised fine-tuning teaches a model to imitate specific example outputs, but doesn't directly optimize for the qualitative properties (helpfulness, harmlessness, honesty) humans actually care about beyond just matching examples — RLHF directly optimizes toward a learned reward signal reflecting human preferences, addressing dimensions of quality that supervised imitation alone doesn't directly target.
+
+**5. Why does KV caching dramatically improve LLM inference throughput, and what's the specific cost trade-off it introduces?**
+KV caching avoids recomputing attention keys and values for previously-processed tokens on every new token generated, turning an otherwise quadratic-in-sequence-length computation into a much cheaper incremental one — the trade-off is memory consumption, since the cache grows with sequence length and must be held in GPU memory for the duration of generation, directly constraining how many concurrent requests a given hardware configuration can serve.
+
+**6. Why does continuous batching outperform static batching for LLM serving specifically, more so than it would for a classical ML model?**
+LLM generation involves highly variable-length outputs per request (unlike a classical model's typically fixed-cost single inference) — static batching forces the entire batch to wait for the longest-running request to complete before processing the next batch, wasting significant compute on completed-but-waiting slots; continuous batching allows completed requests to exit and new requests to join a batch dynamically, better utilizing the same hardware over LLM's specifically variable-length workload.
+
+**7. Why is quantization (reducing model weight precision) usually more impactful for serving cost reduction than for training cost reduction?**
+Serving cost is typically dominated by inference-time memory bandwidth and compute, both of which quantization directly reduces by shrinking the per-weight bit-width; training's dominant cost driver is often the sheer volume of gradient computation and optimizer state across many iterations, where full precision is frequently still needed for stable convergence, making quantization's cost-saving leverage asymmetrically larger at serving time than during training.
+
+**8. Why does a model cascade (routing easy queries to a smaller model, hard queries to a larger one) require an upfront classification or confidence-estimation step, and what's the risk if this step is unreliable?**
+The cascade's entire cost-saving premise depends on correctly identifying which queries are genuinely "easy" enough for the smaller model to handle well — an unreliable classification step could route genuinely hard queries to the smaller model (producing poor quality without the user ever benefiting from the larger model's capability) or route genuinely easy queries unnecessarily to the larger model (eliminating the cost savings the cascade was built to capture), making this routing step's own reliability a first-class engineering concern, not an afterthought.
+
+**9. Why might a team choose to serve a fine-tuned, smaller model over a larger, general-purpose model via API for a narrow, well-defined production task?**
+For a genuinely narrow, well-defined task, a smaller fine-tuned model can match or exceed a much larger general-purpose model's task-specific accuracy at dramatically lower serving cost and latency, directly following this series' "specialization improves reliability within a narrower scope" principle — though this requires validating the narrower model's performance empirically rather than assuming fine-tuning alone guarantees sufficient quality.
+
+**10. Why does prompt engineering alone sometimes fail to achieve a desired behavior that fine-tuning could reliably achieve?**
+Prompt engineering works within the model's existing, fixed behavior distribution — it can elicit different behaviors the model is already capable of producing, but cannot fundamentally change the model's underlying tendencies or teach it a genuinely new skill or knowledge pattern; fine-tuning directly modifies the model's weights, capable of instilling behaviors or knowledge that no amount of prompting alone could reliably achieve.
+
+**11. Why is speculative decoding an effective LLM serving optimization, and what specific property of LLM generation does it exploit?**
+Speculative decoding uses a small, fast "draft" model to generate several candidate tokens quickly, then has the large, target model verify them in a single parallel pass rather than generating each token sequentially — this exploits the fact that verifying a token (checking if it matches what the large model would have generated) is much cheaper than generating it token-by-token, allowing meaningful latency reduction when the draft model's predictions are frequently correct.
+
+**12. Why does context window size directly affect both cost and quality in a way a classical ML model's input size typically doesn't?**
+LLM cost scales directly with token count processed (both input and output), meaning a larger context window directly and proportionally increases per-request cost — and beyond a certain length, models can exhibit degraded attention to specific relevant details buried within a very long context ("lost in the middle" effects), meaning simply maximizing context window usage isn't free from either a cost or quality perspective, unlike many classical ML models where input size has a more fixed, bounded cost profile.
+
+**13. Why might catastrophic forgetting be a more severe risk for full fine-tuning on a narrow, specialized dataset than for fine-tuning on a broad, diverse dataset?**
+A narrow dataset provides gradient signal pulling the model's weights strongly toward that specific domain's patterns, with little counterbalancing signal preserving the model's original, broader capabilities — a broader, more diverse fine-tuning dataset naturally provides more varied gradient signal, reducing (though not eliminating) the risk that the model's general capabilities degrade as a side effect of specialization.
+
+**14. Why does tokenization choice affect an LLM's cost and performance on non-English languages, connecting to a consideration a purely English-focused system design might overlook?**
+Most widely-used tokenizers are trained predominantly on English text, meaning non-English text (especially languages with different scripts) often tokenizes into a larger number of tokens per unit of actual content — directly increasing cost (more tokens billed) and potentially degrading quality (the model has less efficient access to meaning per token) for non-English use cases, a genuine consideration for any system serving a multilingual user base.
+
+**15. Why is model distillation (training a smaller "student" model to mimic a larger "teacher" model) sometimes preferred over training a small model from scratch on the same task?**
+The teacher model's output distribution (not just its final hard predictions) carries richer information about relative confidence and uncertainty across possible outputs than a hard-labeled training set alone provides — training the student to match this richer signal ("soft labels") typically produces better student performance than training on hard labels alone, especially when labeled data for the target task is limited.
+
+**16. Why might a serving system need a request queue and admission-control mechanism specifically for LLM inference, beyond what a typical low-latency classical ML serving system requires?**
+LLM inference's highly variable per-request cost (proportional to output length) makes naive, unlimited request acceptance risk overwhelming available GPU memory (especially given KV cache's growing memory footprint per active request) — an admission-control mechanism explicitly manages how many requests can be concurrently processed given the hardware's actual capacity, a more acute concern than for classical ML models whose per-request cost is typically far more predictable and bounded.
+
+**17. Why does evaluating a fine-tuned model require checking for regression on the base model's ORIGINAL capabilities, not just improvement on the fine-tuning target task?**
+Fine-tuning risks catastrophic forgetting — improving the target task while silently degrading unrelated capabilities the model previously had; an evaluation checking only the target task's improvement would miss this trade-off entirely, requiring a broader evaluation suite spanning both the new, specialized capability and a representative sample of the model's original, general capabilities before considering the fine-tuning genuinely successful.
+
+**18. Why might in-context learning (providing examples within the prompt) sometimes achieve comparable results to fine-tuning for a specific task, and when does this comparison break down?**
+For tasks well within a model's existing general capability, well-chosen in-context examples can effectively "steer" the model's behavior at inference time without any weight updates, achieving surprisingly strong results cheaply; this comparison breaks down for tasks requiring genuinely new knowledge or skill the model's base training never covered, or for tasks needing extremely high, consistent reliability at scale, where fine-tuning's more durable, baked-in behavior change becomes the more dependable choice.
+
+**19. Why does a serving system's choice of hardware (GPU generation, memory capacity) directly constrain which model-serving optimizations are even available, rather than these being independent decisions?**
+Techniques like larger batch sizes, longer context windows, or serving larger models all directly depend on available GPU memory capacity — a hardware choice made without considering which serving optimizations it needs to support can inadvertently foreclose techniques (like continuous batching at meaningful scale) that would otherwise provide substantial cost or latency benefits, making hardware and serving-architecture decisions genuinely interdependent rather than sequential, independent choices.
+
+**20. What is the single most important, unifying lesson these LLM-infrastructure chapters (Parts 8-10) collectively establish, that a candidate should carry into every subsequent question about RAG or agentic systems?**
+That every LLM-specific technique in this arc — RAG, fine-tuning, cascades, quantization, speculative decoding — represents a deliberate trade-off between cost, latency, and quality, calibrated to a specific application's actual, measured needs rather than a universally "best" choice; this same trade-off-calibration discipline is exactly what this series' later Parts (11-14) apply to retrieval architecture, agentic tool-use scope, and safety-layer investment, confirming this arc's material as the direct technical and economic foundation everything that follows builds upon.

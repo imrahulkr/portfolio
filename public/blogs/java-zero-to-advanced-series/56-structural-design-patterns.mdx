@@ -1,0 +1,198 @@
+---
+title: "Structural Design Patterns: Adapter, Decorator, Proxy"
+description: "Adapter for incompatible interfaces, Decorator for dynamically layering behavior, and Proxy for controlling access — including how Spring's AOP uses proxies."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Design Patterns & Clean Code"
+chapter: 56
+totalChapters: 65
+slug: "structural-design-patterns"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "design-patterns", "adapter", "decorator", "proxy"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## What Structural Patterns Address
+
+Structural patterns deal with how classes and objects are **composed** to form larger, more capable structures — often connecting components that weren't originally designed to work together, or adding capability without modifying existing code.
+
+## Adapter — Bridging Incompatible Interfaces
+
+Converts one interface into another that client code actually expects, letting otherwise-incompatible classes work together.
+
+```java
+// Existing, third-party class with an interface you can't change
+public class LegacyRectangle {
+    public void drawWithCoordinates(int x1, int y1, int x2, int y2) { /* ... */ }
+}
+
+// The interface YOUR code actually expects
+public interface Shape {
+    void draw(int x, int y, int width, int height);
+}
+
+// The adapter — bridges the two
+public class RectangleAdapter implements Shape {
+    private final LegacyRectangle legacyRectangle;
+
+    public RectangleAdapter(LegacyRectangle legacyRectangle) {
+        this.legacyRectangle = legacyRectangle;
+    }
+
+    @Override
+    public void draw(int x, int y, int width, int height) {
+        legacyRectangle.drawWithCoordinates(x, y, x + width, y + height);   // translates the call
+    }
+}
+```
+
+```java
+Shape shape = new RectangleAdapter(new LegacyRectangle());
+shape.draw(0, 0, 100, 50);   // client code uses the familiar Shape interface, unaware of LegacyRectangle underneath
+```
+
+A real, everyday Java example: `Arrays.asList()` adapts a plain array into the `List` interface, and `InputStreamReader` (Chapter 28) adapts a byte-stream `InputStream` into the character-stream `Reader` interface.
+
+![Diagram: client code calling Shape.draw() on an Adapter object, which internally translates and delegates the call to the incompatible LegacyRectangle.drawWithCoordinates() method](/diagrams/ch56-adapter-interface-translation.svg)
+
+## Decorator — Adding Behavior Dynamically, Without Subclassing
+
+Wraps an object to add new behavior or responsibilities, without modifying the original class or requiring a rigid subclass hierarchy for every possible combination of features.
+
+```java
+public interface Coffee {
+    double cost();
+    String description();
+}
+
+public class SimpleCoffee implements Coffee {
+    public double cost() { return 2.0; }
+    public String description() { return "Coffee"; }
+}
+
+public abstract class CoffeeDecorator implements Coffee {
+    protected final Coffee decoratedCoffee;
+    public CoffeeDecorator(Coffee coffee) { this.decoratedCoffee = coffee; }
+}
+
+public class MilkDecorator extends CoffeeDecorator {
+    public MilkDecorator(Coffee coffee) { super(coffee); }
+    public double cost() { return decoratedCoffee.cost() + 0.5; }
+    public String description() { return decoratedCoffee.description() + " + Milk"; }
+}
+
+public class SugarDecorator extends CoffeeDecorator {
+    public SugarDecorator(Coffee coffee) { super(coffee); }
+    public double cost() { return decoratedCoffee.cost() + 0.2; }
+    public String description() { return decoratedCoffee.description() + " + Sugar"; }
+}
+```
+
+```java
+Coffee order = new SugarDecorator(new MilkDecorator(new SimpleCoffee()));
+System.out.println(order.description());   // "Coffee + Milk + Sugar"
+System.out.println(order.cost());           // 2.7
+```
+
+Each decorator wraps the previous layer, adding its own contribution while delegating to the wrapped object for the rest — exactly the same structural idea already covered concretely in Chapter 28's `java.io` stream classes (`new BufferedReader(new FileReader(...))`), which is the JDK's own canonical real-world use of this pattern.
+
+**Decorator vs. subclassing:** to get every combination of milk/sugar/whip via subclassing alone, you'd need a separate class for each combination (`CoffeeWithMilk`, `CoffeeWithSugar`, `CoffeeWithMilkAndSugar`, ...) — an exponential explosion of classes as more optional add-ons are introduced. Decorators compose freely at runtime instead, needing only one class per add-on.
+
+## Proxy — Controlling Access to an Object
+
+Provides a stand-in/placeholder for another object, controlling access to it — for lazy initialization, access control, logging, or remote communication, all without the client code needing to know the difference.
+
+```java
+public interface Image {
+    void display();
+}
+
+public class RealImage implements Image {
+    private final String filename;
+    public RealImage(String filename) {
+        this.filename = filename;
+        loadFromDisk();   // expensive — happens immediately on construction
+    }
+    private void loadFromDisk() { System.out.println("Loading " + filename); }
+    public void display() { System.out.println("Displaying " + filename); }
+}
+
+public class ProxyImage implements Image {
+    private final String filename;
+    private RealImage realImage;   // NOT created until actually needed
+
+    public ProxyImage(String filename) { this.filename = filename; }
+
+    public void display() {
+        if (realImage == null) {                    // lazy initialization
+            realImage = new RealImage(filename);
+        }
+        realImage.display();
+    }
+}
+```
+
+```java
+Image image = new ProxyImage("photo.jpg");   // no expensive loading happens yet
+// ... later, only when actually displayed:
+image.display();   // NOW the expensive RealImage is created and loaded
+```
+
+### Dynamic Proxies and Spring AOP
+
+Java's built-in `java.lang.reflect.Proxy` can generate a proxy implementing a given set of interfaces **at runtime**, without writing a dedicated proxy class by hand — this is precisely the mechanism underlying much of **Spring's AOP (Aspect-Oriented Programming)**: annotations like `@Transactional` and `@Cacheable` work by having Spring generate a runtime proxy around your bean that wraps your actual method call with the additional transaction-management or caching logic, entirely transparently to your own code.
+
+![Diagram: Spring generating a dynamic proxy around a @Transactional-annotated bean, showing calls being intercepted by the proxy to wrap the actual business logic with transaction begin/commit/rollback](/diagrams/ch56-spring-aop-dynamic-proxy.svg)
+
+**Decorator vs. Proxy — a common point of confusion:** structurally, both wrap an object behind the same interface. The distinction is intent: Decorator's purpose is *adding new behavior/responsibility*; Proxy's purpose is *controlling access* to the underlying object (lazy loading, security checks, remote invocation) without fundamentally changing what it does.
+
+## Key Takeaways
+
+- Adapter translates one interface into another that client code expects, without modifying either the client or the adapted class.
+- Decorator wraps an object to layer on additional behavior dynamically, avoiding an exponential subclass explosion for combinable features — `java.io`'s stream classes are the JDK's own canonical example.
+- Proxy controls access to an object (lazy loading, security, remote calls) behind the same interface, transparently to the client — Spring AOP's `@Transactional`/`@Cacheable` are built on exactly this mechanism via dynamic proxies.
+- Decorator and Proxy share the same wrapping structure; the difference is intent — adding behavior versus controlling access.
+
+---
+
+## Interview Questions
+
+**1. What problem does the Adapter pattern solve?**
+It lets two otherwise-incompatible interfaces work together by introducing a translating layer — the adapter implements the interface client code expects, and internally delegates to (and translates calls for) the existing, incompatible class it wraps, without requiring changes to either the client code or the original incompatible class.
+
+**2. Give a real, built-in Java example of the Adapter pattern.**
+`InputStreamReader` (Chapter 28) adapts a byte-oriented `InputStream` into the character-oriented `Reader` interface, translating raw bytes into characters according to a specified charset — letting character-stream-based code work with an underlying byte stream source without needing to handle that conversion itself.
+
+**3. What problem does the Decorator pattern solve, particularly compared to using subclassing alone?**
+It lets behavior be added to an individual object dynamically, at runtime, by wrapping it in one or more decorator layers — each contributing its own additional behavior while delegating to the wrapped object for the rest. Subclassing alone would require a separate, explicitly-defined subclass for every possible *combination* of optional behaviors, leading to an exponential explosion of classes as more independently-combinable features are added, which Decorator avoids entirely by composing wrapper objects at runtime instead.
+
+**4. What's a real, built-in Java example of the Decorator pattern?**
+The `java.io` stream classes (Chapter 28) — `new BufferedReader(new FileReader("data.txt"))` wraps a `FileReader` with buffering behavior, and further wrapping with `new LineNumberReader(...)` could add line-tracking on top of that, each layer adding its own specific capability while delegating the more basic read operation to the object it wraps.
+
+**5. What is the core purpose of the Proxy pattern, and how does it differ conceptually from Decorator despite the similar wrapping structure?**
+Proxy's purpose is controlling *access* to an object — enabling lazy initialization, access/security checks, logging, or remote communication — without changing what the underlying object fundamentally does. Decorator's purpose is *adding new behavior or responsibility* to an object. Structurally both involve one object wrapping another behind a shared interface, but the intent distinguishes them: access control versus behavior extension.
+
+**6. What is lazy initialization, and how does the `ProxyImage` example demonstrate it?**
+Lazy initialization defers creating an expensive resource until it's actually needed, rather than eagerly creating it upfront regardless of whether it will ever be used. `ProxyImage` implements this by not constructing the actual `RealImage` (which performs expensive disk loading in its constructor) until `display()` is first called, avoiding that cost entirely for images that are created but never actually displayed.
+
+**7. What is a dynamic proxy in Java, and what problem does it solve compared to writing a dedicated proxy class by hand for every interface you want to proxy?**
+`java.lang.reflect.Proxy` can generate a proxy class implementing a specified set of interfaces entirely at runtime, routing every method call through a single `InvocationHandler` you provide, rather than requiring a separate, hand-written proxy class explicitly implementing each interface method individually. This is far more scalable when the same general cross-cutting behavior (like logging or transaction management) needs to be applied uniformly across many different interfaces/classes, without writing a dedicated boilerplate proxy class for each one.
+
+**8. How does Spring's `@Transactional` annotation relate to the Proxy pattern?**
+When you annotate a Spring-managed bean's method with `@Transactional`, Spring generates a runtime proxy around that bean (either a dynamic proxy for interface-based beans, or a CGLIB-based subclass proxy for concrete classes) that intercepts calls to the annotated method, wrapping your actual business logic with the necessary transaction begin/commit/rollback logic before and after delegating to your real method — entirely transparently, without your own class needing to contain any transaction-management code itself.
+
+**9. Why might `@Transactional` silently fail to apply when a method calls another `@Transactional`-annotated method on the *same* object internally (a well-known Spring AOP proxy pitfall)?**
+Because the transactional behavior is implemented via a proxy wrapping the *external* calls to the bean — an internal method call made directly via `this.otherMethod()` from within the same object bypasses the proxy entirely (it's a plain, direct Java method call, not a call routed through the proxy), so the proxy never gets a chance to intercept it and apply the transactional wrapping logic, a classic and commonly-tested gotcha with Spring's proxy-based AOP approach.
+
+**10. Can the Decorator pattern change the interface a client interacts with, or must it preserve the original interface?**
+A Decorator must implement the same interface as the object it wraps, so that from the client's perspective, a decorated object is indistinguishable in terms of *which* operations are available — it can only add to or modify the *behavior* behind those existing interface methods (as shown by `MilkDecorator`/`SugarDecorator` both still implementing the same `Coffee` interface as `SimpleCoffee`), never introduce entirely new methods the client wouldn't already expect from that interface.
+
+**11. What's an example scenario where the Proxy pattern would be used for access control/security rather than performance (lazy loading)?**
+A `SecureDocumentProxy` implementing the same `Document` interface as a real document object, but checking the current user's permissions before delegating a `read()` or `write()` call through to the real, wrapped document — throwing an access-denied exception or silently restricting behavior if the check fails, entirely transparently to code that only interacts with the `Document` interface and has no awareness that a security-checking proxy sits in front of the real implementation.
+
+**12. Why is understanding the Proxy pattern useful for debugging unexpected Spring behavior, such as `ClassCastException` involving CGLIB-generated class names?**
+Spring's proxy-based AOP mechanism (used for `@Transactional`, `@Cacheable`, `@Async`, and more) means the object you actually receive from a Spring context for a proxied bean is often not literally an instance of your original class, but a dynamically-generated proxy subclass or interface implementation wrapping it — understanding this explains otherwise-mysterious behavior like certain reflection-based type checks unexpectedly failing, or seeing CGLIB-related class names in stack traces, both of which trace directly back to the proxy mechanism actually being used underneath Spring's declarative annotations.

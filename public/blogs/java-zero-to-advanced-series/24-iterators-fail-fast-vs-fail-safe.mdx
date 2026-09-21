@@ -1,0 +1,158 @@
+---
+title: "Iterators, Fail-Fast vs. Fail-Safe"
+description: "The Iterator/ListIterator pattern, ConcurrentModificationException and modCount, and how fail-safe iterators like CopyOnWriteArrayList's differ."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Strings, Generics & Collections"
+chapter: 24
+totalChapters: 65
+slug: "iterators-fail-fast-vs-fail-safe"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "collections", "iterators"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## The `Iterator` Pattern
+
+Every `Collection` provides an `iterator()` method returning an `Iterator<T>`, which is the actual mechanism a for-each loop compiles down to (as noted back in Chapter 5).
+
+```java
+List<String> names = new ArrayList<>(List.of("a", "b", "c"));
+Iterator<String> it = names.iterator();
+
+while (it.hasNext()) {
+    String name = it.next();
+    if (name.equals("b")) {
+        it.remove();   // the ONLY safe way to remove elements during iteration
+    }
+}
+System.out.println(names);   // [a, c]
+```
+
+`Iterator` provides `hasNext()`, `next()`, and `remove()` — notably, `remove()` here is safe precisely *because* it goes through the iterator itself, which keeps its own internal bookkeeping in sync with the modification.
+
+## `ListIterator` — Bidirectional, With Insertion
+
+`List` additionally provides `listIterator()`, returning a `ListIterator` that can traverse backward as well as forward, and supports `set()` and `add()` during iteration, not just `remove()`.
+
+```java
+List<String> names = new ArrayList<>(List.of("a", "b", "c"));
+ListIterator<String> it = names.listIterator();
+
+while (it.hasNext()) {
+    String name = it.next();
+    if (name.equals("b")) {
+        it.set("B");    // replace the just-returned element
+    }
+}
+System.out.println(names);   // [a, B, c]
+```
+
+## `ConcurrentModificationException` and `modCount`
+
+Most standard collections (`ArrayList`, `HashMap`, `HashSet`, etc.) are **fail-fast**: they maintain an internal `modCount` field, incremented on every structural modification (add/remove, not simple `set()`). Each iterator captures the `modCount` value at creation time, and checks it against the current value on every `next()`/`remove()` call — a mismatch immediately throws `ConcurrentModificationException`.
+
+```java
+List<String> names = new ArrayList<>(List.of("a", "b", "c"));
+
+for (String name : names) {
+    if (name.equals("b")) {
+        names.remove(name);   // modifies the list directly, bypassing the iterator's own remove()
+    }
+}
+// Throws ConcurrentModificationException on the NEXT call to it.next() —
+// the for-each loop's implicit iterator detects the modCount mismatch
+```
+
+![Diagram: ArrayList's modCount incrementing on a direct list.remove() call, then the iterator's next() call detecting the mismatch against its own expectedModCount and throwing ConcurrentModificationException](/diagrams/ch24-modcount-fail-fast.svg)
+
+**Important nuance:** fail-fast behavior is a *best-effort* safety net, not a hard guarantee — the JDK explicitly documents that `ConcurrentModificationException` should never be relied upon for correctness (only for catching bugs during development), since certain modification patterns can go undetected.
+
+## Fail-Safe Iterators
+
+Some collections, particularly those in `java.util.concurrent`, provide **fail-safe** iterators that don't throw `ConcurrentModificationException` at all, because they iterate over a stable snapshot rather than the live structure.
+
+```java
+CopyOnWriteArrayList<String> list = new CopyOnWriteArrayList<>(List.of("a", "b", "c"));
+
+for (String name : list) {
+    list.add("d");   // no exception — the iterator is walking a snapshot taken at iterator-creation time
+}
+```
+
+`CopyOnWriteArrayList`'s iterator holds a reference to the array as it existed at the moment the iterator was created — any subsequent modification creates an entirely new backing array (hence "copy on write"), leaving the iterator's snapshot untouched and safe to keep traversing. The trade-off: the iterator may not reflect the most recent modifications, and it doesn't support `remove()`/`add()`/`set()` (`UnsupportedOperationException`), since there's no live structure for it to modify. `ConcurrentHashMap`'s iterators are similarly weakly-consistent rather than throwing (covered further in Chapter 41).
+
+## Removing Elements Safely During Iteration
+
+```java
+// UNSAFE — direct removal during for-each
+for (String name : names) {
+    if (shouldRemove(name)) {
+        names.remove(name);   // ConcurrentModificationException likely
+    }
+}
+
+// SAFE — Iterator.remove()
+Iterator<String> it = names.iterator();
+while (it.hasNext()) {
+    if (shouldRemove(it.next())) {
+        it.remove();
+    }
+}
+
+// SAFE — Collection.removeIf() (Java 8+), most concise
+names.removeIf(name -> shouldRemove(name));
+```
+
+`removeIf()` is generally the cleanest modern option when the only goal is conditional removal — it handles the iteration and safe removal internally.
+
+## Key Takeaways
+
+- `Iterator.remove()` is the only safe way to remove elements mid-iteration on a standard fail-fast collection; direct collection mutation during a for-each loop risks `ConcurrentModificationException`.
+- Fail-fast detection is best-effort, not a strict guarantee — never rely on it for correctness, only for catching bugs.
+- Fail-safe iterators (`CopyOnWriteArrayList`, `ConcurrentHashMap`) iterate over a stable snapshot or weakly-consistent view instead of throwing, trading strict up-to-dateness for safety.
+- `Collection.removeIf()` (Java 8+) is usually the cleanest way to express conditional removal.
+
+---
+
+## Interview Questions
+
+**1. What does "fail-fast" mean in the context of Java collection iterators?**
+It means the iterator actively detects unexpected structural modification to the underlying collection made outside the iterator itself (e.g., calling `list.remove()` directly during a for-each loop) and immediately throws `ConcurrentModificationException` on the next iterator operation, rather than continuing to operate on a now-inconsistent internal state and potentially producing corrupted or unpredictable results.
+
+**2. How does `modCount` enable fail-fast behavior internally?**
+The collection maintains an internal counter, `modCount`, incremented every time a structural modification occurs (add/remove — but notably not a simple element replacement via `set()`, which doesn't change the collection's structure). Each iterator captures the collection's `modCount` value at the moment it's created (`expectedModCount`), and compares it against the collection's current `modCount` on every `next()` and `remove()` call — any mismatch means an unexpected modification happened outside the iterator, triggering the exception.
+
+**3. Why does `it.remove()` not trigger `ConcurrentModificationException`, while `list.remove()` inside the same loop does?**
+`Iterator.remove()` performs the removal *and* updates its own `expectedModCount` to match the collection's new `modCount` in the same operation, keeping the two values synchronized. Calling `list.remove()` directly bypasses the iterator entirely — the collection's `modCount` increments, but the iterator's `expectedModCount` doesn't, so the next comparison detects the mismatch.
+
+**4. Is `ConcurrentModificationException` guaranteed to be thrown whenever a collection is modified during iteration? Why does the JDK documentation caution against relying on it?**
+No — fail-fast detection is explicitly documented as best-effort. Certain modification sequences (for example, removing the second-to-last element from a small `ArrayList` in a way that happens not to trigger a detectable `modCount` mismatch on the subsequent `hasNext()`/`next()` call) can go undetected. The JDK documentation states this behavior should be used only to detect bugs during development and testing, never as a correctness mechanism a program's logic depends on.
+
+**5. What's the difference between `Iterator` and `ListIterator`?**
+`Iterator` supports only forward traversal with `hasNext()`/`next()`, plus `remove()`. `ListIterator` (available only on `List` implementations) additionally supports backward traversal (`hasPrevious()`/`previous()`), retrieving the current index (`nextIndex()`/`previousIndex()`), and in-place modification via `set()` and insertion via `add()` during iteration — none of which plain `Iterator` offers.
+
+**6. What is a fail-safe iterator, and how does `CopyOnWriteArrayList` achieve fail-safe behavior?**
+A fail-safe iterator does not throw `ConcurrentModificationException` even if the underlying collection is modified during iteration, because it isn't operating on the live, mutable structure at all. `CopyOnWriteArrayList` achieves this by having every mutating operation (`add`, `remove`, `set`) create and swap in an entirely new backing array — an iterator created before such a modification retains a reference to the *old* array, which remains completely unchanged and safe to keep traversing, effectively iterating a frozen snapshot.
+
+**7. What operations does a `CopyOnWriteArrayList` iterator not support, and why?**
+It doesn't support `remove()`, `add()`, or `set()` — attempting any of them throws `UnsupportedOperationException` — because the iterator is walking an immutable snapshot array with no connection back to the live collection's current backing array, so there's nothing for it to meaningfully mutate in place.
+
+**8. Why is `CopyOnWriteArrayList` generally unsuitable for write-heavy workloads despite being thread-safe and fail-safe?**
+Every single mutating operation copies the *entire* backing array, which is an O(n) operation regardless of how small the actual change is — for a list with frequent writes, this becomes extremely expensive both in CPU time and in garbage-collector pressure from the constant array allocation. It's specifically designed for read-heavy, write-rare scenarios (like a small list of registered event listeners), where reads vastly outnumber writes.
+
+**9. What is `Collection.removeIf()`, and why is it generally preferred over a manual iterator loop for conditional removal?**
+Introduced in Java 8, `removeIf(Predicate<? super E> filter)` removes every element matching the given predicate, handling the underlying safe iteration and removal internally within a single, more concise, and more readable method call — expressing the *intent* ("remove elements matching this condition") directly rather than the *mechanism* (manually managing an iterator loop with explicit `remove()` calls).
+
+**10. What happens if two separate `Iterator` instances are created for the same `ArrayList`, and one of them removes an element via `it.remove()`?**
+The iterator that performed the removal correctly updates its own `expectedModCount` to match, and continues safely. The *other*, unrelated iterator still holds its original `expectedModCount` value, which now no longer matches the collection's updated `modCount` — its next `next()` or `remove()` call throws `ConcurrentModificationException`, since from that second iterator's perspective, an unexpected external modification occurred.
+
+**11. Are `HashMap`'s `keySet()`, `values()`, and `entrySet()` iterators also fail-fast?**
+Yes — these are live views backed by the same underlying map structure and share the same `modCount`-based fail-fast mechanism as the map itself, so structurally modifying the map directly while iterating any of these views (without going through that iterator's own `remove()`) triggers the same `ConcurrentModificationException` behavior.
+
+**12. If you need to iterate a collection and conditionally modify (not just remove) its elements safely across multiple threads, is a fail-safe iterator like `CopyOnWriteArrayList`'s sufficient?**
+Not necessarily — a fail-safe iterator only guarantees it won't throw due to concurrent modification and that it can keep traversing its own consistent snapshot; it does not provide atomicity for compound read-modify-write sequences across threads, nor does it guarantee the snapshot reflects the very latest state. Genuine multi-threaded coordination of modifications typically still requires explicit synchronization or a concurrency-aware data structure with the specific atomic operations you need (covered in Chapter 41), chosen based on the actual consistency requirements of the use case.

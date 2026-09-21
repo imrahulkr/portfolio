@@ -1,0 +1,103 @@
+---
+title: "Core Java & OOP — Interview Deep Dive"
+description: "A comprehensive, standalone interview-prep chapter covering Java fundamentals and object-oriented programming — scenario questions, tricky edge cases, and cross-topic comparisons drawn from Chapters 1-15."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Dedicated Interview Prep"
+chapter: 63
+totalChapters: 65
+slug: "interview-core-java-and-oop"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "interview-prep", "core-java", "oop"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 24
+---
+
+This chapter is a standalone interview-prep resource covering Core Java fundamentals and OOP (Chapters 1–15), organized as scenario-based and comparison questions you're likely to face in an actual interview — the kind that combine several concepts at once rather than testing one topic in isolation. Each topic chapter earlier in this series covers its own material in depth with full explanations; this chapter assumes that grounding and focuses on synthesis, tricky edge cases, and "what would you actually say in the room" framing.
+
+## JVM, Memory & Fundamentals
+
+**1. Explain the full journey of `String s = "hello";` from source code to a runnable program, mentioning every relevant JVM concept.**
+`javac` compiles the source into bytecode referencing the string literal via the constant pool. At runtime, the JVM's class loader loads the containing class, the bytecode verifier checks it for safety, and when this line executes, the JVM checks the string constant pool for an existing `"hello"` — if present, `s` is assigned a reference to that shared pooled object; if not, a new `String` is created in the pool and referenced. No `new String()` call means no separate heap allocation outside the pool.
+
+**2. Why does `Integer a = 127; Integer b = 127; a == b` return `true`, while the same code with `128` returns `false`, and how does this connect to `String` interning?**
+Both rely on caching for frequently-reused immutable values: `Integer` caches boxed values from -128 to 127 via `IntegerCache`, so `127` reuses a cached object while `128` allocates a new one. `String` literals are similarly pooled, but the pool has no numeric range limit — any two identical literals share the same pooled instance regardless of "size." Both cases are a strong practical reminder to use `.equals()`, not `==`, for value comparison of wrapper types and strings.
+
+**3. A colleague says "Java is pass-by-reference for objects." Is this accurate? How would you correct it?**
+It's a common but technically inaccurate claim. Java is strictly pass-by-value, always — for object references, the *value being copied* is the reference (the pointer) itself, not the object. This is why reassigning a parameter inside a method never affects the caller's variable, but mutating the object *through* that copied reference does affect the shared object — both observations are fully consistent with pure pass-by-value semantics, not evidence of pass-by-reference.
+
+## OOP Design Judgment
+
+**4. When would you choose composition over inheritance, and what's a concrete symptom that a class hierarchy has been designed incorrectly?**
+Choose composition whenever the relationship is genuinely "has-a" rather than "is-a" — for example, a `Car` should hold an `Engine`, not extend it. A concrete symptom of incorrect inheritance is the Liskov Substitution violation covered in Chapter 58: if substituting a subclass for its parent breaks reasonable assumptions callers make about the parent's behavior (the classic Square-extends-Rectangle problem), the hierarchy is modeling structural similarity rather than genuine behavioral substitutability.
+
+**5. Explain the difference between compile-time and runtime polymorphism with a scenario where confusing the two would cause a bug.**
+Compile-time polymorphism (overloading) is resolved by the compiler using the declared/static types of arguments; runtime polymorphism (overriding) is resolved by the JVM using the object's actual runtime type via dynamic dispatch. A concrete bug: if you overload a method for `Animal` and `Dog` and call it with a variable declared as `Animal` but holding a `Dog` instance, the *overload* resolution uses the declared type `Animal` (compile-time), not the actual runtime type — surprising developers who expect overload resolution to behave like override resolution.
+
+**6. Why does field access not participate in polymorphism the way method calls do? Give an example where this causes a subtle bug.**
+Fields are resolved statically based on the reference's *declared* type, while methods are resolved dynamically based on the object's *actual* type. If a subclass declares a field with the same name as one in its superclass ("field hiding," not overriding), accessing that field through a superclass-typed reference retrieves the superclass's field, not the subclass's — even though a method call through the same reference would correctly dispatch to the subclass's overridden version. This inconsistency is a classic, deliberately-tricky interview trap.
+
+**7. A class has a `private` constructor and only exposes static factory methods. What design goals does this typically support, and how does it relate to patterns covered elsewhere in this series?**
+This pattern (from Chapter 9's encapsulation and revisited in Chapter 55's Creational Patterns) supports controlling instantiation entirely — enabling caching/reuse of instances, returning a subtype without the caller needing to know, validating inputs before construction with a more descriptive failure than a constructor allows, and enabling patterns like Singleton. Enum-based Singletons (Chapter 55) take this even further by making the JVM's own class-loading guarantee the sole instantiation point.
+
+## Exceptions & Edge Cases
+
+**8. What actually gets returned if a `try` block returns a value, and the `finally` block also contains a `return`? Why is this considered dangerous?**
+The `finally` block's `return` silently overrides and discards the `try` block's return value entirely — even if the `try` block was about to propagate an uncaught exception, a `return` in `finally` swallows it completely with no trace. This is dangerous because it's a silent, easy-to-miss control-flow override that can hide bugs during code review; it's why `return`/`throw` inside `finally` is a well-established anti-pattern.
+
+**9. You catch `Exception e` in a broad top-level handler. What categories of problems does this both solve and potentially mask?**
+It solves the goal of preventing any single unexpected failure from crashing an entire application (useful at genuine top-level boundaries, like a web framework's global exception handler). It risks masking genuine, unrelated bugs — since `RuntimeException` (including `NullPointerException` from a coding mistake) is a subtype of `Exception`, a broad catch can silently treat a real defect the same as an anticipated, recoverable condition, unless the handler at minimum logs the exception with full context for later investigation.
+
+**10. Why is checking `ex instanceof SpecificException` generally preferable to parsing `ex.getMessage()` to determine what went wrong?**
+Message strings are meant for human readers and are not a stable contract — they can change wording between versions or library updates without warning, silently breaking message-parsing logic. The exception's *type* (and any structured fields a custom exception class exposes, per Chapter 26) is the stable, intended way for calling code to programmatically distinguish and react to different failure conditions.
+
+## Enums, Generics & Type System Tricks
+
+**11. Why is an enum considered a safer choice for implementing Singleton than a hand-rolled class with a private constructor and a static `getInstance()` method?**
+The JVM guarantees enum constants are instantiated exactly once during class loading, with no manual synchronization required — this inherently defends against two ways a hand-rolled Singleton can be broken: reflection calling the private constructor directly via `setAccessible(true)`, and deserialization creating a second instance from a serialized stream. A hand-rolled class must explicitly guard against both; an enum sidesteps both automatically.
+
+**12. Explain why `List<String>` and `List<Integer>` are considered the "same type" at runtime, and what practical restrictions this creates.**
+Due to type erasure (Chapter 17), generic type parameters exist only at compile time for type-checking purposes and are erased to their bound (or `Object`) in compiled bytecode — both examples compile down to a raw `List`. This is why you can't create a generic array (`new T[10]`), can't check `instanceof List<String>`, and can't overload two methods differing only by generic type argument — the JVM simply has no runtime record of what the type argument originally was.
+
+**13. When would you use `? extends T` versus `? super T` in a method parameter, and what's the mnemonic for remembering which?**
+PECS: Producer Extends, Consumer Super. Use `? extends T` when the parameter is only being *read from* (a producer of `T` values for your code) — this allows any subtype of `T`, but disallows adding to it, since the compiler can't guarantee type safety for an unknown specific subtype. Use `? super T` when the parameter is only being *written to* (a consumer accepting `T` values from your code) — this allows any supertype of `T`, since inserting a `T` is always safe into a collection typed for some ancestor of `T`.
+
+## Deep-Dive Scenario Questions
+
+**14. Given a class hierarchy `Animal -> Dog -> Puppy`, and a method `void feed(Animal a)`, explain exactly what happens (in order) when you call `feed(new Puppy())`, from compile time through to the method body executing.**
+At compile time, the compiler checks that `Puppy` is assignment-compatible with the `Animal` parameter type (it is, via the inheritance chain) and resolves which *overload* of `feed` to call based on the declared parameter type `Animal`. At runtime, if `feed` internally calls an overridden method on `a` (like `a.makeSound()`), the JVM performs dynamic dispatch based on `a`'s actual runtime type (`Puppy`), looking up `Puppy`'s vtable entry for that method — walking up the inheritance chain to find the nearest actual override if `Puppy` itself doesn't override it, ultimately executing whichever class's implementation is nearest in the chain starting from `Puppy`.
+
+**15. A method `public void process(List<Integer> list)` needs to accept both `ArrayList<Integer>` and read-only `List.of(1,2,3)`. What happens if the method tries to call `list.add(4)` on the latter, and why?**
+It throws `UnsupportedOperationException` — `List.of(...)` (Chapter 18) creates a genuinely immutable collection, distinct from a merely "unmodifiable view" wrapper. The method's parameter type (`List<Integer>`) doesn't distinguish between mutable and immutable implementations at the type level, so this failure only surfaces at runtime when the specific immutable instance is actually passed in and mutation is attempted — a good illustration of why defensive copying or explicit documentation of mutability expectations matters for method contracts.
+
+**16. Explain why overriding `equals()` without overriding `hashCode()` can cause a `HashSet.contains()` check to incorrectly return `false` for an object that "should" be found.**
+`HashSet` uses `hashCode()` to select which internal bucket to search, then `equals()` only to confirm a match *within* that bucket. If two objects are logically equal per your `equals()` override but the default (identity-based) `hashCode()` gives them different hash codes, they land in different buckets — the `contains()` lookup only checks the bucket matching the *searched* object's hash code, and never even reaches the bucket containing the "equal" object that was actually inserted, causing a false negative despite `equals()` itself being correctly implemented.
+
+**17. A subclass overrides a method and changes its checked-exception declarations. What's allowed and what isn't, and why does this rule exist?**
+An overriding method may throw the same checked exceptions, narrower/subtype checked exceptions, fewer of them, or none — but never a new or broader checked exception than the overridden method declared. This preserves substitutability (Liskov, Chapter 58): code calling a method through a superclass-typed reference has already committed to handling (or not handling) only the superclass method's declared exceptions, and a subclass silently introducing a new checked exception type would break that contract for every existing caller.
+
+**18. Why does calling an overridable instance method from within a constructor carry real risk, even though it compiles without any warning?**
+Superclass construction completes fully *before* a subclass's own field initializers run (Chapter 8's initialization order). If the superclass constructor calls an overridable method that a subclass overrides, and that override relies on subclass-specific fields, those fields haven't been initialized yet at that point — the override executes against a still-partially-constructed object, often producing unexpected `null`s, zeros, or other default values that silently corrupt subsequent logic.
+
+**19. Explain the practical difference between `String.equals()`, `==`, and `Objects.equals()`, and when you'd specifically reach for the third.**
+`==` compares references (or primitive values directly). `.equals()` compares logical content but throws `NullPointerException` if called on a `null` reference. `Objects.equals(a, b)` safely handles the case where either argument might be `null` — returning `true` if both are `null`, `false` if only one is, and delegating to `a.equals(b)` otherwise — making it the safer default for comparing two potentially-null references without needing a separate manual null-check first.
+
+**20. What's the difference between a `StackOverflowError` from infinite recursion and an `OutOfMemoryError` from a memory leak, in terms of what JVM resource is actually exhausted?**
+`StackOverflowError` exhausts a single thread's fixed-size call stack — each recursive call pushes another stack frame until that thread's dedicated stack space runs out; it's isolated to that one thread's memory region. `OutOfMemoryError: Java heap space` exhausts the shared heap — objects that remain reachable (intentionally or via an unintended lingering reference, a genuine "leak" in the garbage-collection sense) accumulate until the garbage collector cannot free enough space for a new allocation, a shared, application-wide resource rather than a single thread's private stack.
+
+## Rapid-Fire Comparisons
+
+**21. `abstract class` vs. `interface` — give the one-sentence practical decision rule.**
+Choose an abstract class when related types need to share actual instance *state* and constructor-driven initialization; choose an interface when you're defining a *capability* that otherwise-unrelated classes should be able to implement, especially if a class might need to satisfy several such capabilities at once.
+
+**22. `ArrayList` vs. `LinkedList` — what's the one factor most likely to actually matter in a real system?**
+In practice, `ArrayList`'s superior cache locality (contiguous memory) tends to outweigh `LinkedList`'s theoretical O(1) mid-list insertion advantage for the vast majority of real workloads on modern hardware — `ArrayList` should be the default choice unless profiling specifically shows otherwise.
+
+**23. `HashMap` vs. `TreeMap` vs. `LinkedHashMap` — map each to the one property that should drive the choice.**
+`HashMap`: fastest average-case access, no ordering guarantee needed. `LinkedHashMap`: fastest access *plus* a requirement to iterate in insertion (or access) order. `TreeMap`: a requirement for keys to always be maintained in sorted order, or a need for range/navigation queries (`floorKey`, `ceilingKey`).
+
+**24. `Comparable` vs. `Comparator` — what's the tell-tale sign in a requirement that should make you reach for `Comparator` instead of implementing `Comparable`?**
+If the requirement mentions needing to sort the *same* type in more than one way (e.g., "sort employees by name in one screen, by salary in another"), or if you don't own the class's source code at all, `Comparator` is the right tool — `Comparable` can only ever define one single, intrinsic natural ordering baked directly into the class itself.

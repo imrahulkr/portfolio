@@ -1,0 +1,215 @@
+---
+title: "Request Validation & Global Exception Handling in Spring Boot"
+description: "Turn invalid requests and unexpected failures into consistent, structured error responses using Bean Validation and @ControllerAdvice, instead of leaking stack traces or vague 400s to clients."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 7
+tags: ["Spring Boot", "Validation", "Exception Handling"]
+---
+
+The `OrderController` from Chapter 6 currently has two problems: nothing stops a client from sending an order with a blank customer name, and anything that goes wrong inside `OrderService` (an order not found, a database error) currently produces Spring's generic, unhelpful default error page. This chapter fixes both.
+
+## Bean Validation on request DTOs
+
+```java
+public record CreateOrderRequest(
+    @NotBlank(message = "customerName is required")
+    String customerName,
+
+    @NotEmpty(message = "at least one product is required")
+    List<@Positive Long> productIds
+) { }
+```
+
+```java
+@PostMapping
+ResponseEntity<OrderResponse> create(@Valid @RequestBody CreateOrderRequest request) {
+    OrderResponse created = orderService.create(request);
+    return ResponseEntity.created(URI.create("/api/orders/" + created.id())).body(created);
+}
+```
+
+`@Valid` on the parameter tells Spring MVC to run Bean Validation against the deserialized object *before* the method body executes. If validation fails, Spring throws `MethodArgumentNotValidException` — which, without further handling, produces a generic `400 Bad Request` with a body that's technically informative but not shaped the way you'd want to hand to API consumers.
+
+## Common Bean Validation annotations
+
+| Annotation | Validates |
+|---|---|
+| `@NotNull` | Value is not `null` |
+| `@NotBlank` | String is not `null` and not empty/whitespace-only |
+| `@NotEmpty` | Collection/string is not `null` and not empty |
+| `@Size(min=, max=)` | String/collection length is within bounds |
+| `@Min` / `@Max` | Numeric value is within bounds |
+| `@Positive` / `@PositiveOrZero` | Numeric value is positive |
+| `@Email` | String is a well-formed email address |
+| `@Pattern(regexp=)` | String matches a regular expression |
+
+## Centralizing error handling with `@ControllerAdvice`
+
+```java
+@RestControllerAdvice
+class GlobalExceptionHandler {
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    ResponseEntity<ProblemDetail> handleValidation(MethodArgumentNotValidException ex) {
+        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        problem.setTitle("Validation failed");
+        problem.setProperty("errors", ex.getBindingResult().getFieldErrors().stream()
+            .map(fe -> fe.getField() + ": " + fe.getDefaultMessage())
+            .toList());
+        return ResponseEntity.badRequest().body(problem);
+    }
+
+    @ExceptionHandler(OrderNotFoundException.class)
+    ResponseEntity<ProblemDetail> handleNotFound(OrderNotFoundException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        problem.setTitle("Order not found");
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(problem);
+    }
+
+    @ExceptionHandler(Exception.class)
+    ResponseEntity<ProblemDetail> handleUnexpected(Exception ex) {
+        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.INTERNAL_SERVER_ERROR);
+        problem.setTitle("Unexpected error");
+        // log ex here — never expose internal details in the response body itself
+        return ResponseEntity.internalServerError().body(problem);
+    }
+}
+```
+
+`@RestControllerAdvice` (`@ControllerAdvice` + `@ResponseBody`) is a single class that intercepts exceptions thrown from *any* `@RestController` in the application. Each `@ExceptionHandler` method handles one exception type, so every controller gets consistent error responses without repeating try/catch blocks in every endpoint.
+
+```
+Client Request
+      │
+      ▼
+┌─────────────┐   throws    ┌───────────────────────┐
+│ Controller  │────────────▶│ @RestControllerAdvice  │
+│  / Service  │  exception  │  matches @ExceptionHandler│
+└─────────────┘             └───────────┬───────────┘
+                                         ▼
+                              Structured ProblemDetail
+                              JSON response + correct
+                              HTTP status code
+```
+
+## Custom domain exceptions
+
+```java
+public class OrderNotFoundException extends RuntimeException {
+    public OrderNotFoundException(Long id) {
+        super("Order " + id + " not found");
+    }
+}
+```
+
+```java
+@Service
+class OrderService {
+    OrderResponse findById(Long id) {
+        return repository.findById(id)
+            .map(this::toResponse)
+            .orElseThrow(() -> new OrderNotFoundException(id));
+    }
+}
+```
+
+The service layer throws a meaningful, specific exception; it has no idea an HTTP layer even exists. The `@RestControllerAdvice` is the only place that translates domain exceptions into HTTP status codes and response shapes — a clean separation that also makes the service layer trivial to unit test without any web context (Chapter 17).
+
+## Using `ProblemDetail` (RFC 7807)
+
+Since Spring 6 / Boot 3, `ProblemDetail` gives you a standardized error response shape out of the box:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Order not found",
+  "status": 404,
+  "detail": "Order 42 not found",
+  "instance": "/api/orders/42"
+}
+```
+
+Using a standard shape (rather than a bespoke error format per project) means API clients and tooling can parse errors consistently, and it's now the idiomatic approach in modern Spring Boot rather than a hand-rolled error DTO.
+
+## Best practices & gotchas
+
+- **Never expose exception messages or stack traces from unexpected (`Exception.class`) errors directly to clients.** Log the full exception server-side; return a generic, safe message in the response. Leaking internals in error bodies is a real security concern, not just a style preference.
+- **Order matters when multiple `@ExceptionHandler` methods could match.** Spring picks the most specific matching exception type; keep a catch-all `Exception.class` handler last and as a genuine last resort, not a substitute for handling known cases specifically.
+- **Validate at the boundary, not deep in business logic.** `@Valid` on controller-layer DTOs catches malformed input before it ever reaches your service layer, keeping business logic focused on business rules rather than input shape-checking.
+- **Domain exceptions belong in the service/domain layer, with no HTTP knowledge.** Let the `@ControllerAdvice` be the single place that maps domain exceptions to status codes — this keeps the mapping consistent and the service layer framework-agnostic.
+- **Validate nested objects and collection elements explicitly.** `@Valid` on a field of a nested object, and `List<@Positive Long>` for element-level constraints, are easy to forget — an unvalidated nested object silently skips its own constraints.
+
+## Quick reference
+
+| Concept | Purpose |
+|---|---|
+| `@Valid` | Triggers Bean Validation on a `@RequestBody`/`@ModelAttribute` argument |
+| `@NotBlank`/`@NotEmpty`/`@Size`/`@Min`/`@Max`/`@Email`/`@Pattern` | Common Bean Validation constraints |
+| `MethodArgumentNotValidException` | Thrown automatically when `@Valid` fails |
+| `@RestControllerAdvice` | Global, centralized exception handling across all controllers |
+| `@ExceptionHandler` | Maps one exception type to a specific response |
+| `ProblemDetail` | RFC 7807-standard structured error response, built into Spring 6+ |
+
+## Wrapping up
+
+Requests are now validated at the boundary, and every failure — validation errors, domain exceptions, and unexpected errors alike — produces a consistent, well-structured response instead of an inconsistent default. **Chapter 8** closes out Part 2 by going under the hood of Spring MVC itself: the `DispatcherServlet`, filters, and interceptors that make all of this routing and handling possible.
+
+## Interview Questions
+
+**1. What does `@Valid` do, and where does it need to be placed?**
+`@Valid` triggers Bean Validation against the annotated argument before the handler method body executes. It's placed directly on the parameter, typically alongside `@RequestBody`: `create(@Valid @RequestBody CreateOrderRequest request)`. If validation fails, Spring throws `MethodArgumentNotValidException` before your method code ever runs.
+
+**2. What's the difference between `@NotNull`, `@NotEmpty`, and `@NotBlank`?**
+`@NotNull` only rejects `null`. `@NotEmpty` rejects `null` and empty collections/strings (but allows whitespace-only strings). `@NotBlank` rejects `null`, empty strings, and whitespace-only strings — the strictest of the three, and the usual choice for required text fields like names.
+
+**3. What exception is thrown when `@Valid` validation fails on a request body, and what does Spring do with it by default?**
+`MethodArgumentNotValidException`. Without custom handling, Spring MVC's default handling maps it to a `400 Bad Request` with a body describing the failed fields — functional, but not necessarily shaped the way your API's error contract requires, which is why teams typically add a custom `@ExceptionHandler` for it.
+
+**4. What is `@ControllerAdvice`, and how does `@RestControllerAdvice` differ from it?**
+`@ControllerAdvice` is a class-level annotation that lets its `@ExceptionHandler` methods apply globally, across every `@Controller`/`@RestController` in the application, rather than being scoped to a single controller. `@RestControllerAdvice` is `@ControllerAdvice` plus `@ResponseBody` applied to its handler methods, so their return values are serialized directly into the response body — the natural choice for REST APIs, mirroring `@RestController` vs `@Controller`.
+
+**5. How do you map a specific exception type to a specific HTTP status and response body?**
+Define a method annotated `@ExceptionHandler(SpecificException.class)` inside a `@RestControllerAdvice` class, returning a `ResponseEntity<T>` (or `ProblemDetail`) with the desired status and body:
+```java
+@ExceptionHandler(OrderNotFoundException.class)
+ResponseEntity<ProblemDetail> handleNotFound(OrderNotFoundException ex) {
+    return ResponseEntity.status(404).body(ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage()));
+}
+```
+
+**6. Why should custom domain exceptions (like `OrderNotFoundException`) not extend an HTTP-aware exception class or reference status codes directly?**
+Keeping domain exceptions free of HTTP concerns keeps the service/domain layer reusable and testable independent of any web framework — the same `OrderService` could be called from a REST controller, a scheduled job, or a messaging consumer, and none of those callers need the exception to "know" what HTTP status it maps to. The `@ControllerAdvice` is the single, correct place to perform that mapping.
+
+**7. What is `ProblemDetail`, and why was it introduced?**
+`ProblemDetail`, introduced in Spring 6 / Spring Boot 3, is a built-in implementation of RFC 7807 ("Problem Details for HTTP APIs") — a standardized JSON shape for error responses (`type`, `title`, `status`, `detail`, `instance`, plus custom properties). It was introduced so teams don't need to hand-roll a bespoke error response format per project, improving consistency for API consumers and tooling.
+
+**8. Why is it dangerous to return a raw exception message or stack trace to the client for unexpected errors?**
+Stack traces and internal exception messages can leak implementation details — class names, library versions, internal file paths, even fragments of SQL — that are useful to an attacker probing the system, and they're not meaningful or actionable for a legitimate API consumer either. The correct pattern is to log the full exception server-side for debugging, and return a generic, safe error message to the client.
+
+**9. How would you validate elements inside a `List` field, not just the list itself?**
+Use `@Valid` on the field along with a type-use constraint on the list's generic element type, e.g. `List<@Positive Long> productIds` — this validates each element individually. For a list of nested objects (rather than primitives), the objects' class itself also needs its own Bean Validation annotations, and the field must be annotated `@Valid` for those nested constraints to actually be checked.
+
+**10. What happens if two `@ExceptionHandler` methods in the same `@RestControllerAdvice` could both match a thrown exception (one for a specific subclass, one for a general superclass)?**
+Spring selects the handler registered for the most specific matching exception type in the hierarchy — the subclass-specific handler wins over a more general one, similar to normal Java exception-catching specificity rules.
+
+**11. Should validation logic ever live inside the service layer instead of on the request DTO?**
+Structural/format validation (required fields, length limits, valid email format) belongs on the DTO via Bean Validation, checked at the API boundary before business logic runs. Validation that depends on business state or cross-entity checks (e.g., "this product must currently be in stock," "this order can't be cancelled once shipped") is business logic and correctly belongs in the service layer, since it can't be expressed as a static annotation on the incoming data alone.
+
+**12. How would you test that a validation constraint is correctly wired end-to-end?**
+Using `@WebMvcTest` with `MockMvc` (covered in Chapter 17), send a request with a deliberately invalid field and assert on the resulting status code and response body:
+```java
+mockMvc.perform(post("/api/orders").content("{\"customerName\":\"\"}").contentType(APPLICATION_JSON))
+       .andExpect(status().isBadRequest());
+```
+This verifies the full chain — `@Valid`, the constraint annotation, and the `@ExceptionHandler` — rather than just the annotation's presence.
+
+**13. What's the difference between handling validation errors with a custom `@ExceptionHandler` versus letting Spring Boot's default error handling take over?**
+Spring Boot's default error handling (via `BasicErrorController`) produces a generic, framework-shaped error body that's functional but not tailored to your API's contract — often inconsistent in structure across different failure types. A custom `@ExceptionHandler`/`@RestControllerAdvice` setup gives full control over exactly what shape, fields, and status code every category of failure produces, consistently across the whole API.
+
+**14. Can `@ExceptionHandler` methods be defined directly inside a single `@RestController` instead of a global `@RestControllerAdvice`?**
+Yes — an `@ExceptionHandler` method defined inside a specific controller only applies to exceptions thrown within that controller, useful for a genuinely controller-specific error case. For anything that should be handled consistently across the whole application (validation errors, generic fallback handling), a global `@RestControllerAdvice` is the better choice to avoid duplicating the same handler in every controller.
+
+**15. Why is separating "where an exception is thrown" from "where it's translated into an HTTP response" considered good design?**
+It enforces a clean separation of concerns: the service/domain layer stays focused purely on business rules and throws exceptions that describe *what* went wrong in domain terms, while the `@RestControllerAdvice` layer is solely responsible for deciding *how* that translates to an HTTP status and response shape. This keeps error-handling logic in one place (easy to keep consistent and to change later, e.g., switching to `ProblemDetail` project-wide) rather than duplicated as try/catch blocks across many controllers.

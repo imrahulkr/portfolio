@@ -1,0 +1,204 @@
+---
+title: "Database Migrations with Flyway & Working with Multiple Datasources"
+description: "Replace ddl-auto with version-controlled, reviewable schema migrations, and learn the pattern for correctly wiring more than one DataSource into a single Spring Boot application."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 12
+tags: ["Spring Boot", "Flyway", "Database Migrations"]
+---
+
+Chapter 9 flagged that `ddl-auto: update` is unsafe in production, without saying what to use instead. This chapter covers the actual answer — migration tools — and the related but distinct topic of wiring multiple databases into one application.
+
+## Why migrations, not `ddl-auto`
+
+A migration tool manages schema changes as an ordered, version-controlled sequence of scripts, applied exactly once, in order, and tracked in a metadata table inside the database itself. This gives you:
+
+- **A reviewable diff** — a schema change is a `.sql` file in a pull request, not an implicit side effect of changing an `@Entity`.
+- **Consistency across environments** — the exact same scripts run in dev, staging, and production, in the same order.
+- **A real audit trail** — the migration history table records what's been applied and when.
+
+## Setting up Flyway
+
+```xml
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-core</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-database-postgresql</artifactId>
+</dependency>
+```
+
+```yaml
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate   # schema is now owned by Flyway, not Hibernate
+  flyway:
+    locations: classpath:db/migration
+```
+
+```
+src/main/resources/db/migration/
+├── V1__create_orders_table.sql
+├── V2__create_order_items_table.sql
+└── V3__add_total_column_to_orders.sql
+```
+
+```sql
+-- V1__create_orders_table.sql
+CREATE TABLE orders (
+    id BIGSERIAL PRIMARY KEY,
+    customer_name VARCHAR(255) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    total NUMERIC(12, 2)
+);
+```
+
+Spring Boot auto-configures Flyway to run automatically on application startup, applying any migration scripts not yet recorded in Flyway's `flyway_schema_history` table — in strict version order (`V1`, `V2`, `V3`, ...).
+
+```
+Application startup
+        │
+        ▼
+┌────────────────────────────┐
+│  Flyway checks              │
+│  flyway_schema_history      │
+│  table for applied versions  │
+└──────────────┬─────────────┘
+               │  finds V1, V2 already applied
+               ▼
+┌────────────────────────────┐
+│  Runs only V3 (new),         │
+│  records it as applied       │
+└────────────────────────────┘
+```
+
+## The rule that matters most: never edit an applied migration
+
+Once a migration script has run anywhere (even just on a teammate's machine, not only production), Flyway records a checksum of its content. **Editing an already-applied migration file causes Flyway to fail on the next startup** with a checksum mismatch — this is deliberate: it stops a modified script from silently producing a different schema in one environment than another. If a migration needs correcting, write a *new* migration (`V4__fix_total_column.sql`) rather than editing `V3`.
+
+## Working with multiple datasources
+
+A common real scenario: one datasource for your primary application data, another for a separate reporting or legacy database. Spring Boot's auto-configuration assumes a single `DataSource`, so beyond one, configuration becomes explicit.
+
+```yaml
+app:
+  datasource:
+    primary:
+      url: jdbc:postgresql://localhost:5432/orders
+      username: app
+      password: secret
+    reporting:
+      url: jdbc:postgresql://localhost:5432/reporting
+      username: report_reader
+      password: secret
+```
+
+```java
+@Configuration
+public class PrimaryDataSourceConfig {
+
+    @Bean
+    @Primary
+    @ConfigurationProperties("app.datasource.primary")
+    DataSourceProperties primaryDataSourceProperties() {
+        return new DataSourceProperties();
+    }
+
+    @Bean
+    @Primary
+    DataSource primaryDataSource(@Qualifier("primaryDataSourceProperties") DataSourceProperties properties) {
+        return properties.initializeDataSourceBuilder().build();
+    }
+}
+
+@Configuration
+public class ReportingDataSourceConfig {
+
+    @Bean
+    @ConfigurationProperties("app.datasource.reporting")
+    DataSourceProperties reportingDataSourceProperties() {
+        return new DataSourceProperties();
+    }
+
+    @Bean
+    DataSource reportingDataSource(@Qualifier("reportingDataSourceProperties") DataSourceProperties properties) {
+        return properties.initializeDataSourceBuilder().build();
+    }
+}
+```
+
+`@Primary` marks which `DataSource` Spring should inject by default whenever a bean asks for a plain `DataSource` with no further qualification — necessary once more than one bean of the same type exists, or Spring can't resolve the ambiguity (Chapter 2 covered why). Repositories that should use the non-primary datasource need explicit `@EnableJpaRepositories(basePackages = "...", entityManagerFactoryRef = "...", transactionManagerRef = "...")` configuration pointing at a separate `EntityManagerFactory`/`TransactionManager` pair built from that specific `DataSource` — genuinely more setup than the single-datasource case, which is precisely why Boot doesn't try to auto-configure it for you.
+
+## Best practices & gotchas
+
+- **Never edit an applied Flyway migration file.** Write a new one instead — this is the single most important Flyway discipline, and violating it is what causes "works on my machine, fails in CI" schema drift.
+- **Keep migrations small and focused.** One logical change per file is easier to review, and easier to reason about if something needs investigating later.
+- **Name migrations descriptively**, not just `V4__update.sql` — `V4__add_shipped_at_to_orders.sql` tells a reviewer what changed without opening the file.
+- **Multiple datasources add real complexity — only introduce a second one when there's a genuine need** (a separate legacy system, a read-replica for reporting), not preemptively. Each additional datasource means its own connection pool, `EntityManagerFactory`, and `TransactionManager` to configure and reason about.
+- **A `@Transactional` method spanning two different datasources does not get atomicity across both** by default — each `DataSource` has its own, independent `TransactionManager`. True cross-datasource atomicity requires distributed/XA transactions, which are a significant added complexity most systems avoid by design instead (e.g., via eventual consistency patterns, covered conceptually in Part 7).
+
+## Quick reference
+
+| Concept | Purpose |
+|---|---|
+| Flyway | Version-controlled, ordered SQL migration scripts, tracked in the database |
+| `flyway_schema_history` | Table recording which migrations have been applied |
+| `V{n}__description.sql` | Flyway's naming convention for versioned migrations |
+| Checksum mismatch | Flyway's safeguard against editing an already-applied migration |
+| `@Primary` | Marks the default bean when multiple candidates of the same type exist |
+| `@EnableJpaRepositories(entityManagerFactoryRef=..., transactionManagerRef=...)` | Routes a repository to a specific non-default datasource |
+
+## Wrapping up
+
+Schema changes are now explicit, ordered, and reviewable rather than an implicit side effect of entity changes, and you know the real pattern (and real cost) of adding a second datasource when a genuine need arises. **Chapter 13** closes out Part 3 by stepping outside relational databases entirely, covering Spring Data support for MongoDB.
+
+## Interview Questions
+
+**1. Why is `ddl-auto: update` discouraged in favor of a migration tool like Flyway?**
+`ddl-auto: update` lets Hibernate infer and apply schema changes automatically and implicitly based on your current entity definitions, with no review step, no explicit script, and no guaranteed consistency in how it behaves across different environments or Hibernate versions. A migration tool makes every schema change an explicit, version-controlled, reviewable SQL script applied identically and in the same order everywhere.
+
+**2. What is Flyway's naming convention for migration files, and why does the version prefix matter?**
+Files are named `V{version}__{description}.sql` (e.g., `V3__add_total_column_to_orders.sql`). The version prefix determines the strict order Flyway applies migrations in — Flyway will not apply `V3` before `V2` has already been applied, and this ordering is what guarantees the schema evolves identically across every environment regardless of when a given environment first ran the migrations.
+
+**3. What happens if you edit the contents of a migration file that has already been applied somewhere?**
+Flyway computes and stores a checksum of each migration's content in its `flyway_schema_history` table when it's applied. On the next startup anywhere that migration has already run, Flyway recalculates the checksum and, finding it no longer matches, fails the application from starting rather than silently allowing an inconsistent schema history across environments.
+
+**4. What's the correct way to fix a mistake in a migration that's already been applied in some environment?**
+Write a new migration (e.g., `V4__fix_total_column.sql`) that corrects the issue, rather than editing the original file. This preserves the guarantee that every environment applies the exact same sequence of scripts, in the same order, with matching checksums.
+
+**5. What table does Flyway use to track which migrations have been applied, and what does it store?**
+`flyway_schema_history` (by default) — it records each applied migration's version, description, checksum, the script's execution time, and whether it succeeded, giving both a functional tracking mechanism (so Flyway knows what still needs applying) and a genuine audit trail of schema history.
+
+**6. What's the difference between a versioned migration and a repeatable migration in Flyway?**
+A versioned migration (`V{n}__...sql`) is applied exactly once, in strict version order. A repeatable migration (`R__...sql`) has no version number and is re-applied every time its checksum changes — commonly used for things like views or stored procedures that you want to simply redefine to their current desired state, rather than incrementally alter through many small scripts.
+
+**7. Why doesn't Spring Boot auto-configure multiple datasources the way it does a single one?**
+Because there's no single sensible default for how multiple datasources should relate to each other — which one is primary, which repositories belong to which, how transactions should be scoped per datasource. This requires explicit application-specific decisions that auto-configuration, by design, only makes for the unambiguous single-datasource case.
+
+**8. What does `@Primary` do, and why is it needed once you have more than one `DataSource` bean?**
+`@Primary` marks one bean as the default candidate Spring should inject whenever something asks for that type without further qualification (e.g., `@Qualifier`). With two or more `DataSource` beans present, Spring can no longer automatically resolve an unqualified `DataSource` injection point, and would throw a `NoUniqueBeanDefinitionException` without one of them marked `@Primary` or every injection point being explicitly qualified.
+
+**9. How do you route a specific `@Repository` to a non-default datasource in a multi-datasource setup?**
+By configuring a separate `EntityManagerFactory` and `PlatformTransactionManager` built from that specific `DataSource`, and pointing `@EnableJpaRepositories` at the package containing that repository with `entityManagerFactoryRef` and `transactionManagerRef` explicitly set to those beans' names — this tells Spring Data which persistence unit and transaction manager that particular set of repositories should use.
+
+**10. Does `@Transactional` provide atomicity across two different datasources by default?**
+No. Each `DataSource` in a multi-datasource setup typically has its own independent `PlatformTransactionManager`, so a `@Transactional` method touching both isn't guaranteed atomic across both — one could commit while the other fails. True atomicity across multiple resources requires distributed (XA/JTA) transactions, which add significant complexity most systems deliberately avoid.
+
+**11. What's a realistic scenario for needing a second datasource in one application?**
+A legacy database that a newer service needs to read from during a migration period, or a dedicated read-replica database used specifically for reporting/analytics queries so those don't add load to the primary transactional database — both are common, genuine reasons rather than premature complexity.
+
+**12. Why should migrations be kept small and focused on one logical change?**
+Small, focused migrations are easier to review in a pull request, easier to reason about if a specific change needs investigating or (via a new corrective migration) reverting later, and reduce the blast radius if a single migration script has an error — a large migration touching many unrelated tables makes isolating a problem much harder.
+
+**13. What's the risk of running Flyway migrations automatically on every application startup in a production environment with multiple instances starting simultaneously?**
+Multiple instances starting at once could attempt to apply the same pending migration concurrently. Flyway guards against this with its own locking mechanism (a lock row/table) so only one instance actually executes the migration while others wait — but it's still common practice in larger systems to run migrations as a separate, explicit deployment step rather than relying on every application instance's own startup to handle it.
+
+**14. Where should database credentials for a second (or first) datasource be stored, and why?**
+Not directly in `application.yml` committed to version control — via environment variables, a secrets manager, or an environment-specific, gitignored configuration source, exactly per the configuration guidance in Chapter 5. This applies identically regardless of how many datasources a project has.
+
+**15. If a teammate says "I just tweaked one of the older migration files to fix a typo, and now the build is failing on CI," what's actually happening, and what should they do instead?**
+They edited an already-applied migration's content, changing its checksum; Flyway detects the mismatch between the stored checksum (from when it was first applied) and the file's current checksum, and refuses to proceed, since this is exactly the scenario that could produce a different schema in different environments. The fix is to revert the edit to the original file and instead write a new migration that makes the intended correction.

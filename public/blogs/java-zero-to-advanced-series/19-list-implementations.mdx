@@ -1,0 +1,131 @@
+---
+title: "List Implementations: ArrayList, LinkedList, Vector"
+description: "Internal structure and Big-O trade-offs of ArrayList vs LinkedList vs Vector, dynamic resizing, and when to choose each."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Strings, Generics & Collections"
+chapter: 19
+totalChapters: 65
+slug: "list-implementations"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "collections", "list"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## `ArrayList` — A Resizable Array
+
+Internally, `ArrayList` maintains a plain `Object[]` array. When it fills up, it allocates a new, larger array (typically 1.5x the old capacity) and copies every element over.
+
+```java
+List<String> list = new ArrayList<>();
+list.add("a");   // O(1) amortized — occasionally triggers a resize+copy
+list.get(0);     // O(1) — direct array index access
+list.add(0, "z"); // O(n) — must shift every subsequent element right by one
+list.remove(0);   // O(n) — must shift every subsequent element left by one
+```
+
+| Operation | Time Complexity |
+|---|---|
+| `get(index)` | O(1) |
+| `add(element)` (append) | O(1) amortized |
+| `add(index, element)` | O(n) |
+| `remove(index)` | O(n) |
+| `contains(element)` | O(n) |
+
+![Diagram: ArrayList backing array filling up, then resizing to a new larger array (1.5x capacity) with all elements copied over](/diagrams/ch19-arraylist-resize.svg)
+
+`ArrayList` is the right default choice for the vast majority of list use cases — fast random access, good cache locality (contiguous memory), and resizing cost is amortized across many operations.
+
+## `LinkedList` — A Doubly-Linked List
+
+Each element is wrapped in a `Node` holding references to the previous and next nodes — there's no contiguous backing array at all.
+
+```java
+List<String> list = new LinkedList<>();
+list.add("a");        // O(1) — append at tail, no resizing/copying ever needed
+list.get(0);           // O(n) — must walk the chain from the head (or tail, whichever is closer)
+list.add(0, "z");      // O(1) — just relinks a few node pointers, no shifting
+```
+
+| Operation | Time Complexity |
+|---|---|
+| `get(index)` | O(n) |
+| `add`/`remove` at head or tail | O(1) |
+| `add`/`remove` at arbitrary index | O(n) to find + O(1) to relink |
+| `contains(element)` | O(n) |
+
+`LinkedList` also implements `Deque`, so it can act as a stack or queue — though `ArrayDeque` (Chapter 22) is generally a faster choice for pure queue/stack use, since it avoids per-node object overhead entirely.
+
+![Diagram: doubly-linked list nodes each containing data plus prev/next pointers, contrasted with ArrayList's single contiguous array block](/diagrams/ch19-linkedlist-nodes.svg)
+
+## `Vector` — The Legacy, Synchronized Predecessor
+
+`Vector` behaves almost identically to `ArrayList` internally (resizable backing array), but every method is `synchronized`, incurring locking overhead on every single call — even in single-threaded code that never needs it.
+
+```java
+List<String> vector = new Vector<>();  // legacy — rarely the right choice today
+```
+
+`Vector` predates the Collections Framework itself (it existed since Java 1.0) and was retrofitted to implement `List` later. In modern code, prefer `ArrayList` and, if thread safety is genuinely required, use `Collections.synchronizedList(new ArrayList<>())` or a proper concurrent collection (Chapter 41) instead.
+
+## Choosing Between Them
+
+| Need | Choice |
+|---|---|
+| Frequent random access by index | `ArrayList` |
+| Frequent insertion/removal at the head or middle | `LinkedList` (or reconsider if a `Deque` fits better) |
+| Legacy synchronized list | `Vector` (avoid in new code) |
+| Thread-safe list, modern | `Collections.synchronizedList(...)` or `CopyOnWriteArrayList` (Chapter 41) |
+
+In practice, `ArrayList` is the correct default in the overwhelming majority of real code — `LinkedList`'s theoretical O(1) insertion advantage rarely outweighs its poor cache locality and higher per-element memory overhead in modern JVMs and hardware.
+
+## Key Takeaways
+
+- `ArrayList` gives O(1) indexed access but O(n) insertion/removal in the middle; it's the correct default for most cases.
+- `LinkedList` gives O(1) insertion/removal at known positions but O(n) indexed access; genuinely justified use cases are rarer than commonly assumed.
+- `Vector` is functionally similar to `ArrayList` but fully synchronized — largely obsolete for new code.
+- Benchmark before assuming `LinkedList` is faster for your specific workload — array-based structures often win in practice due to CPU cache behavior.
+
+---
+
+## Interview Questions
+
+**1. What is the internal data structure backing `ArrayList`, and how does it grow when full?**
+A plain `Object[]` array. When an `add()` would exceed the current array's capacity, `ArrayList` allocates a new, larger array (historically growing by roughly 1.5x the old capacity) and copies every existing element into it via `System.arraycopy`, then discards the old array.
+
+**2. Why is `ArrayList.add(element)` (append at the end) described as O(1) "amortized" rather than simply O(1)?**
+Most appends are genuinely O(1) — there's spare capacity, and the element is just placed at the next open slot. Occasionally, though, the backing array is full and must be resized, which is an O(n) operation (allocate + copy all elements). Averaged ("amortized") across a long sequence of appends, the infrequent O(n) resizes contribute a negligible constant-factor overhead per operation, so the *amortized* cost per append remains O(1) even though any single append could occasionally be O(n).
+
+**3. Why is `ArrayList.get(index)` O(1) but `LinkedList.get(index)` O(n)?**
+`ArrayList` stores elements in one contiguous array, so any index can be computed directly via pointer arithmetic (`baseAddress + index * elementSize`) with no traversal needed. `LinkedList` has no contiguous storage at all — reaching a given index requires walking node-by-node from the head (or tail, whichever is closer for that index) through `next`/`prev` pointers, which takes time proportional to the index's distance from an end.
+
+**4. Why is inserting at the beginning of an `ArrayList` O(n), while inserting at the beginning of a `LinkedList` is O(1)?**
+`ArrayList` must physically shift every existing element one position to the right to make room at index 0, which touches every element in the list — O(n). `LinkedList` simply creates a new node and relinks the head pointer and the new node's `next` pointer, touching only a constant number of references regardless of the list's size — O(1).
+
+**5. Given `LinkedList`'s theoretical O(1) advantage for head/middle insertion, why is `ArrayList` still usually the better default choice in practice?**
+Modern CPUs are heavily optimized for sequential memory access via caching — `ArrayList`'s contiguous array benefits enormously from cache locality, often outperforming `LinkedList`'s node-chasing (each node is a separate heap allocation, likely scattered non-contiguously in memory) even for operations where `LinkedList` has a better theoretical Big-O complexity. `LinkedList` also carries meaningfully higher per-element memory overhead (each node needs extra space for `prev`/`next` references and object headers).
+
+**6. What interfaces does `LinkedList` implement beyond `List`, and what capability does that add?**
+It also implements `Deque` (and transitively `Queue`), giving it built-in methods for efficient insertion/removal at both ends (`addFirst`, `addLast`, `removeFirst`, `removeLast`), letting it function as a stack, queue, or double-ended queue in addition to a general list.
+
+**7. What makes `Vector` different from `ArrayList` given they're both backed by a resizable array?**
+Every method on `Vector` is `synchronized`, so only one thread can execute any `Vector` method at a time, making it thread-safe but imposing locking overhead on every single call — including in single-threaded programs that derive no benefit from that safety. `ArrayList` has no such synchronization at all, making it faster in the common single-threaded case but unsafe for uncoordinated concurrent access.
+
+**8. If you need a thread-safe list today, why is `Vector` generally not recommended even though it's thread-safe?**
+`Vector`'s synchronization only protects individual method calls, not compound operations (like "check if empty, then add" performed as two separate calls), so it doesn't actually provide meaningful thread-safety guarantees for many realistic usage patterns despite the per-method locking overhead it always pays. Modern alternatives like `CopyOnWriteArrayList` (for read-heavy, rarely-mutated lists) or explicit synchronization around a plain `ArrayList` where compound-operation atomicity is actually needed are generally better-designed choices.
+
+**9. What happens internally when you call `new ArrayList<>()` with no arguments versus `new ArrayList<>(100)`?**
+`new ArrayList<>()` creates an empty backing array (historically, the very first `add()` call triggers allocation of a small default-capacity array, often size 10, to avoid wasting memory on ArrayLists that are never populated). `new ArrayList<>(100)` immediately allocates a backing array with capacity for 100 elements, avoiding any resize operations until more than 100 elements are added — useful as a performance optimization when the approximate final size is known upfront.
+
+**10. Why might iterating a `LinkedList` with a for-each loop be much faster than iterating it with an indexed `for` loop using `get(i)`?**
+A for-each loop uses the list's `Iterator`, which for `LinkedList` walks the chain once, sequentially, from one node to the next in O(1) per step — total O(n) for the whole iteration. An indexed loop calling `get(i)` repeatedly re-walks from an endpoint for every single index lookup, making the whole iteration O(n²) in the worst case — a classic and easy-to-miss performance trap.
+
+**11. Does `ArrayList` allow `null` elements and duplicate elements?**
+Yes to both — `ArrayList` (like `List` in general) permits any number of `null` entries and any number of duplicate values, since its contract is purely about ordered sequence storage with indexed access, with no uniqueness constraint at all (unlike `Set`).
+
+**12. If you need to frequently add and remove elements from both ends of a sequence, would you choose `ArrayList`, `LinkedList`, or something else, and why?**
+`ArrayDeque` (Chapter 22) is generally the best choice for that specific access pattern — it's backed by a resizable circular array offering O(1) amortized insertion/removal at both ends without the per-node object overhead and poor cache locality of `LinkedList`'s node-based structure, and the Java documentation itself recommends it over `LinkedList` for stack/queue-style usage.

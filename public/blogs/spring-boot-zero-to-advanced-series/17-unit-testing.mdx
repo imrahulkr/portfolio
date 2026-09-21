@@ -1,0 +1,244 @@
+---
+title: "Unit Testing in Spring Boot: JUnit 5, Mockito, @SpringBootTest & MockMvc"
+description: "Constructor injection from Chapter 2 pays off here — most of what you've built can be tested with plain JUnit and Mockito, no Spring context required. This chapter covers exactly when you do and don't need one."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 17
+tags: ["Spring Boot", "Testing", "JUnit", "Mockito"]
+---
+
+Every chapter so far has built real functionality — controllers, services, repositories, security rules. None of it has been tested. This chapter fixes that for the fast, isolated layer of the testing pyramid: unit tests. Chapter 18 covers the slower, broader layer — integration tests.
+
+## The testing pyramid, briefly
+
+```
+        ▲
+       ╱ ╲        Few — slow, broad, high confidence
+      ╱ E2E╲
+     ╱───────╲
+    ╱Integration╲   Some — real DB/context, slower
+   ╱─────────────╲
+  ╱   Unit Tests   ╲  Many — fast, isolated, no Spring context
+ ╱───────────────────╲
+```
+
+Unit tests should be the largest layer by count, precisely because they're fast and need no Spring context at all — this chapter's whole point is showing how much of a typical Spring Boot application can be tested this way, thanks to the design choices already made back in Chapter 2.
+
+## Testing a service with plain JUnit and Mockito — no Spring context
+
+Recall from Chapter 2: constructor injection means a class can be instantiated with `new`, with no container involved.
+
+```java
+@ExtendWith(MockitoExtension.class)
+class OrderServiceTest {
+
+    @Mock
+    OrderRepository orderRepository;
+
+    @InjectMocks
+    OrderService orderService;
+
+    @Test
+    void findByIdReturnsOrderWhenPresent() {
+        Order order = new Order("Jane Doe");
+        when(orderRepository.findById(1L)).thenReturn(Optional.of(order));
+
+        OrderResponse result = orderService.findById(1L);
+
+        assertThat(result.customerName()).isEqualTo("Jane Doe");
+    }
+
+    @Test
+    void findByIdThrowsWhenMissing() {
+        when(orderRepository.findById(99L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> orderService.findById(99L))
+            .isInstanceOf(OrderNotFoundException.class);
+    }
+}
+```
+
+- `@ExtendWith(MockitoExtension.class)` activates Mockito's JUnit 5 integration — no Spring context starts at all; this test runs in milliseconds.
+- `@Mock` creates a fake `OrderRepository` — no real database, no `ApplicationContext`.
+- `@InjectMocks` constructs `OrderService`, injecting the mocks into its constructor automatically — this is exactly why constructor injection (Chapter 2) matters for testability: Mockito can just call `new OrderService(mockRepository)` under the hood.
+- `when(...).thenReturn(...)` stubs the mock's behavior for this specific test case.
+
+## Testing exception-handling logic in isolation
+
+```java
+@Test
+void placeOrderRollsBackOnInsufficientStock() {
+    when(inventoryRepository.hasStock(any())).thenReturn(false);
+
+    assertThatThrownBy(() -> orderService.placeOrder(request))
+        .isInstanceOf(InsufficientStockException.class);
+
+    verify(orderRepository, never()).save(any());   // confirms the save never happened
+}
+```
+
+`verify(mock, never())` confirms an interaction *didn't* happen — useful for asserting a method correctly avoided a side effect under a failure condition, distinct from asserting on a return value.
+
+## Testing the web layer in isolation: `@WebMvcTest`
+
+Testing a controller doesn't require a full application context, a database, or even real service beans — `@WebMvcTest` loads only the web layer (`DispatcherServlet`, your controller, `@ControllerAdvice`), with everything else mocked.
+
+```java
+@WebMvcTest(OrderController.class)
+class OrderControllerTest {
+
+    @Autowired
+    MockMvc mockMvc;
+
+    @MockBean
+    OrderService orderService;
+
+    @Test
+    void getOrderReturns200WithBody() throws Exception {
+        when(orderService.findById(1L)).thenReturn(new OrderResponse(1L, "Jane Doe", "PENDING", BigDecimal.TEN));
+
+        mockMvc.perform(get("/api/orders/1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.customerName").value("Jane Doe"));
+    }
+
+    @Test
+    void createOrderWithBlankNameReturns400() throws Exception {
+        mockMvc.perform(post("/api/orders")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"customerName\":\"\",\"productIds\":[1]}"))
+            .andExpect(status().isBadRequest());
+    }
+}
+```
+
+`@MockBean` replaces `OrderService` in the loaded (partial) context with a Mockito mock — the controller under test gets the mock injected exactly as it would the real bean. `MockMvc` performs simulated HTTP requests against `DispatcherServlet` without starting an actual embedded server or opening a real network port, so it's still fast, while genuinely exercising the routing, validation (Chapter 7), and JSON serialization/deserialization end to end.
+
+```
+             @WebMvcTest(OrderController.class)
+┌───────────────────────────────────────────────┐
+│  DispatcherServlet, OrderController,            │
+│  @ControllerAdvice, HttpMessageConverters       │  ← real
+│                                                   │
+│  OrderService                                    │  ← @MockBean, fake
+│  OrderRepository, DataSource, Security filters   │  ← not loaded at all
+└───────────────────────────────────────────────┘
+```
+
+## `@SpringBootTest` — when you actually need the full context
+
+```java
+@SpringBootTest
+class OrderServiceFullContextTest {
+
+    @Autowired
+    OrderService orderService;
+
+    @Test
+    void wiresCorrectly() {
+        // exercises real bean wiring, real auto-configuration
+    }
+}
+```
+
+`@SpringBootTest` starts the entire application context — every bean, every auto-configuration decision (Chapter 4), optionally a real embedded server (`webEnvironment = WebEnvironment.RANDOM_PORT`). It's dramatically slower than a plain Mockito test or `@WebMvcTest`, and should be reserved for genuinely verifying real wiring and cross-cutting concerns, not as the default way to test business logic that could just as well run with a no-context Mockito test.
+
+## Best practices & gotchas
+
+- **Default to plain JUnit + Mockito for service/business-logic tests.** No Spring context needed, milliseconds per test — this should be the overwhelming majority of your test suite by count.
+- **Use `@WebMvcTest` for controller-specific concerns** (routing, request binding, validation, exception handling) — it's an order of magnitude faster than `@SpringBootTest` because it loads only the web layer.
+- **Reserve `@SpringBootTest` for what genuinely needs the full context** — real bean wiring across modules, verifying auto-configuration behaves as expected, or true end-to-end smoke tests. Reaching for it by default is the single most common cause of a slow test suite.
+- **`verify(mock, never())` and `verifyNoInteractions()` are as important as asserting return values** — many bugs are "this side effect shouldn't have happened," not just "the return value was wrong."
+- **Test the failure paths, not just the happy path.** `OrderNotFoundException`, validation failures, and the boundaries covered in Chapters 7 and 11 are exactly where real bugs tend to live.
+
+## Quick reference
+
+| Tool | Loads | Speed | Use for |
+|---|---|---|---|
+| Plain JUnit + Mockito | Nothing (no Spring context) | Fastest | Business/service logic, isolated units |
+| `@WebMvcTest` | Web layer only | Fast | Controllers, request mapping, validation |
+| `@DataJpaTest` | JPA/repository layer only (Chapter 18) | Fast | Repository queries |
+| `@SpringBootTest` | Full application context | Slowest | Real wiring verification, smoke tests |
+| `@MockBean` | Replaces a bean in a loaded context with a mock | — | Isolating one layer while loading another |
+
+## Wrapping up
+
+Constructor injection, thin controllers, and business logic kept out of the web layer — every design decision from Parts 1–4 — is exactly what makes the bulk of this application testable in milliseconds with no Spring context at all. **Chapter 18** covers the layer above this: integration testing with a real (containerized) database via Testcontainers, and the narrower `@DataJpaTest` slice for the persistence layer specifically.
+
+## Interview Questions
+
+**1. Why doesn't a plain JUnit + Mockito test need a Spring context at all?**
+Because constructor injection (Chapter 2) means a class's dependencies are just constructor parameters — Mockito can instantiate the class directly with `new`, passing in mock objects, with no `ApplicationContext`, no component scanning, and no auto-configuration involved. This is precisely why constructor injection over field injection matters for testability, not just style.
+
+*Follow-up: If a class used field injection (`@Autowired` on a private field) instead of constructor injection, how would that change unit testing it?* Field injection has no public constructor accepting the dependency, so a plain `new ClassUnderTest()` leaves the field `null` — testing it without a Spring context would require reflection-based workarounds (like Mockito's `@InjectMocks` reflectively setting private fields) rather than a clean, explicit constructor call, making the test's setup less obvious and more fragile to refactor.
+
+**2. What does `@Mock` do, and how is it different from `@MockBean`?**
+`@Mock` (plain Mockito) creates a mock object with no Spring context involved at all — used in fast, isolated unit tests. `@MockBean` is Spring Boot's testing annotation that replaces an existing bean *within a loaded Spring application context* with a Mockito mock — used when a Spring context is already being loaded (e.g., in `@WebMvcTest` or `@SpringBootTest`) and you need to isolate one specific dependency within it.
+
+*Follow-up: If you use `@MockBean` inside a `@SpringBootTest`, does the real implementation of that bean still get instantiated anywhere during context startup?* No — Spring Boot's test support replaces the bean definition itself before the context fully initializes, so the real implementation is never constructed at all; only the mock exists in the context for that test, which also avoids any side effects the real bean's initialization might otherwise trigger.
+
+**3. What does `@InjectMocks` do?**
+It tells Mockito to create an instance of the annotated class and inject the test's other `@Mock`-annotated fields into it — via constructor injection if a suitable constructor exists (the preferred and most common case with Spring Boot's constructor-injection style), or via field/setter injection as a fallback.
+
+*Follow-up: What happens if a class under test has two constructors, and Mockito can't unambiguously determine which one to use for `@InjectMocks`?* Mockito's constructor-injection strategy generally picks the "biggest" constructor (the one with the most parameters) when multiple are present, which may not always match the intended dependencies, or may fail to inject a needed mock if the argument types don't align — in ambiguous cases, it's clearer and more robust to construct the object explicitly with `new ClassUnderTest(mockA, mockB)` in a `@BeforeEach` setup method rather than relying on `@InjectMocks`'s constructor-selection heuristic.
+
+**4. What is `@WebMvcTest`, and what does it load compared to `@SpringBootTest`?**
+`@WebMvcTest` loads only the web layer — `DispatcherServlet`, the specified controller(s), `@ControllerAdvice` classes, filters, and related web infrastructure — without loading service, repository, or data-source beans at all. `@SpringBootTest` loads the entire application context, every bean and auto-configuration decision, making it significantly slower to start per test class.
+
+*Follow-up: If a controller under `@WebMvcTest` depends on a `@Service` that isn't provided as a `@MockBean`, what happens when the test runs?* The context fails to start, since `@WebMvcTest` deliberately excludes non-web beans (including that service) from the sliced context, and there's no real or mock implementation available to satisfy the controller's dependency — the fix is always to supply a `@MockBean` for any service/repository the controller under test depends on.
+
+**5. What does `MockMvc` actually do — does it start a real embedded server?**
+No. `MockMvc` simulates HTTP requests directly against Spring MVC's `DispatcherServlet` in-process, without opening a real network port or starting an embedded Tomcat instance. It still exercises real request routing, argument binding, validation, and serialization — genuinely testing the web layer's behavior — just without the overhead (or realism) of an actual network round trip.
+
+*Follow-up: In what situation would you need a real embedded server instead of `MockMvc`, and what tool would you reach for?* When testing something that genuinely depends on a real network layer — for example, verifying behavior through an actual HTTP client library, testing WebSocket connections, or end-to-end testing that includes real client-side code calling the API — `@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)` combined with a real HTTP client like `RestTemplate`, `WebTestClient`, or `TestRestTemplate` would be the appropriate choice instead of `MockMvc`.
+
+**6. Why should `@SpringBootTest` not be the default choice for testing business logic?**
+It loads the entire application context — every bean, every auto-configuration decision, potentially a real embedded server — which is dramatically slower to start than a plain Mockito test or a narrower slice test like `@WebMvcTest`. Across a large test suite, defaulting to `@SpringBootTest` for tests that don't actually need the full context is one of the most common causes of a test suite becoming too slow to run frequently during development.
+
+*Follow-up: If a team's test suite has become slow specifically because too many tests use `@SpringBootTest` unnecessarily, how would you go about identifying which ones genuinely need it?* Review each `@SpringBootTest`-annotated test class and ask whether it's actually exercising cross-bean wiring, real auto-configuration, or genuine end-to-end behavior — if it's really just testing a single service's business logic with no real dependency on the full context, it's a strong candidate for conversion to a plain Mockito-based unit test (or `@WebMvcTest`/`@DataJpaTest` if it's specifically testing the web or persistence layer in isolation).
+
+**7. What is the purpose of `verify(mock, never())`?**
+It asserts that a specific interaction with a mock *did not* happen during the test — useful for confirming that a side effect (like saving to a repository) was correctly avoided under a failure condition, which a simple return-value assertion wouldn't capture on its own.
+
+*Follow-up: What's the difference between `verify(mock, never()).someMethod(any())` and `verifyNoInteractions(mock)`?* `verify(mock, never()).someMethod(any())` checks that one *specific* method was never called on the mock, while other methods on that same mock might still have been called without failing the check. `verifyNoInteractions(mock)` is stricter — it asserts that *no method at all* was ever called on that mock during the test, useful when a dependency should have been completely untouched under the tested code path.
+
+**8. Why is testing failure paths (not just the happy path) especially important?**
+Real bugs disproportionately live in the edges — exception handling (Chapter 7), rollback behavior (Chapter 11), validation boundaries — precisely because those paths are exercised far less often in manual testing and during normal development than the primary success case. A test suite that only covers the happy path gives a false sense of confidence about the code's actual correctness under real-world conditions.
+
+*Follow-up: How would you specifically test that a `@Transactional` method correctly rolls back all its changes when an exception occurs partway through, without relying on the database's own external state to verify it?* Use an integration test (Chapter 18) with a real or containerized database: perform the operation expecting a rollback (e.g., triggering the exception), then independently query the database afterward to assert that no partial changes persisted — a plain Mockito unit test can verify the exception propagated correctly, but confirming the actual rollback behavior requires exercising real transactional infrastructure, which unit tests deliberately don't include.
+
+**9. Does `@WebMvcTest` load Spring Security configuration by default?**
+By default, `@WebMvcTest` does include Spring Security's auto-configuration if it's on the classpath, meaning security rules from your `SecurityFilterChain` (Chapter 14) apply during the test — a request to a secured endpoint without proper authentication context will be rejected, just as in the real application, unless the test explicitly provides authentication (e.g., via `@WithMockUser` or `SecurityMockMvcRequestPostProcessors`).
+
+*Follow-up: How would you test a secured endpoint's behavior specifically for an authenticated `ADMIN` user using `MockMvc`?* Use Spring Security's test support with `@WithMockUser(roles = "ADMIN")` on the test method (or the whole class), which populates the `SecurityContext` with a mock authenticated principal holding that role before the request is dispatched — letting the test exercise the endpoint exactly as it would behave for a real authenticated admin, without needing to actually perform a login flow.
+
+**10. What's the practical difference in test-writing experience between mocking with Mockito and testing against a real dependency?**
+Mocking lets you precisely control a dependency's behavior for a specific scenario (forcing a specific exception, a specific return value) without needing that dependency to actually exist or behave correctly in a real environment — ideal for isolating the unit under test and covering edge cases that would be hard to reliably reproduce with a real dependency. The trade-off is that a mock only behaves the way you've told it to, so it can't catch bugs in the *real* interaction between your code and the actual dependency — which is exactly the gap integration tests (Chapter 18) are meant to close.
+
+*Follow-up: Give an example of a bug that a fully-mocked unit test suite would never catch, but a real integration test would.* A subtly incorrect JPQL query in a `@Query` annotation (Chapter 10) — a unit test mocking the repository entirely would never execute that query at all, so it would pass regardless of whether the query is actually correct against a real database; only an integration test running against a real (or Testcontainers-provided) database actually executes the query and could catch it returning wrong or no results.
+
+**11. What is the AAA (Arrange-Act-Assert) pattern, and why is it a useful default structure for a unit test?**
+It's a convention for structuring a test into three clear sections: Arrange (set up the mocks, inputs, and any needed state), Act (call the method under test), and Assert (verify the outcome — a return value, an exception, or a mock interaction). Following it consistently makes tests easy to scan and understand at a glance, and helps avoid tests that interleave setup and assertions in a way that's hard to follow.
+
+*Follow-up: How does the AAA pattern map onto the earlier `findByIdThrowsWhenMissing` example in this chapter?* Arrange is `when(orderRepository.findById(99L)).thenReturn(Optional.empty())`; Act and Assert are combined in `assertThatThrownBy(() -> orderService.findById(99L))`, since asserting on a thrown exception naturally combines the action and its verification into one expression — a common, accepted variation of strict AAA when the "act" itself is expected to throw.
+
+**12. What does `@ExtendWith(MockitoExtension.class)` do, and is it required for every Mockito-based test?**
+It integrates Mockito with the JUnit 5 test lifecycle, automatically initializing `@Mock`/`@InjectMocks`-annotated fields before each test method runs (equivalent to manually calling `MockitoAnnotations.openMocks(this)`). It's required whenever a test class uses those annotations and expects Mockito's automatic initialization; without it, the annotated fields would remain `null`.
+
+*Follow-up: What would happen if you forgot `@ExtendWith(MockitoExtension.class)` on a test class using `@Mock` fields?* The `@Mock`-annotated fields would never actually be initialized as mock objects — they'd remain `null`, and any attempt to stub or interact with them (`when(orderRepository.findById(...))`) would throw a `NullPointerException` rather than behaving as a configured mock.
+
+**13. Why is `@DataJpaTest` (covered fully in Chapter 18) considered a "slice test" like `@WebMvcTest`, rather than a full integration test on its own?**
+Like `@WebMvcTest`, it loads only a specific slice of the application context — in this case, JPA-related components (`EntityManager`, repositories, an embedded/test database) — rather than the entire application. It's faster than `@SpringBootTest` for the same reason `@WebMvcTest` is, while still exercising real database interaction, which is why Chapter 18 covers it alongside genuinely broader integration testing tools like Testcontainers.
+
+*Follow-up: Why might a team choose to run `@DataJpaTest` against a real containerized database (via Testcontainers) rather than its default in-memory H2 database?* Because H2's SQL dialect and behavior can differ subtly from the production database (PostgreSQL, MySQL) in ways that matter for specific queries — native queries, certain data types, or database-specific functions might pass against H2 but behave differently (or fail outright) against the real production database, so testing against the same database engine used in production catches issues an H2-based test would miss entirely.
+
+**14. What's the risk of writing unit tests that mock so extensively that the test mostly just verifies "the mocks were called in the order I told them to be called"?**
+Such a test can end up asserting implementation details (the exact sequence and count of internal calls) rather than actual observable behavior (correct return values, correct side effects), making it brittle — it breaks whenever the internal implementation is refactored, even if the externally visible behavior hasn't changed at all, which defeats much of the value tests are meant to provide during refactoring.
+
+*Follow-up: How would you rewrite a test that currently asserts a specific sequence of three mock calls, to instead focus on observable behavior?* Focus assertions on the method's actual return value and any genuinely externally-visible side effects (like `verify(repository).save(argThat(order -> order.getStatus() == SHIPPED))`, checking the *content* of what was saved) rather than asserting the precise order or count of every internal collaborator call — this keeps the test meaningful even if the internal sequence of calls is later refactored, as long as the resulting behavior stays correct.
+
+**15. How would you decide whether a new test you're about to write should be a plain Mockito unit test, a `@WebMvcTest`, or a `@SpringBootTest`?**
+Ask what's actually being verified: pure business logic in a service with no web or persistence concerns → plain Mockito test, no context. Controller-specific concerns (routing, request binding, validation, exception mapping) → `@WebMvcTest`, isolating just the web layer. Genuine cross-bean wiring, real auto-configuration behavior, or an end-to-end smoke test spanning multiple layers → `@SpringBootTest`, reserved specifically for cases the narrower options can't adequately cover.
+
+*Follow-up: Where does `@DataJpaTest` fit into that same decision process?* It fits alongside `@WebMvcTest` as a narrower slice option — specifically for verifying repository query behavior (derived methods, `@Query` annotations, Specifications from Chapter 10) against a real (if lightweight/containerized) database, without paying the cost of loading the full application context just to confirm a query returns the expected rows.

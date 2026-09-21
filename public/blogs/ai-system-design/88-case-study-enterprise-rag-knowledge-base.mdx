@@ -1,0 +1,97 @@
+---
+title: "Chapter 88: Case Study — Enterprise RAG Knowledge Base"
+description: "A large-scale, multi-tenant enterprise knowledge base: document access control woven into retrieval, heterogeneous document ingestion, staleness management at organizational scale, and governance for internal deployment."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 14
+partTitle: "Applied Case Studies"
+chapter: 88
+totalChapters: 96
+tags: ["ai-system-design", "enterprise-rag", "access-control", "multi-tenant", "case-study", "interview-prep"]
+---
+
+## Introduction
+
+Chapter 87 built a chat assistant over a single, shared, publicly-visible knowledge base. This chapter addresses the specific complications that arise when the knowledge base is an *enterprise's internal documents* — where different employees have different, document-level access permissions, ingestion must handle wildly heterogeneous formats, and governance (Chapter 76) becomes an organizational, not just technical, requirement.
+
+## Access Control Must Be Enforced at Retrieval, Not Only at the Application Layer
+
+The single most important architectural difference from Chapter 87: retrieval itself must respect each user's document-level permissions — directly extending Chapter 62's metadata-filtering discipline (originally established for multi-tenant isolation) to enforce that a user's query can *never* retrieve a document they lack permission to view, regardless of how semantically relevant that document might be.
+
+```python
+def permission_aware_retrieve(query: str, user_id: str, vector_store,
+                                 permission_service) -> list:
+    """
+    Directly extends Ch. 62's metadata-filtering isolation pattern —
+    permission enforcement happens WITHIN retrieval itself, not as
+    a post-hoc filter on already-retrieved results, since a
+    post-hoc filter still risks the document's CONTENT influencing
+    the retrieval ranking even if later filtered out.
+    """
+    accessible_doc_ids = permission_service.get_accessible_documents(user_id)
+    return vector_store.query(
+        embed(query), metadata_filter={"doc_id": {"$in": accessible_doc_ids}}
+    )  # filtering happens as PART of the retrieval query itself
+```
+
+**Why filtering must happen within the retrieval query, not as a post-hoc step**: a post-hoc filter (retrieve broadly, then discard inaccessible results) still allows an inaccessible document's *presence in the candidate set* to influence which accessible documents get pushed out of a limited top-k window — a subtle but genuine leakage of information about restricted content's existence, directly the same "enforce isolation structurally, not as an afterthought" principle Chapter 55 and Chapter 62 established for multi-tenant systems generally.
+
+## Heterogeneous Document Ingestion at Enterprise Scale
+
+Directly extending Chapter 61's chunking discipline: an enterprise knowledge base ingests PDFs, Slack threads, wikis, presentation decks, and spreadsheets — each format has genuinely different natural chunking boundaries (a presentation's slide versus a wiki page's section versus a spreadsheet's row), requiring format-specific chunking strategies rather than one universal chunker applied indiscriminately.
+
+```python
+def chunk_by_format(document, doc_format: str) -> list[str]:
+    if doc_format == "presentation":
+        return chunk_by_slide(document)  # Ch. 61's "chunk boundary
+                                            # should match natural
+                                            # content structure"
+    elif doc_format == "spreadsheet":
+        return chunk_by_logical_row_group(document)
+    return chunk_by_semantic_section(document)  # Ch. 61's default
+                                                    # for prose documents
+```
+
+## Staleness at Organizational Scale: A Governance, Not Just Technical, Problem
+
+Directly extending Chapter 58's staleness-management discussion — an enterprise knowledge base's documents are owned by many different teams with no single, technical owner responsible for keeping them current; this makes staleness partly a governance problem (Chapter 76) requiring an organizational process (document owners periodically re-certifying content) alongside the technical mechanism (automated staleness flagging based on last-modified timestamps).
+
+## Deployment Approval as Internal Governance
+
+Directly extending Chapter 76's deployment-gate material to an internal tool specifically: even though an enterprise knowledge base doesn't face external customers, it still requires a deployment gate — verifying the retrieval permission-enforcement is correctly implemented (this chapter's core concern) is arguably a *higher*-stakes gate criterion here than typical content-quality metrics, since a permission-enforcement failure constitutes a data-leak incident.
+
+## Key Takeaways
+
+- Document-level access control must be enforced as part of the retrieval query itself, not as a post-hoc filter, since a post-hoc filter can still leak information about restricted content's existence through its effect on which accessible documents surface in a limited top-k result.
+- Heterogeneous enterprise document formats require format-specific chunking strategies, since each format's natural content boundaries differ genuinely, directly extending rather than replacing Chapter 61's chunking discipline.
+- Staleness management at organizational scale is partly a governance problem requiring an organizational re-certification process, not solely a technical, automatable mechanism.
+- A deployment gate for an internal enterprise tool should prioritize verifying permission-enforcement correctness as a top-tier criterion, since a failure here constitutes a data-leak incident regardless of the tool's internal-only audience.
+
+---
+
+## Interview Questions
+
+**1. Why must permission filtering happen within the retrieval query itself, rather than as a post-processing step after retrieval completes?**
+A post-hoc filter still allows a restricted document's presence in the initial, unfiltered candidate set to influence which accessible documents survive into a limited top-k window before filtering removes the restricted ones — this can subtly leak information (an accessible but only moderately relevant document might be pushed out of the top-k by a highly relevant but restricted document that gets filtered later, meaning the user never sees a document they were actually entitled to see, purely because of a document they weren't entitled to see), directly the same "structural enforcement, not an afterthought" principle Chapter 55 established for isolation generally.
+*Follow-up: Beyond this subtle leakage risk, what's a more direct security risk of post-hoc filtering that a permission-enforcement audit should specifically check for?*
+A more direct risk is a bug or oversight in the post-hoc filtering step itself (a missed edge case, an exception silently swallowed) resulting in a restricted document's actual CONTENT being included in the retrieved context and potentially surfaced to the user — a genuine, direct data leak rather than the subtler ranking-influence leakage, making structural, query-level enforcement (this chapter's recommended approach) a meaningfully more robust guarantee than relying on a separate, potentially fallible post-processing filter step.
+
+**2. Why do different enterprise document formats require genuinely different chunking strategies, rather than one universal chunker handling all formats adequately?**
+Each format's natural content boundaries differ structurally — a presentation slide represents one coherent unit of meaning, a spreadsheet's meaningful unit might be a logical group of related rows, and a wiki page's meaningful unit is typically a semantic section — applying one universal, format-agnostic chunking heuristic (say, splitting every 500 words regardless of format) would frequently cut across these natural boundaries, producing chunks that don't correspond to any coherent unit of meaning in the source format, directly the same chunking-quality concern Chapter 61 established generally, now shown to require format-specific treatment.
+*Follow-up: What would be the specific symptom of using the wrong chunking strategy for a specific format, observable through Chapter 66's evaluation metrics?*
+Using a generic, prose-oriented chunker on spreadsheet data would likely produce low context precision and recall (Chapter 66's metrics) for spreadsheet-related queries specifically, since the resulting chunks wouldn't correspond to coherent, retrievable units of tabular meaning — a format-specific diagnostic signal pointing directly toward chunking-strategy mismatch as the responsible cause, rather than a general retrieval-quality problem.
+
+**3. Why is staleness management described as "partly a governance problem" rather than a purely technical one for an enterprise knowledge base specifically?**
+Unlike Chapter 58's original framing (a single team owning and maintaining a knowledge base), an enterprise knowledge base aggregates documents from many different teams and individuals, none of whom may have an automatic, built-in incentive or reminder to update their specific documents as circumstances change — a purely technical mechanism (automated staleness flagging based on last-modified timestamps) can DETECT that a document hasn't been updated recently, but cannot by itself ensure someone with the relevant knowledge actually reviews and re-certifies it, requiring an organizational process (Chapter 76's governance material) alongside the technical detection mechanism.
+*Follow-up: How would you design the technical mechanism to support, rather than substitute for, this organizational re-certification process?*
+The technical mechanism should surface staleness signals directly to the accountable document owner (following Chapter 76's "accountable human owner" principle) — for example, automatically routing a re-certification request to the document's original author or team when it crosses a staleness threshold — making the technical detection an enabling trigger for the organizational process rather than attempting to fully automate a decision (is this content still accurate) that genuinely requires human domain knowledge to answer correctly.
+
+**4. Why should a permission-enforcement audit be prioritized as a top-tier deployment-gate criterion for an internal enterprise tool, even though the tool has no external customers?**
+Directly extending Chapter 76's deployment-gate material — the CONSEQUENCE of a permission-enforcement failure (an employee accessing another team's restricted, confidential documents through the knowledge-base assistant) constitutes a genuine internal data-leak incident with real organizational, legal, and trust consequences, regardless of the tool's internal-only audience; the "no external customers" framing doesn't reduce the actual severity of this specific failure mode, meaning it warrants the same rigorous, accountable-owner-gated verification Chapter 76 established for external-facing safety concerns.
+*Follow-up: What specific test would you run as part of this permission-enforcement audit before approving deployment?*
+I'd construct test users with deliberately varied, well-defined permission sets and directly verify, for a representative set of queries, that each test user's retrieved results never include documents outside their specific permission scope — a direct, empirical validation of the structural enforcement mechanism (this chapter's core architecture) rather than assuming its correctness from code review alone.
+
+**5. How would you diagnose whether a poor enterprise RAG response stems from a chunking-strategy mismatch versus a genuine permission-filtering gap, extending this Part's diagnostic discipline?**
+Directly extending this series' consistent component-isolation approach — check whether the truly relevant document was excluded from the candidate set because it was correctly filtered out by permission enforcement (expected, correct behavior, not a bug) versus because it was never retrieved at all due to a chunking or embedding mismatch for its specific format (this chapter's chunking-strategy concern) — these are genuinely different situations requiring entirely different diagnoses and responses.
+*Follow-up: Why is it important to explicitly distinguish these two cases, rather than treating both as "the document didn't appear" and investigating them identically?*
+Treating a correct permission-based exclusion as a retrieval bug would risk a team attempting to "fix" and inadvertently weaken the permission-enforcement mechanism this chapter established as a critical safety boundary — explicitly distinguishing "correctly excluded due to permissions" from "incorrectly excluded due to a chunking gap" prevents this dangerous misdiagnosis, ensuring remediation effort targets the genuine chunking problem without ever risking the security-critical permission-enforcement logic.

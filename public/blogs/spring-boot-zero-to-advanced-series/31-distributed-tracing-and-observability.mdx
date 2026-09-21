@@ -1,0 +1,195 @@
+---
+title: "Distributed Tracing & Observability Across Microservices"
+description: "Chapter 19 introduced tracing within one service. Once a request spans a gateway, several services, and possibly an event or two, that single-service view stops being enough — this chapter completes the picture."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 31
+tags: ["Spring Boot", "Distributed Tracing", "Observability", "Microservices"]
+---
+
+Chapter 19 introduced Micrometer Tracing within a single service, and Chapter 22 showed a hand-rolled correlation ID via `MDC`. Now that Part 7 has built a gateway (Chapter 26), inter-service calls (Chapters 27–28), and asynchronous events (Chapters 29–30), a single request can genuinely span five or six different processes — and "grep the logs for a correlation ID across six different services' log files" stops being a practical debugging strategy.
+
+## Why single-service tracing isn't enough anymore
+
+```
+Client ──▶ Gateway ──▶ order-service ──▶ inventory-service
+                              │
+                              └──publishes──▶ [Kafka] ──▶ notification-service
+```
+
+One logical user action now touches four separate processes, potentially each with their own logs, each running as multiple scaled instances. Chapter 19's single-service trace ID needs to become a **distributed trace** — one identifier that follows the request across every one of these hops, with each service's contribution captured as a distinct, timed **span** within that overall trace.
+
+## Traces and spans
+
+- **Trace** — the complete record of one logical request's journey, end to end, across every service it touched.
+- **Span** — one unit of work within that trace — "the gateway routed this request" is a span, "`order-service` handled this request" is a span, "`order-service` called `inventory-service`" is a span. Spans are hierarchical: a service's overall handling of a request is a parent span, and any further calls it makes are child spans nested within it.
+
+```
+Trace: 4a8f2c91
+├─ Span: Gateway routing              (12ms)
+├─ Span: order-service handling       (145ms)
+│  ├─ Span: order-service → inventory-service call   (89ms)
+│  └─ Span: order-service → Kafka publish             (3ms)
+└─ Span: notification-service handling (consumed from Kafka)   (34ms)
+```
+
+This structure is exactly what makes a slow request's *actual* bottleneck visible at a glance — in this example, the `inventory-service` call consumes 89ms of `order-service`'s 145ms total, immediately pointing at where to look first.
+
+## Propagating trace context automatically
+
+```xml
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-tracing-bridge-brave</artifactId>
+</dependency>
+<dependency>
+    <groupId>io.zipkin.reporter2</groupId>
+    <artifactId>zipkin-reporter-brave</artifactId>
+</dependency>
+```
+
+```yaml
+management:
+  tracing:
+    sampling:
+      probability: 1.0   # trace 100% of requests — lower in high-volume production
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans
+```
+
+With this dependency on the classpath, Micrometer Tracing automatically instruments `WebClient`/`RestClient`/Feign calls (Chapter 28), propagating trace context via HTTP headers (`traceparent`, following the W3C Trace Context standard) on every outbound call with **zero code changes** — the same MDC-based logging correlation from Chapter 22 now happens automatically, and extends across service boundaries rather than stopping at each process's edge.
+
+```
+order-service                              inventory-service
+┌──────────────────────┐                  ┌──────────────────────┐
+│ traceId: 4a8f2c91       │  HTTP request    │ reads traceparent      │
+│ spanId: e21a            │  with header:    │ header, continues      │
+│                         │  traceparent:    │ the SAME trace,        │
+│ calls inventory-service │  00-4a8f2c91-... │ new child span         │
+└──────────────────────┘─────────────────▶└──────────────────────┘
+```
+
+## Propagating trace context through Kafka events
+
+Chapter 29's events don't automatically inherit HTTP header propagation — Micrometer Tracing's Kafka instrumentation handles this instead, injecting trace context into the message's own headers at publish time, and continuing the same trace when a consumer processes it:
+
+```java
+@KafkaListener(topics = "order-events", groupId = "notification-service")
+void handleOrderCreated(OrderCreatedEvent event) {
+    // this span automatically joins the SAME trace the original HTTP request started,
+    // even though it's now running asynchronously, in a different process, at a later time
+    log.info("Processing order created event");   // logs automatically include the shared traceId
+}
+```
+
+This is precisely the mechanism that lets a trace correctly show a request's full journey even after it crosses from a synchronous HTTP call into an asynchronous, eventually-consumed Kafka message — genuinely difficult to reconstruct manually, and one of the strongest practical arguments for adopting proper distributed tracing rather than relying on correlation IDs alone once events are involved.
+
+## Visualizing traces with Zipkin
+
+```bash
+docker run -d -p 9411:9411 openzipkin/zipkin
+```
+
+Zipkin (or an OpenTelemetry-compatible alternative) collects the spans every instrumented service reports and reconstructs the full trace visually — a timeline showing every span's duration, nested correctly, exactly like this chapter's ASCII diagram but interactive and searchable by trace ID, service, or duration. This is the practical tool a team actually opens during an incident, rather than manually correlating logs.
+
+## Best practices & gotchas
+
+- **Sample intelligently in high-volume production systems.** Tracing every single request (`probability: 1.0`) is fine for learning and lower-traffic systems, but adds real overhead at high volume — most production systems sample a percentage (1–10%) or trace 100% of *error* requests specifically while sampling normal traffic more lightly.
+- **Trace context propagation across Kafka/RabbitMQ needs to be explicitly verified, not assumed.** It's automatic with the right Micrometer Tracing instrumentation dependency present, but a custom message-publishing path that bypasses the instrumented `KafkaTemplate`/`RabbitTemplate` can silently break the chain.
+- **A broken trace (a span with no visible parent) is itself a diagnostic signal**, not just an annoyance — it often indicates a service or call path that isn't correctly instrumented yet, worth fixing before it's needed during a real incident.
+- **Combine tracing with the metrics and logs from Chapters 19 and 22 — none of the three replaces the others.** Metrics tell you *that* something is slow; tracing tells you *where* in the distributed call chain; logs (now correlated by the same trace ID) tell you the specific *what happened* detail once you've narrowed down where to look.
+- **Trace visualization tools are only as good as instrumentation coverage.** A service that isn't instrumented at all creates a gap in the trace — its work happens, but invisibly, undermining the very thing distributed tracing is meant to provide.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| Trace | The complete record of one logical request across every service it touched |
+| Span | One timed unit of work within a trace, hierarchically nested |
+| `traceparent` header | W3C standard header propagating trace context across HTTP calls |
+| Micrometer Tracing | Auto-instruments HTTP clients and messaging to propagate trace context |
+| Zipkin | Collects and visualizes reported spans as a reconstructed trace timeline |
+| Sampling | Tracing a percentage of requests rather than all of them, for overhead control |
+
+## Wrapping up
+
+Distributed tracing is what makes "a request is slow, and it touches five services" an answerable question rather than a guessing exercise — closing the observability picture Chapter 19 started within a single service. **Chapter 32** tackles the hardest remaining problem in this architecture: what happens when a multi-service operation partially fails, and how the Saga pattern handles distributed transactions without a shared database transaction to rely on.
+
+## Interview Questions
+
+**1. What's the difference between a trace and a span?**
+A trace represents the complete, end-to-end record of one logical request's journey across every service and operation it touched. A span represents one specific, timed unit of work within that trace — a single service handling the request, or a single outbound call it makes — and spans are hierarchically nested, with a parent span representing an overall operation and child spans representing the sub-operations that occurred within it.
+
+*Follow-up: In the example trace diagram in this chapter, why is "order-service → inventory-service call" shown as a child span of "order-service handling" rather than as its own separate, unrelated span?* Because that outbound call is a sub-operation that occurs *within* `order-service`'s overall handling of the request — it's part of the work `order-service` does to fulfill its own responsibility for that request, so representing it as a nested child span accurately reflects that it's contained within, and contributes to, the total duration of `order-service`'s parent span, rather than being an independent, unrelated unit of work.
+
+**2. Why does Chapter 22's MDC-based correlation ID approach stop being sufficient once Kafka events (Chapter 29) are introduced into the architecture?**
+MDC is fundamentally per-thread and per-process — it has no built-in mechanism for propagating context across an asynchronous boundary like publishing a message to Kafka and having a completely separate consumer process pick it up later, potentially much later and in an entirely different process. A hand-rolled correlation ID would need to be manually included in the event's payload or headers and manually extracted and re-set into MDC by every consumer — proper distributed tracing infrastructure automates exactly this propagation, including across messaging boundaries, rather than requiring it to be manually implemented at every producer and consumer.
+
+*Follow-up: Does this mean the correlation ID filter built in Chapter 22 becomes entirely obsolete once proper distributed tracing is adopted?* Not entirely obsolete — the underlying concept (a shared identifier tying related log lines together) is exactly what a trace ID provides, generally superseding the need for a separately hand-rolled correlation ID once full distributed tracing is in place; but understanding the manual mechanics Chapter 22 covered remains valuable for understanding what the automated tooling is actually doing underneath, and for any parts of a system a full tracing setup doesn't yet cover.
+
+**3. What is the `traceparent` header, and what does it standardize?**
+It's a header defined by the W3C Trace Context standard that carries a trace's identifying information (trace ID, the current span ID, and trace flags) across an HTTP request — because it's a standardized format, tracing tools and libraries from different vendors/ecosystems can correctly recognize and propagate trace context consistently, even across services that might use different specific tracing implementations, as long as they all respect the same standard header format.
+
+*Follow-up: Why does standardization matter specifically in a system that might include services built with different languages or frameworks?* Without a standardized propagation format, each language/framework's tracing library might use its own proprietary header format for carrying trace context, meaning a trace could be silently broken the moment a request crosses from a service using one tracing implementation to a service using a different, incompatible one — a shared, standardized format like `traceparent` ensures trace continuity is preserved regardless of what specific tracing library or even what programming language each individual service happens to use, which matters especially in polyglot systems (echoing the point from Chapter 23 about justified technology diversity across services).
+
+**4. How does Micrometer Tracing propagate trace context across an HTTP call made via `WebClient`, `RestClient`, or Feign, without requiring explicit code changes at each call site?**
+Once the appropriate Micrometer Tracing dependency (like the Brave bridge shown in this chapter) is on the classpath, it auto-instruments these HTTP clients — automatically adding the `traceparent` header (and continuing the appropriate span hierarchy) to every outbound call made through them, and automatically extracting and continuing the trace context from an incoming request's `traceparent` header on the receiving side — all through auto-configuration, the same underlying mechanism (Chapter 4) that's made most of this series' features work with minimal explicit setup.
+
+*Follow-up: What would happen to trace continuity if a service made an outbound HTTP call using a plain `java.net.http.HttpClient` directly, bypassing Spring's instrumented clients entirely?* That specific call wouldn't have the `traceparent` header automatically added, since it's bypassing the auto-instrumented client entirely — the receiving service would see this as the start of a brand new, unrelated trace rather than a continuation of the original one, breaking the trace chain at exactly that point; this is precisely the kind of gap the earlier best-practice point about verifying propagation (rather than assuming it) is meant to catch.
+
+**5. Why doesn't trace context propagate automatically through a Kafka event the same simple way it does through an HTTP header, and how is it actually achieved?**
+An HTTP request has a standard, universally understood place to carry additional metadata (headers), and Micrometer Tracing's HTTP client instrumentation is built specifically to leverage that. A Kafka message similarly has its own header mechanism, but propagating trace context through it requires Micrometer Tracing's specific Kafka instrumentation to inject the trace context into the message's headers at publish time and extract it again when a consumer processes the message — this is automatic once the correct instrumentation is in place and the standard `KafkaTemplate`/`@KafkaListener` mechanisms are used, but it's a distinct instrumentation concern from the HTTP case, not something that happens by some universal, protocol-independent mechanism.
+
+*Follow-up: What would happen to a Kafka-based trace if a team wrote a custom, low-level Kafka producer/consumer implementation instead of using Spring's standard `KafkaTemplate` and `@KafkaListener`?* If the custom implementation bypasses the points where Micrometer Tracing's Kafka instrumentation hooks in (typically via interceptors on the standard producer/consumer), trace context wouldn't be automatically injected into or extracted from the message headers — the trace would break at that point, exactly as with the bypassed HTTP client example, requiring the team to either use the standard, instrumented mechanisms or manually implement the equivalent trace-context propagation themselves within their custom implementation.
+
+**6. Why might a production system choose to sample traces at less than 100% rather than tracing every single request?**
+Tracing every request adds real overhead — generating, propagating, and reporting span data for every single request, at high traffic volumes, consumes meaningful additional CPU, memory, and network/storage resources for the tracing infrastructure itself; sampling a representative percentage of requests provides most of the practical diagnostic value (statistically representative visibility into typical request behavior and bottlenecks) while substantially reducing that overhead at scale.
+
+*Follow-up: Why might a team specifically choose to trace 100% of error/failed requests while sampling normal, successful requests more lightly?* Error requests are disproportionately valuable for debugging — exactly the fraction of traffic a team is most likely to need to investigate in detail — while successful, "everything worked fine" requests provide diminishing additional diagnostic value once you have a reasonable statistical sample of them; prioritizing full tracing coverage specifically for failures maximizes the practical debugging value of the traces actually captured, without paying the overhead cost of tracing every single successful, unremarkable request at the same full rate.
+
+**7. What does it mean for a trace to be "broken," and why is this itself considered a useful diagnostic signal rather than just a minor annoyance?**
+A broken trace typically means a span appears with no correctly linked parent — either because a service or call path wasn't properly instrumented, or because context propagation failed at some specific point (like the earlier bypassed-HTTP-client or custom-Kafka-producer examples) — effectively creating a gap where the trace's continuity is lost. This is a useful signal because it directly points to a specific instrumentation gap in the system that should be fixed proactively, rather than being discovered for the first time during an actual incident when that missing visibility is most urgently needed.
+
+*Follow-up: How would a team practically go about finding and fixing these instrumentation gaps before they matter during a real incident?* Periodically reviewing traces for unexpected "orphaned" spans or unexpectedly short, disconnected traces in Zipkin (or an equivalent tool) during normal operation — not just during incidents — and treating any discovered gap as something to investigate and fix (usually by ensuring the affected call path uses Spring's standard, auto-instrumented clients/messaging templates rather than a custom bypass) proactively, effectively treating tracing coverage itself as something worth monitoring and maintaining, similar to how test coverage or logging coverage might be tracked and improved over time.
+
+**8. How do metrics, logs, and distributed tracing complement each other, extending the same three-pillars framing introduced in Chapter 22?**
+Metrics (Chapter 19) reveal *that* something is behaving abnormally in aggregate (a latency spike, an elevated error rate) across many requests. Distributed tracing (this chapter) reveals *where*, specifically, within a multi-service request's journey the actual time is being spent or the failure is occurring. Correlated logs (Chapter 22, now extended across services via the shared trace ID) provide the detailed *what exactly happened* narrative for the specific spans of interest identified through tracing — each pillar answers a different, complementary question in a real investigation, rather than any one of them being sufficient alone.
+
+*Follow-up: If a team only had budget/capacity to properly implement one of these three pillars first for a growing microservices system, which would you argue provides the most immediate value, and why?* This is genuinely debatable and depends on the system's specific pain points, but metrics are often argued as the most immediately valuable starting point since they're comparatively simple to implement (largely automatic once Actuator/Micrometer is present, per Chapter 19) and provide the earliest warning that something needs investigation at all — without at least basic metrics, a team might not even know to start looking for a problem, whereas tracing and correlated logs become most valuable specifically once you already know roughly where and what to investigate.
+
+**9. Why is "grep the logs across six different services' files" specifically identified as impractical, rather than merely inconvenient, once a system reaches a certain scale?**
+At real production scale, each of those six services likely runs as multiple instances, each generating its own log stream, with requests interleaved across many concurrent users — manually searching across potentially dozens of individual log streams (six services × multiple instances each) for lines related to one specific user's specific request, with no shared identifier to search on, becomes not just tedious but genuinely infeasible to do reliably and quickly, especially under the time pressure of an active production incident.
+
+*Follow-up: How does having logs centralized in an aggregation platform (mentioned back in Chapter 22) change this specific difficulty, even without full distributed tracing?* Centralizing logs into a single searchable platform (rather than needing to access each service instance's individual log files directly) at least makes searching mechanically possible across all instances and services from one place — but without a shared trace ID (or hand-rolled correlation ID) present in every relevant log line, a search would still need to rely on secondary identifiers (a customer ID, an order ID) that may not appear consistently across every service's logs, or might match unrelated requests too broadly — centralization solves the "where do I even search" problem, while tracing/correlation IDs solve the "how do I reliably find exactly the right lines" problem, and both matter together.
+
+**10. In the trace diagram example, `order-service`'s parent span is 145ms while its child span calling `inventory-service` is 89ms — what does this specific relationship reveal, and how would a team act on it?**
+It reveals that the majority (89ms out of 145ms, roughly 61%) of `order-service`'s total handling time for this request is spent waiting on its call to `inventory-service`, rather than in `order-service`'s own internal logic — this immediately focuses investigative effort on `inventory-service`'s performance (or the network path to it) as the primary lever for improving this request's overall latency, rather than spending time optimizing `order-service`'s own code, which only accounts for the remaining roughly 56ms.
+
+*Follow-up: If a team wanted to further understand *why* the call to `inventory-service` specifically takes 89ms, what would the natural next step be within the same tracing framework?* Examine `inventory-service`'s own span for its portion of this same trace — since `inventory-service`'s handling of this specific request is itself captured as a span (or set of nested spans) within the overall trace, drilling into that span would reveal `inventory-service`'s own internal breakdown (perhaps a slow database query, or a further call to yet another dependency), continuing the same "find the actual bottleneck by following the trace's nested spans" process recursively as deep as the instrumentation coverage extends.
+
+**11. Why does this chapter distinguish "auto-instrumentation" (what Micrometer Tracing provides for standard Spring HTTP clients and messaging templates) from something a developer needs to write manually?**
+Auto-instrumentation means the tracing behavior (creating spans, propagating context) happens automatically as a side effect of using Spring's standard, supported components (`WebClient`, `RestClient`, `KafkaTemplate`, `@KafkaListener`, and similar) — a developer using these components gets correct tracing behavior "for free," without needing to explicitly write any span-creation or context-propagation code themselves, which is precisely the same "auto-configuration handles the common case" philosophy that's run throughout this entire series since Chapter 4.
+
+*Follow-up: Is there ever a legitimate reason a developer would need to manually create or manipulate spans, rather than relying entirely on auto-instrumentation?* Yes — for capturing custom, business-meaningful units of work that aren't automatically instrumented by any standard client library (for example, wanting a dedicated span specifically around a particularly significant piece of internal business logic or a call to a legacy system without built-in instrumentation), Micrometer Tracing provides an API for manually creating and managing spans explicitly — auto-instrumentation handles the common, standard integration points, while manual span creation remains available and appropriate for capturing additional, custom detail beyond what auto-instrumentation covers on its own.
+
+**12. What's the relationship between distributed tracing and the resilience patterns covered in Chapter 27 — how might a trace help diagnose a circuit breaker that's tripping unexpectedly?**
+A trace can show exactly what's happening during the calls that are causing a circuit breaker's failure rate to climb — whether calls are failing quickly with an actual error, or taking a long time before eventually failing/timing out (which points toward a Time Limiter or the dependency's own performance being the underlying issue), and whether the problem correlates with a specific pattern (a specific downstream instance, a specific time window, a specific type of request) — turning "the circuit breaker for `inventoryService` keeps tripping" from a vague symptom into a concrete, traceable pattern worth investigating at its actual root cause.
+
+*Follow-up: Would you expect Micrometer Tracing to automatically capture a span specifically noting "this call failed because the circuit breaker was OPEN and the fallback was invoked"?* Depending on the specific integration and configuration, Resilience4j's Micrometer integration can expose circuit breaker state changes and related events as their own observable data (metrics, and potentially span-level annotations depending on the specific instrumentation setup) — so this kind of detail can often be made visible through the combined observability stack, though the exact level of automatic detail may require confirming the specific instrumentation and version in use provides it, rather than assuming it's universally guaranteed without verification.
+
+**13. Why is it emphasized that "trace visualization tools are only as good as instrumentation coverage" — what's the risk of partial instrumentation?**
+If some services or specific call paths within a system aren't properly instrumented, the work that happens in those uninstrumented parts is simply invisible to the tracing tool — a trace might show a large, unexplained gap in time between two visible spans, with no indication of what actually happened during that gap, because whatever occurred there (perhaps a slow, uninstrumented internal process, or a call through a bypassed client) never reported any span data at all; this creates a false sense of complete visibility when, in reality, meaningful parts of the system's actual behavior remain unobserved.
+
+*Follow-up: How might a team notice that they have partial, rather than complete, instrumentation coverage across their services?* Noticing unexplained time gaps between spans in traces (time accounted for by the overall trace duration but not attributed to any specific, visible span), or specific services that never appear at all in traces despite being known to be involved in certain request flows, are both concrete signals of an instrumentation gap — treating these observations as prompts to investigate and add proper instrumentation to the specific uncovered service or call path, continuing the proactive instrumentation-gap-hunting practice mentioned in an earlier answer.
+
+**14. How does the concept of a "span" relate to the concept of a "filter" from Chapter 8, in terms of where instrumentation code conceptually sits relative to actual business logic?**
+Similar to how Chapter 8's filters wrap around the actual request-handling logic to apply cross-cutting behavior (logging, security) without being part of the business logic itself, a span represents a similarly cross-cutting, wrapping concern — timing and identifying a unit of work — layered around the actual code doing the real work, without that code needing to be aware of or directly manage the tracing infrastructure itself (thanks to auto-instrumentation). Both are examples of the broader pattern of separating cross-cutting infrastructure concerns from core business logic, letting the business logic stay focused purely on its actual responsibility.
+
+*Follow-up: Does this mean a developer writing ordinary business logic inside, say, `OrderService.create()` typically needs to think about spans and tracing at all in their day-to-day code?* Generally no, for the majority of standard operations that go through auto-instrumented components (HTTP calls, database access, Kafka publish/consume) — the tracing infrastructure operates transparently around that code without requiring explicit awareness or interaction, exactly the same "it just works, thanks to auto-configuration" experience this series has emphasized repeatedly since Chapter 4; a developer typically only needs to think explicitly about spans when they want to add custom, manual instrumentation beyond what auto-instrumentation already provides, as discussed in an earlier answer.
+
+**15. Summarize how distributed tracing changes the observability picture established in Chapter 19, now that Part 7 has introduced a gateway, inter-service calls, and asynchronous events.**
+Chapter 19 established metrics, health checks, and tracing within the scope of a single service. This chapter extends tracing specifically to follow one logical request's complete journey across every service, the gateway, and even asynchronous event hops it touches — turning what would otherwise be disconnected, per-service observability into a single, coherent, end-to-end view of genuinely distributed request flows, which is precisely the missing piece needed to debug and understand performance across the multi-service architecture the rest of Part 7 has been building.
+
+*Follow-up: Looking back across Chapters 23–31, what's the common thread connecting why each of these infrastructure pieces (discovery, config, gateway, resilience, communication, messaging, tracing) became necessary?* Every single one of these pieces exists specifically because Chapter 23's decision to split a system into multiple independently deployed services introduces a problem that simply doesn't exist within a single monolithic process — finding services (Chapter 24), managing their configuration consistently (Chapter 25), presenting them as one coherent API (Chapter 26), tolerating network unreliability (Chapter 27), actually making the calls (Chapter 28), decoupling communication where appropriate (Chapters 29–30), and finally, being able to see and understand a request's journey across all of it (this chapter) — together, these represent the real, concrete cost side of the microservices trade-off Chapter 23 opened Part 7 by being honest about upfront.

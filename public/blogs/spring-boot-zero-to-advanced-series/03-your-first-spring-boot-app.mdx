@@ -1,0 +1,216 @@
+---
+title: "Your First Spring Boot App: Initializr, Project Structure & Starters"
+description: "Generate a real Spring Boot project, understand exactly what each generated file does, and see how starters translate into actual dependencies on your classpath."
+date: "2026-09-14"
+readTime: "11 min read"
+series: "spring-boot"
+part: 3
+tags: ["Spring Boot", "Maven", "Project Setup"]
+---
+
+With IoC, DI, and beans covered in Chapter 2, it's time to generate an actual project and understand every file it comes with.
+
+## Generating a project with Spring Initializr
+
+[start.spring.io](https://start.spring.io) is the standard way to bootstrap a Spring Boot project. For this series:
+
+- **Project:** Maven
+- **Language:** Java
+- **Spring Boot version:** latest 3.x
+- **Java:** 21
+- **Dependencies:** `Spring Web` to start (we'll add more per chapter — Spring Data JPA in Part 3, Spring Security in Part 4, and so on)
+
+Downloading and unzipping the generated project gives you this structure:
+
+```
+demo/
+├── pom.xml
+├── mvnw, mvnw.cmd, .mvn/           # Maven wrapper — no local Maven install needed
+├── src/
+│   ├── main/
+│   │   ├── java/com/example/demo/
+│   │   │   └── DemoApplication.java
+│   │   └── resources/
+│   │       ├── application.properties
+│   │       ├── static/             # served as-is at the root path
+│   │       └── templates/          # for server-side view templates (Thymeleaf, etc.)
+│   └── test/
+│       └── java/com/example/demo/
+│           └── DemoApplicationTests.java
+```
+
+## The main application class
+
+```java
+package com.example.demo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+}
+```
+
+`@SpringBootApplication` is a convenience annotation combining three others (this matters — it comes up constantly in interviews):
+
+```java
+@SpringBootConfiguration   // marks this as a source of bean definitions (a specialized @Configuration)
+@EnableAutoConfiguration   // turns on Spring Boot's auto-configuration mechanism
+@ComponentScan             // scans this package and sub-packages for @Component classes
+public @interface SpringBootApplication { }
+```
+
+That third annotation, `@ComponentScan`, is why **package placement matters**: Boot scans the package of the class annotated with `@SpringBootApplication` and everything beneath it. A `@Service` class in a sibling package that isn't a sub-package of `com.example.demo` simply won't be found.
+
+```
+com.example.demo                 ← @SpringBootApplication lives here, scan starts here
+├── DemoApplication.java
+├── order/
+│   └── OrderService.java        ✓ found (sub-package)
+com.example.other                ← sibling, NOT under com.example.demo
+└── SomeService.java             ✗ not found — outside the scan root
+```
+
+## `SpringApplication.run()` — what actually happens
+
+Calling `run()` does a specific, ordered sequence of work:
+
+1. Creates the `ApplicationContext` (a `AnnotationConfigServletWebServerApplicationContext` for a typical web app)
+2. Determines the application type (servlet web, reactive web, or none) from the classpath
+3. Loads configuration from `application.properties`/`.yml`, environment variables, and command-line arguments, in a defined precedence order
+4. Runs auto-configuration to register beans based on what's on the classpath
+5. Refreshes the context — instantiating and wiring all beans
+6. Starts the embedded server (Tomcat by default, listening on port 8080) if it's a web application
+7. Runs any `CommandLineRunner`/`ApplicationRunner` beans
+
+## Understanding a starter as an actual dependency
+
+`pom.xml` after choosing "Spring Web":
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-test</artifactId>
+        <scope>test</scope>
+    </dependency>
+</dependencies>
+```
+
+Notice there's no `<version>` on either — that's `spring-boot-starter-parent` (declared as this project's `<parent>`) providing centrally managed versions, so every starter you add stays compatible with the Spring Boot version you picked.
+
+Run `mvn dependency:tree` and you'll see what `spring-boot-starter-web` actually resolves to: `spring-webmvc`, `spring-boot-starter-json` (Jackson), `spring-boot-starter-tomcat` (the embedded server), and `spring-boot-starter` (the base starter, pulling in core Spring Boot, logging via Logback, and property support). One line in `pom.xml` becomes a whole compatible stack.
+
+## Running the application
+
+```bash
+./mvnw spring-boot:run
+```
+
+or, after packaging:
+
+```bash
+./mvnw clean package
+java -jar target/demo-0.0.1-SNAPSHOT.jar
+```
+
+The packaged JAR is an **"executable" or "fat" JAR** — it contains your compiled classes *and* every dependency's classes *and* the embedded Tomcat, all runnable with a plain `java -jar`. This is what makes a Spring Boot app trivially deployable as a single artifact into a Docker container (Chapter 35).
+
+## Best practices & gotchas
+
+- **Keep the `@SpringBootApplication` class at the root of your base package.** Moving business logic into a sibling package instead of a sub-package is the single most common reason "why isn't my bean being found" question in Spring Boot.
+- **Commit the Maven wrapper (`mvnw`, `.mvn/`) to version control.** It pins the exact Maven version for the project, so `./mvnw` behaves identically on every machine and CI runner regardless of what's globally installed.
+- **Don't manually add versions to starter dependencies** managed by `spring-boot-starter-parent` — let the parent POM manage them, and only override a version explicitly when you have a specific, documented reason to diverge.
+- **Use `mvn dependency:tree` early and often** when something unexpected shows up on the classpath (a wrong Jackson version, a conflicting logging framework) — starters make dependency management easy, but "easy" can also mean "opaque" until you know how to inspect it.
+
+## Quick reference
+
+| File/Concept | Purpose |
+|---|---|
+| `pom.xml` | Declares dependencies (starters) and the Spring Boot parent for version management |
+| `mvnw` / `.mvn/` | Maven wrapper — no local Maven installation required |
+| `@SpringBootApplication` | Combines `@SpringBootConfiguration` + `@EnableAutoConfiguration` + `@ComponentScan` |
+| `SpringApplication.run()` | Bootstraps the context, runs auto-configuration, starts the embedded server |
+| `src/main/resources/application.properties` | Externalized configuration (Chapter 5) |
+| `src/main/resources/static/` | Static assets served as-is |
+| Executable/fat JAR | Your code + dependencies + embedded server, runnable via `java -jar` |
+
+## Wrapping up
+
+You now have a real, runnable Spring Boot application and know exactly what each generated file is for — no piece of it is unexplained "magic." Next, **Chapter 4** goes one level deeper into the mechanism that made this all possible with zero manual bean wiring: auto-configuration internals.
+
+## Interview Questions
+
+**1. What three annotations make up `@SpringBootApplication`?**
+`@SpringBootConfiguration` (a specialized `@Configuration`, marking the class as a source of bean definitions), `@EnableAutoConfiguration` (turns on Spring Boot's classpath-based auto-configuration), and `@ComponentScan` (scans the current package and sub-packages for `@Component`-annotated classes).
+
+**2. Why does the location of the `@SpringBootApplication` class matter?**
+Because `@ComponentScan` (bundled inside `@SpringBootApplication`) scans the package of that class and everything beneath it by default. A `@Service` or `@Component` class living outside that package tree won't be picked up unless you explicitly widen the scan with `@ComponentScan(basePackages = ...)`.
+
+**3. What exactly happens when you call `SpringApplication.run()`?**
+It creates the appropriate `ApplicationContext` based on the detected application type, loads configuration properties from files/environment/args in a defined precedence order, runs auto-configuration to register beans based on the classpath, refreshes the context (instantiating and wiring beans), starts the embedded server if applicable, and finally runs any `CommandLineRunner`/`ApplicationRunner` beans.
+
+**4. What is a "fat" or "executable" JAR, and why does Spring Boot produce one?**
+It's a single JAR containing your application's compiled classes, all of its dependencies' classes, and (for web apps) the embedded server, structured so the whole thing can run with a plain `java -jar app.jar`. Spring Boot produces this so applications are trivially deployable as one self-contained artifact — no external application server, no separate dependency installation step, which pairs naturally with container-based deployment.
+
+**5. What's the role of `spring-boot-starter-parent` in `pom.xml`?**
+It's a parent POM that supplies centrally managed dependency versions (so starters don't need explicit `<version>` tags), sensible default plugin configuration (like the `spring-boot-maven-plugin` for building the fat JAR), and default compiler settings, keeping everything version-aligned with the chosen Spring Boot release.
+
+**6. If your project already has its own parent POM, how do you still get Spring Boot's managed dependency versions?**
+By importing `spring-boot-dependencies` as a BOM (Bill of Materials) in the `<dependencyManagement>` section instead of setting it as the `<parent>`:
+```xml
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-dependencies</artifactId>
+            <version>3.x.x</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+```
+
+**7. What does `spring-boot-starter-web` actually pull in?**
+Spring MVC (`spring-webmvc`), JSON support (`spring-boot-starter-json`, i.e., Jackson), an embedded Tomcat (`spring-boot-starter-tomcat`), and the base `spring-boot-starter` (core auto-configuration plus Logback for logging). You can inspect this exactly with `mvn dependency:tree`.
+
+**8. What's the difference between `src/main/resources/static` and `src/main/resources/templates`?**
+`static/` holds assets served exactly as-is (CSS, JS, images) at the corresponding URL path with no processing. `templates/` is where server-side view templates (like Thymeleaf) live, to be rendered dynamically by a template engine before being returned as HTML — relevant for server-rendered MVC apps rather than pure REST APIs.
+
+**9. Why should the Maven wrapper (`mvnw`) be committed to version control?**
+It pins an exact Maven version to the project via a small script and a properties file, so every developer and CI environment builds with the identical Maven version regardless of what (if anything) is installed globally — eliminating "works on my machine" build inconsistencies caused by Maven version drift.
+
+**10. How would you run a Spring Boot app without building the JAR first, during active development?**
+`./mvnw spring-boot:run` compiles and runs the application directly via the Spring Boot Maven plugin, without producing a standalone JAR — the fastest inner-loop option while iterating locally.
+
+**11. What determines whether Spring Boot starts a servlet-based web app, a reactive web app, or no web server at all?**
+Spring Boot inspects the classpath: if `spring-boot-starter-web` (Spring MVC) is present, it configures a servlet-based application; if `spring-boot-starter-webflux` is present instead (and `-web` isn't), it configures a reactive application; if neither web starter is present, it runs as a plain, non-web application with no embedded server.
+
+**12. What is `CommandLineRunner` used for?**
+It's a functional interface for running code once, immediately after the application context has fully started — commonly used for startup tasks like seeding reference data, or, in this project's context, running one-off validation right after boot:
+```java
+@Bean
+CommandLineRunner init(UserRepository repo) {
+    return args -> repo.save(new User("admin"));
+}
+```
+
+**13. What's the difference between `CommandLineRunner` and `ApplicationRunner`?**
+Both run once after startup and are ordered the same way if multiple exist (via `@Order`/`Ordered`). The difference is the method signature: `CommandLineRunner.run(String... args)` gives you raw command-line arguments, while `ApplicationRunner.run(ApplicationArguments args)` gives you a parsed representation distinguishing option arguments (`--key=value`) from plain non-option arguments.
+
+**14. Can you have multiple `@SpringBootApplication`-annotated classes in one project?**
+Only one should be used as the actual entry point passed to `SpringApplication.run()` for a given application context. Having a second one elsewhere in the scanned package tree would trigger a redundant/duplicate configuration scan and is not a supported pattern — large codebases instead split into multiple Maven modules or separate deployable applications, each with exactly one entry point.
+
+**15. Why does removing `<version>` from a starter dependency not cause a build failure?**
+Because the version is supplied by Maven's dependency management, inherited from `spring-boot-starter-parent` (or an imported `spring-boot-dependencies` BOM). Maven resolves the version from that dependency management section at build time, so omitting it is expected and intentional — it's what keeps every starter aligned to the same tested Spring Boot release.

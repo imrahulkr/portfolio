@@ -1,0 +1,244 @@
+---
+title: "Actuator & Observability: Health Checks, Metrics & Distributed Tracing"
+description: "A working application isn't a production-ready one. Actuator, Micrometer, and tracing are what let you actually see what a running Spring Boot application is doing — before an outage forces you to find out the hard way."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 19
+tags: ["Spring Boot", "Actuator", "Observability", "Micrometer"]
+---
+
+Everything built through Part 5 works and is tested — but once deployed, how do you know it's actually healthy, how fast it's responding, or where a slow request is spending its time? This chapter covers Spring Boot's built-in answer: Actuator, Micrometer, and tracing.
+
+## Adding Actuator
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+```
+
+This alone exposes a set of operational HTTP endpoints under `/actuator` — health checks, metrics, environment details, and more — auto-configured the same way everything else in this series has been (Chapter 4).
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+```
+
+**By default, only `/actuator/health` and `/actuator/info` are exposed** — everything else must be explicitly opted into via `exposure.include`, precisely because some endpoints (like `/actuator/env`, which can reveal configuration values) are sensitive and shouldn't be publicly reachable without deliberate thought.
+
+## Health checks
+
+```
+GET /actuator/health
+
+{
+  "status": "UP",
+  "components": {
+    "db": { "status": "UP", "details": { "database": "PostgreSQL" } },
+    "diskSpace": { "status": "UP" },
+    "ping": { "status": "UP" }
+  }
+}
+```
+
+Spring Boot auto-configures health indicators for common infrastructure it detects on the classpath — a `DataSource`, Redis, Kafka — each contributing its own component to the aggregate health status. This is what a Kubernetes liveness/readiness probe (Chapter 35) typically polls to decide whether an instance is healthy enough to receive traffic.
+
+```java
+@Component
+public class ExternalPaymentGatewayHealthIndicator implements HealthIndicator {
+
+    private final PaymentGatewayClient client;
+
+    @Override
+    public Health health() {
+        try {
+            client.ping();
+            return Health.up().build();
+        } catch (Exception e) {
+            return Health.down(e).withDetail("gateway", "unreachable").build();
+        }
+    }
+}
+```
+
+A custom `HealthIndicator` bean is automatically picked up and contributes to the overall `/actuator/health` aggregate — useful for surfacing the health of an external dependency your application genuinely can't function correctly without.
+
+## Metrics with Micrometer
+
+Micrometer is Spring Boot's metrics facade — a vendor-neutral API that can export to Prometheus, Datadog, CloudWatch, and others without changing application code.
+
+```java
+@Service
+class OrderService {
+
+    private final Counter ordersCreated;
+    private final Timer orderProcessingTimer;
+
+    OrderService(MeterRegistry registry) {
+        this.ordersCreated = Counter.builder("orders.created")
+            .description("Total orders created")
+            .register(registry);
+        this.orderProcessingTimer = Timer.builder("orders.processing.time")
+            .register(registry);
+    }
+
+    OrderResponse create(CreateOrderRequest request) {
+        return orderProcessingTimer.record(() -> {
+            Order order = doCreate(request);
+            ordersCreated.increment();
+            return toResponse(order);
+        });
+    }
+}
+```
+
+- **Counter** — a value that only increases (total orders created, total errors).
+- **Timer** — tracks duration and count of an operation, exposing percentiles and rates automatically.
+- **Gauge** — a value that can go up or down (current queue size, active connections).
+
+Beyond custom metrics, Micrometer auto-instruments a great deal for free once Actuator is present: HTTP request latency and count per endpoint, JVM memory and garbage collection stats, `DataSource` connection pool usage, and more — all queryable at `/actuator/metrics/{name}` or scraped in bulk by a monitoring system.
+
+```yaml
+management:
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+```
+
+```xml
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-registry-prometheus</artifactId>
+</dependency>
+```
+
+With this, `/actuator/prometheus` exposes every metric in the exact text format a Prometheus server expects to scrape directly — no custom export code required.
+
+## Distributed tracing (a preview — full depth in Chapter 31)
+
+A single request often touches multiple internal calls (and, in a microservices architecture, multiple *services*). Micrometer Tracing (Boot's tracing facade, successor to the older Spring Cloud Sleuth) attaches a shared **trace ID** to every log line and span involved in handling one logical request.
+
+```xml
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-tracing-bridge-brave</artifactId>
+</dependency>
+```
+
+```
+2026-09-14 10:15:03 [traceId=4a8f2c, spanId=91b3] INFO  OrderController - received request
+2026-09-14 10:15:03 [traceId=4a8f2c, spanId=e21a] INFO  OrderService    - order validated
+2026-09-14 10:15:04 [traceId=4a8f2c, spanId=7cd9] INFO  PaymentClient   - calling payment gateway
+```
+
+Every line sharing `traceId=4a8f2c` belongs to the same logical request, even though each came from a different class — invaluable when debugging a slow or failed request across many log lines, and essential once that request spans multiple services (Chapter 31 covers the full distributed picture with Zipkin/OpenTelemetry).
+
+## Best practices & gotchas
+
+- **Never expose `/actuator/**` endpoints to the public internet without securing them.** `/actuator/env`, `/actuator/heapdump`, and similar endpoints can leak configuration values or memory contents — treat Actuator endpoints as an internal, authenticated-access surface (Chapter 14's `SecurityFilterChain` should explicitly restrict `/actuator/**` to authorized/internal callers).
+- **Distinguish liveness from readiness.** A liveness failure means "restart this instance" (it's deadlocked or unrecoverable); a readiness failure means "stop sending it traffic, but don't restart it" (it's temporarily overloaded or a dependency is down). Spring Boot's `/actuator/health/liveness` and `/actuator/health/readiness` groups map directly onto Kubernetes' two separate probe types (Chapter 35).
+- **Name custom metrics consistently** (`orders.created`, not a mix of `ordersCreated` and `order_created_total` across the codebase) — inconsistent naming makes dashboards and alerts harder to build and maintain correctly.
+- **A `Timer` gives you far more than a manually logged duration** — percentiles (p50/p95/p99), not just an average, which is what actually matters for understanding tail latency in production.
+- **Add tracing before you need it, not during an incident.** Retrofitting trace IDs into logs while actively debugging a production outage is far harder than having them in place from the start.
+
+## Quick reference
+
+| Concept | Purpose |
+|---|---|
+| `spring-boot-starter-actuator` | Exposes operational HTTP endpoints (`/actuator/*`) |
+| `management.endpoints.web.exposure.include` | Explicitly opts in non-default endpoints |
+| `HealthIndicator` | Custom bean contributing to `/actuator/health` |
+| Micrometer `Counter`/`Timer`/`Gauge` | Custom application metrics |
+| `/actuator/prometheus` | Metrics in Prometheus scrape format |
+| Micrometer Tracing | Attaches a shared trace ID across logs/spans for one logical request |
+| Liveness vs readiness | "Restart me" vs "stop sending traffic, don't restart" |
+
+## Wrapping up
+
+Actuator, Micrometer, and tracing are what turn "the application is running" into "we can actually see what it's doing and whether it's healthy" — the baseline expectation for anything running in production. **Chapter 20** continues Part 6 with caching, starting with Spring's cache abstraction and a Redis-backed implementation.
+
+## Interview Questions
+
+**1. What does adding `spring-boot-starter-actuator` provide out of the box?**
+A set of auto-configured, operational HTTP endpoints under `/actuator` — including health checks, metrics, application info, and environment details — giving visibility into a running application's status without writing any custom monitoring code. Only `/actuator/health` and `/actuator/info` are exposed by default; the rest require explicit opt-in.
+
+*Follow-up: Why does Spring Boot restrict which Actuator endpoints are exposed by default, rather than exposing everything automatically?* Because several endpoints (`/actuator/env`, `/actuator/heapdump`, `/actuator/threaddump`) can reveal sensitive configuration values, environment variables, or memory contents — defaulting to a minimal, safe exposure and requiring explicit `management.endpoints.web.exposure.include` for anything more sensitive follows the same "secure by default" philosophy Spring Security applies (Chapter 14), preventing accidental exposure of operationally sensitive data.
+
+**2. How does Spring Boot determine the aggregate status shown at `/actuator/health`?**
+It combines the status of every registered `HealthIndicator` — both auto-configured ones (for a detected `DataSource`, Redis, disk space, etc.) and any custom ones defined in application code — into one overall status. If any contributing indicator reports `DOWN`, the aggregate health status reflects that, by default reporting the overall application as unhealthy.
+
+*Follow-up: If a non-critical dependency being down shouldn't take down the entire application's reported health status, how would you handle that?* Implement that dependency's check as a custom `HealthIndicator` but exclude it from the endpoints Kubernetes' liveness/readiness probes rely on, or configure Actuator's health group settings so that indicator only appears in a general diagnostic health view rather than contributing to the aggregate status that gates traffic routing — keeping a truly non-critical dependency's outage from unnecessarily marking healthy instances as down.
+
+**3. What's the difference between a liveness and a readiness health check?**
+A liveness check answers "is this instance in a broken, unrecoverable state that requires a restart?" — failing it should trigger a restart. A readiness check answers "is this instance currently able to handle traffic right now?" — failing it should stop new traffic from being routed to it, without necessarily restarting it (e.g., temporarily overloaded, or a downstream dependency is briefly unavailable).
+
+*Follow-up: Give an example of a condition that should fail a readiness check but not a liveness check.* A temporary loss of connectivity to a downstream dependency the service needs for full functionality (say, a payment gateway) — the application process itself is running fine and isn't deadlocked or corrupted (so it shouldn't be restarted), but it genuinely can't serve requests correctly right now, so it should stop receiving traffic until connectivity is restored.
+
+**4. What is Micrometer, and why is it described as a "metrics facade"?**
+Micrometer provides a single, vendor-neutral API (`Counter`, `Timer`, `Gauge`, and a `MeterRegistry`) for recording application metrics, with separate backend implementations that export those metrics to different monitoring systems (Prometheus, Datadog, CloudWatch, and others). "Facade" describes exactly this: application code records metrics against Micrometer's API without knowing or caring which specific monitoring backend ultimately receives them.
+
+*Follow-up: What would need to change in application code to switch from exporting metrics to Prometheus to exporting them to Datadog instead?* In principle, nothing in the application code that records metrics (`Counter.builder(...)`, `Timer.builder(...)`) needs to change at all — only the dependency (swapping `micrometer-registry-prometheus` for `micrometer-registry-datadog`) and its corresponding configuration properties, since Micrometer's facade is exactly what insulates the metric-recording code from the specific backend receiving it.
+
+**5. What's the difference between a `Counter`, a `Timer`, and a `Gauge`?**
+A `Counter` only ever increases — a running total, like the number of orders created. A `Timer` records both the count and duration of an operation, automatically exposing rate and percentile statistics. A `Gauge` reports a value that can go up or down at any point in time, like a current queue size or number of active connections.
+
+*Follow-up: Which of the three would be most appropriate for tracking the current number of open database connections in a pool, and why?* A `Gauge` — the number of open connections fluctuates up and down continuously as connections are acquired and released, which is exactly what a `Gauge` is designed to represent (a current snapshot value), unlike a `Counter` (which could only track a cumulative total number ever opened) or a `Timer` (which measures duration of discrete operations, not a live count).
+
+**6. Why does a `Timer` give more useful information than manually logging and averaging request durations yourself?**
+A `Timer` automatically tracks the full distribution of recorded durations, exposing percentiles (p50, p95, p99) rather than just a mean — and average latency can look perfectly healthy even while a meaningful fraction of requests are slow, since a small number of very slow outliers can be masked by a much larger number of fast ones. Percentiles reveal that tail latency directly, which is usually what actually matters for real user experience and SLA compliance.
+
+*Follow-up: Why might p99 latency be a more important metric to alert on than average latency for a customer-facing API?* Because a slow p99 means a meaningful fraction of real users (1 in 100 requests) are experiencing poor performance even while the average looks fine — for a high-traffic API, that's still a large absolute number of bad experiences, and alerting only on the average would miss this degradation entirely until it became severe enough to also drag the average down.
+
+**7. What is `/actuator/prometheus`, and what does it require to be available?**
+It's an Actuator endpoint that exposes all recorded Micrometer metrics in the specific text-based format a Prometheus server expects when scraping a target — it requires the `micrometer-registry-prometheus` dependency on the classpath and `management.metrics.export.prometheus.enabled=true` (or the endpoint explicitly included in `exposure.include`), at which point Prometheus can be configured to scrape it directly with no custom export code needed.
+
+*Follow-up: Is the data returned at `/actuator/prometheus` "pulled" or "pushed" — and what does that distinction mean operationally?* It's a "pull" model — the endpoint simply exposes current metric values whenever it's requested, and a Prometheus server is responsible for periodically scraping (pulling from) that endpoint on its own schedule. This differs from a "push" model (like some other monitoring systems use) where the application itself would need to actively send metrics to a remote collector — the pull model keeps the application simpler and decouples it from needing to know anything about the monitoring backend's availability or address.
+
+**8. What does distributed tracing's "trace ID" actually solve?**
+It lets every log line and operation involved in handling one logical request — even across multiple classes, threads, or (in a microservices system) multiple separate services — be correlated together via a single shared identifier, making it possible to reconstruct the complete path and timing of one specific request across an otherwise disconnected stream of logs, which would be extremely difficult to piece together manually at any real scale.
+
+*Follow-up: Without a shared trace ID, how would you typically have to debug a single slow request across multiple log-emitting components, and why is that approach unreliable at scale?* You'd have to manually correlate log lines by approximate timestamp and context clues (customer ID, order ID) across potentially many concurrent requests' worth of interleaved log output — unreliable because concurrent requests happening around the same time produce interleaved, hard-to-disentangle log lines with no reliable, explicit link tying them to the same originating request, especially under real production load.
+
+**9. What is Micrometer Tracing, and what did it replace?**
+Micrometer Tracing is Spring Boot's current tracing facade for attaching trace/span identifiers to logs and instrumented operations, exported to tracing backends like Zipkin or systems supporting OpenTelemetry. It replaced the older Spring Cloud Sleuth project, which handled the same tracing responsibility in earlier generations of the Spring ecosystem before being superseded by Micrometer's broader observability facade.
+
+*Follow-up: Why would the Spring ecosystem consolidate a separate tracing-specific library (Sleuth) into the same facade (Micrometer) already used for metrics?* Metrics and tracing are both part of the same broader "observability" concern, and often need to be correlated together (e.g., linking a metric's spike to the specific traces that caused it) — consolidating both under one facade with consistent conventions and instrumentation makes that correlation more natural and reduces the number of separate libraries and configuration surfaces a team needs to maintain for observability overall.
+
+**10. Why should Actuator endpoints generally not be publicly exposed on the internet without additional protection?**
+Several endpoints expose genuinely sensitive operational data — `/actuator/env` can reveal configuration properties (potentially including secrets, if not carefully filtered), `/actuator/heapdump` can expose in-memory application state including sensitive data currently held in memory, and even `/actuator/health`'s detailed view can leak internal architecture details to an unauthenticated caller. These endpoints should be treated as an internal operations surface, secured behind authentication/network restrictions, not left open the way public application endpoints are.
+
+*Follow-up: How would you configure Spring Security specifically to restrict access to `/actuator/**` while leaving the rest of the application's public endpoints unaffected?* Add an explicit `authorizeHttpRequests` rule scoping `/actuator/**` to a specific role or restricting it to internal network access (e.g., `.requestMatchers("/actuator/**").hasRole("OPS")` or a network-level restriction at the infrastructure/ingress layer), placed appropriately relative to the application's other, more permissive rules — following the same "most specific rule matters, order top to bottom" principle covered in Chapter 14.
+
+**11. What determines whether Spring Boot auto-configures a `DataSource` health indicator?**
+The same classpath-and-bean-presence-driven auto-configuration mechanism covered in Chapter 4 — if a `DataSource` bean exists in the application context (because `spring-boot-starter-data-jpa` or similar is present, per Chapter 9), Spring Boot's Actuator auto-configuration detects it and automatically registers a corresponding health indicator that checks database connectivity, with no manual wiring required.
+
+*Follow-up: If you added a completely custom, non-Spring-Data database client library to a project, would Spring Boot automatically create a health indicator for it too?* No — Spring Boot's built-in health indicators only cover infrastructure it specifically knows how to detect and check (standard `DataSource`, Redis, MongoDB, and similar well-known integrations). A fully custom client library would need an explicitly written custom `HealthIndicator` bean (as shown in this chapter's payment gateway example) to contribute its status to `/actuator/health`, since Actuator has no built-in awareness of an arbitrary, unrecognized library.
+
+**12. What information does a custom `HealthIndicator` need to return, and how does Spring Boot use it?**
+It returns a `Health` object built via `Health.up()`, `Health.down()` (optionally with an exception and additional detail key-value pairs), or other status builders — Spring Boot aggregates this alongside every other registered indicator's status to compute the overall `/actuator/health` result, and includes the indicator's name and details in the detailed health response (when `show-details` is enabled appropriately).
+
+*Follow-up: Why might you deliberately choose `Health.down()` for a non-critical dependency check, but exclude that same indicator from the liveness/readiness groups used by your deployment platform?* This lets the dependency's outage be visible for diagnostic/monitoring purposes (someone looking at the detailed health endpoint can see it's down) without that outage incorrectly triggering an automated restart or traffic removal for an issue that doesn't actually prevent the application from serving its core functionality correctly.
+
+**13. Does adding Actuator automatically instrument HTTP request metrics per endpoint, or does that require additional custom code?**
+It's automatic — once Actuator and Micrometer are on the classpath, Spring Boot auto-instruments HTTP server request metrics (count, latency, status code breakdown) for every endpoint with no additional code required, alongside JVM memory/GC metrics and `DataSource` connection pool metrics if applicable. Custom `Counter`/`Timer`/`Gauge` metrics (as in this chapter's `orders.created` example) are only needed for domain-specific metrics that don't map onto Spring's own auto-instrumented infrastructure.
+
+*Follow-up: If you wanted to see p95 latency specifically for the `/api/orders` endpoint, would you need custom instrumentation, or is that already covered?* This is already covered by the auto-instrumented HTTP server metrics — `http.server.requests`, tagged with the specific URI and method — so percentile latency for a specific endpoint can be queried directly from that auto-instrumented metric without writing any custom `Timer` code at all; custom metrics are reserved for genuinely domain-specific measurements Spring's own instrumentation has no visibility into.
+
+**14. What's a realistic reason to add tracing to an application before it's needed for an active incident, rather than retrofitting it later?**
+Retrofitting trace IDs into an existing, large codebase's logging under time pressure during an active production incident is significantly harder and riskier than having the instrumentation already in place — every log statement across every class touched by a request needs to correctly propagate and include the trace context, which is straightforward to set up from the start (via auto-instrumentation) but a substantial, error-prone undertaking to bolt on reactively while also trying to diagnose a live outage.
+
+*Follow-up: Beyond incident debugging, what's another ongoing operational benefit of having tracing in place even when nothing is actively broken?* Understanding the real latency breakdown of normal, healthy requests — seeing exactly which internal step or downstream call consumes the most time for a typical request — which is valuable for proactive performance optimization and capacity planning, not just reactive incident debugging, and becomes essential once a request spans multiple services in the microservices architectures covered in Part 7.
+
+**15. How would you decide what should be a custom Micrometer metric versus something covered by Actuator's auto-instrumentation already?**
+Auto-instrumentation covers generic, infrastructure-level concerns applicable to virtually any Spring Boot application — HTTP request latency/count, JVM health, connection pool usage — and should be relied on rather than duplicated. Custom metrics are for genuinely domain-specific measurements meaningful to your particular business logic (orders created, payment failures by provider, queue depth for a specific business process) that Spring's generic instrumentation has no way to know about on its own.
+
+*Follow-up: Would "number of failed login attempts" be better suited to a custom metric or Actuator's auto-instrumented HTTP metrics?* A custom metric — while the auto-instrumented HTTP metrics would show the request count and status code for the login endpoint generally, a dedicated `Counter` specifically for failed authentication attempts (potentially tagged by failure reason) captures a meaningful, security-relevant domain concept directly, rather than requiring someone to infer it indirectly from generic HTTP status code metrics on that endpoint.

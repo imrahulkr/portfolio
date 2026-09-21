@@ -1,0 +1,230 @@
+---
+title: "Configuration & Profiles: application.yml, @ConfigurationProperties and Environments"
+description: "How Spring Boot loads configuration from files, environment variables, and command-line arguments — and how to keep environment-specific values out of your code entirely using profiles."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 5
+tags: ["Spring Boot", "Configuration", "Profiles"]
+---
+
+Chapter 4 covered how auto-configuration decides *which* beans to create. This chapter covers where the *values* that feed into those beans — a database URL, a feature flag, a timeout — actually come from, and how to keep them different across local, staging, and production without touching code.
+
+## `application.properties` vs `application.yml`
+
+Both formats work identically; `.yml` is generally preferred for anything with nested structure, since it avoids repeating dotted prefixes.
+
+```properties
+# application.properties
+server.port=8081
+spring.datasource.url=jdbc:postgresql://localhost:5432/mydb
+app.payment.timeout-seconds=30
+```
+
+```yaml
+# application.yml — equivalent, less repetition
+server:
+  port: 8081
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/mydb
+app:
+  payment:
+    timeout-seconds: 30
+```
+
+## Reading values: `@Value` vs `@ConfigurationProperties`
+
+```java
+// @Value — fine for one or two simple values
+@Component
+class PaymentClient {
+    @Value("${app.payment.timeout-seconds}")
+    private int timeoutSeconds;
+}
+```
+
+```java
+// @ConfigurationProperties — the right tool once you have a related group of values
+@ConfigurationProperties(prefix = "app.payment")
+public record PaymentProperties(int timeoutSeconds, String provider, boolean retryEnabled) { }
+```
+
+```java
+@Configuration
+@EnableConfigurationProperties(PaymentProperties.class)
+class PaymentConfig { }
+```
+
+```yaml
+app:
+  payment:
+    timeout-seconds: 30
+    provider: stripe
+    retry-enabled: true
+```
+
+`@ConfigurationProperties` binds an entire, related group of properties into one strongly-typed object — using a Java `record` (idiomatic since Java 16, and a natural fit given this series targets Java 21) gets you immutability and validation for free. Prefer it over scattering `@Value` across many classes: it's type-safe (a misconfigured `timeout-seconds: abc` fails fast at startup rather than throwing a runtime parse error the first time the field is read), IDE-autocomplete-friendly, and testable in isolation.
+
+## Configuration precedence
+
+Spring Boot merges configuration from many sources, with a defined precedence — higher in this list wins over lower:
+
+```
+1. Command-line arguments            (--server.port=9000)
+2. JVM system properties             (-Dserver.port=9000)
+3. OS environment variables          (SERVER_PORT=9000)
+4. application-{profile}.yml         (profile-specific file)
+5. application.yml                   (base file)
+6. @PropertySource-annotated values
+7. Default values set in code
+```
+
+This is precisely why the same executable JAR can behave differently across environments with zero code or file changes — an environment variable set in production overrides whatever the shipped `application.yml` says.
+
+## Profiles
+
+A **profile** is a named group of beans and/or properties that only apply in specific environments.
+
+```yaml
+# application.yml — shared defaults
+spring:
+  application:
+    name: order-service
+```
+
+```yaml
+# application-dev.yml
+spring:
+  datasource:
+    url: jdbc:h2:mem:devdb
+logging:
+  level:
+    com.example: DEBUG
+```
+
+```yaml
+# application-prod.yml
+spring:
+  datasource:
+    url: jdbc:postgresql://prod-db:5432/orders
+logging:
+  level:
+    com.example: WARN
+```
+
+Activate a profile via an environment variable, JVM argument, or command-line flag:
+
+```bash
+java -jar app.jar --spring.profiles.active=prod
+# or
+SPRING_PROFILES_ACTIVE=prod java -jar app.jar
+```
+
+You can also gate individual beans to a profile directly in code:
+
+```java
+@Service
+@Profile("dev")
+class InMemoryEmailSender implements EmailSender { }
+
+@Service
+@Profile("prod")
+class SmtpEmailSender implements EmailSender { }
+```
+
+```
+                  application.yml (shared defaults)
+                            │
+              ┌─────────────┼─────────────┐
+              ▼             ▼              ▼
+    application-dev.yml  application-staging.yml  application-prod.yml
+       (overrides)          (overrides)              (overrides)
+```
+
+## Validating configuration
+
+Bean Validation annotations work directly on `@ConfigurationProperties`:
+
+```java
+@ConfigurationProperties(prefix = "app.payment")
+@Validated
+public record PaymentProperties(
+    @Min(1) @Max(120) int timeoutSeconds,
+    @NotBlank String provider
+) { }
+```
+
+A misconfigured value now fails the application at **startup** with a clear validation error, instead of surfacing as a confusing bug hours later when that specific code path finally runs.
+
+## Best practices & gotchas
+
+- **Never commit real secrets (DB passwords, API keys) into `application.yml` in version control.** Use environment variables, a secrets manager, or `application-local.yml` added to `.gitignore` for anything sensitive.
+- **Prefer `@ConfigurationProperties` over `@Value` once you have more than two or three related properties.** It groups related config into a single, testable, type-safe object instead of scattering string-keyed lookups across the codebase.
+- **Keep `application.yml` for shared defaults, and put only what genuinely differs per environment in `application-{profile}.yml`.** Duplicating the entire file per profile defeats the purpose and creates drift.
+- **`@Profile("dev")` beans are a good way to swap real infrastructure for lightweight local substitutes** (an in-memory email sender instead of real SMTP) — just make sure the interface both implementations share keeps the rest of the app oblivious to which one is active.
+- **Add `@Validated` to `@ConfigurationProperties` classes.** Failing fast at startup on a bad config value is dramatically cheaper to debug than failing at 2am in production on the first request that touches it.
+
+## Quick reference
+
+| Concept | Purpose |
+|---|---|
+| `application.yml` / `.properties` | Base configuration file |
+| `application-{profile}.yml` | Profile-specific overrides |
+| `@Value("${key}")` | Inject a single property value |
+| `@ConfigurationProperties(prefix = "...")` | Bind a related group of properties to a typed object |
+| `@EnableConfigurationProperties` | Register a `@ConfigurationProperties` class as a bean |
+| `@Profile("name")` | Restrict a bean to a specific active profile |
+| `spring.profiles.active` | Property/env var/arg that activates one or more profiles |
+| `@Validated` (with Bean Validation annotations) | Fail fast at startup on invalid configuration |
+
+## Wrapping up
+
+Configuration and profiles are what let one build artifact run correctly across local, staging, and production without a single code change — everything environment-specific lives outside the code, in files and environment variables that follow a clear precedence order. This closes out Part 1. **Chapter 6** starts Part 2 — building actual REST APIs with Spring MVC.
+
+## Interview Questions
+
+**1. What's the difference between `@Value` and `@ConfigurationProperties`?**
+`@Value` injects a single property value directly into a field via a SpEL expression like `${key}`. `@ConfigurationProperties` binds an entire group of related, prefixed properties into one strongly-typed object (a class or record) in a single step. `@ConfigurationProperties` is preferred once you have more than a couple of related values, since it's type-safe, groups related config together, and supports validation.
+
+**2. What is Spring Boot's configuration precedence order — which source wins if the same property is set in multiple places?**
+From highest to lowest priority: command-line arguments, JVM system properties, OS environment variables, profile-specific property files (`application-{profile}.yml`), the base `application.yml`, `@PropertySource`-declared files, and finally default values set in code. A value set via an environment variable in production will override whatever's in the shipped `application.yml`.
+
+**3. What is a Spring profile?**
+A named grouping of beans and/or configuration properties that only activates for specific environments. It lets you swap implementations (e.g., an in-memory test double vs. a real external client) or override properties (database URLs, log levels) without any code branching — just an active-profile setting.
+
+**4. How do you activate a specific profile?**
+Via the `spring.profiles.active` property, set through a command-line argument (`--spring.profiles.active=prod`), an environment variable (`SPRING_PROFILES_ACTIVE=prod`), or in `application.yml` itself for a default. Multiple profiles can be active simultaneously as a comma-separated list.
+
+**5. How does `@Profile` work on a bean definition?**
+A bean annotated `@Profile("dev")` is only registered in the application context when the `dev` profile is active. If two beans implement the same interface and are each restricted to a different profile, exactly one gets created depending on which profile is active — letting you inject the interface everywhere without conditional logic elsewhere in the code.
+
+**6. Why is it a bad idea to commit real secrets into `application.yml`?**
+Anything committed to version control is visible to everyone with repository access (and often stays in history even after later removal), which is a serious security risk for database passwords, API keys, and similar secrets. The standard approach is to source secrets from environment variables, a dedicated secrets manager, or a gitignored local override file, and keep only non-sensitive defaults in the committed file.
+
+**7. What happens if a required `@ConfigurationProperties` value is missing or malformed?**
+If the property is bound to a primitive or a type Spring can't parse the raw value into (e.g., a non-numeric string bound to an `int` field), or if `@Validated` with Bean Validation constraints catches an invalid value, Spring Boot fails application startup with a clear binding/validation error — rather than the value silently defaulting to zero/null and causing a confusing failure later at runtime.
+
+**8. Why is using a Java `record` with `@ConfigurationProperties` a good fit in modern Spring Boot?**
+Records are immutable by construction — once bound, the configuration values can't be accidentally mutated elsewhere in the code — and Spring Boot supports constructor binding for records natively, so no boilerplate getters/setters or a no-args constructor are needed just to satisfy the binding mechanism.
+
+**9. What's the difference between `application.yml` and `application-{profile}.yml`?**
+`application.yml` holds base configuration shared across all environments. `application-{profile}.yml` (e.g., `application-prod.yml`) holds values that should only apply when that specific profile is active, and are merged on top of the base file — only the differing values need to be repeated, not the whole file.
+
+**10. How would you structure configuration for a service that needs different database URLs for local development, staging, and production, without hardcoding any of them in Java code?**
+Keep the base `application.yml` free of environment-specific values, then define `application-dev.yml`, `application-staging.yml`, and `application-prod.yml`, each with its own `spring.datasource.url`. Activate the appropriate one per environment via `SPRING_PROFILES_ACTIVE`, so the same built artifact picks up the right database purely from which profile is active at runtime.
+
+**11. What's the risk of using `@Value` extensively across a large codebase instead of `@ConfigurationProperties`?**
+Property keys become string literals scattered across many classes with no single source of truth for what configuration the application actually needs, no compile-time or IDE support for catching typos in the key, and no natural place to add cross-field validation — all of which `@ConfigurationProperties` addresses by centralizing related configuration into one typed, validated class.
+
+**12. Can command-line arguments override a value set in `application.yml`? Give an example.**
+Yes — command-line arguments have the highest precedence. `java -jar app.jar --server.port=9090` overrides any `server.port` value set in `application.yml`, without modifying the file or rebuilding the JAR — useful for one-off overrides during local testing or debugging.
+
+**13. What does `@EnableConfigurationProperties` do, and is it always required?**
+It registers a `@ConfigurationProperties`-annotated class as a Spring bean so it can be injected elsewhere. As of recent Spring Boot versions, if the `@ConfigurationProperties` class is also annotated with `@Component` (or picked up via component scanning some other way), explicit `@EnableConfigurationProperties` isn't strictly required — but it remains the clearer, more explicit approach, especially for properties classes that intentionally aren't also marked as components.
+
+**14. How would you make an application fail fast if a critical configuration value (say, a payment provider API key) is missing, rather than fail later when a payment is attempted?**
+Bind it through a `@ConfigurationProperties` class with a `@NotBlank` (or equivalent) constraint and `@Validated` on the class. Since Boot resolves and validates `@ConfigurationProperties` beans during context startup, a missing or blank value causes the application to fail immediately on boot with a descriptive validation error, long before any request reaches the payment code path.
+
+**15. Multiple profiles can be active at once — what's a realistic use case for that?**
+A common pattern is layering a "base environment" profile (e.g., `cloud`, setting infrastructure-related properties like connection pool sizes) together with a "feature" profile (e.g., `feature-x-enabled`, toggling a specific bean or property) — activated together as `SPRING_PROFILES_ACTIVE=cloud,feature-x-enabled` — so environment concerns and feature-toggle concerns can be composed and controlled independently rather than needing one profile file per combination.

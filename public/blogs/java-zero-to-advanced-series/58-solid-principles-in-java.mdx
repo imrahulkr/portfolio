@@ -1,0 +1,223 @@
+---
+title: "SOLID Principles in Java"
+description: "Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, and Dependency Inversion, each with a concrete before/after Java refactoring."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Design Patterns & Clean Code"
+chapter: 58
+totalChapters: 65
+slug: "solid-principles-in-java"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "solid", "design-principles", "clean-code"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## Why SOLID Matters
+
+SOLID is five interrelated design principles (popularized by Robert C. Martin) aimed at producing code that's easier to maintain, extend, and test. They're guidelines, not laws — but violating them repeatedly is a strong predictor of code that becomes progressively harder to change safely over time.
+
+## S — Single Responsibility Principle
+
+**A class should have only one reason to change.**
+
+```java
+// VIOLATES SRP — mixes business logic, persistence, and notification into one class
+public class Order {
+    public void calculateTotal() { /* business logic */ }
+    public void saveToDatabase() { /* persistence logic */ }
+    public void sendConfirmationEmail() { /* notification logic */ }
+}
+```
+
+```java
+// FOLLOWS SRP — each class has exactly one reason to change
+public class Order {
+    public double calculateTotal() { /* business logic only */ return 0; }
+}
+public class OrderRepository {
+    public void save(Order order) { /* persistence logic only */ }
+}
+public class OrderNotifier {
+    public void sendConfirmation(Order order) { /* notification logic only */ }
+}
+```
+
+A change to *how orders are stored* (switching databases) shouldn't require touching business-logic or email code — mixing unrelated responsibilities into one class means unrelated changes keep colliding in the same file, increasing the risk that a change for one reason accidentally breaks something unrelated.
+
+## O — Open/Closed Principle
+
+**Software entities should be open for extension, but closed for modification.**
+
+```java
+// VIOLATES OCP — adding a new shape means MODIFYING this existing method
+public double calculateArea(Object shape) {
+    if (shape instanceof Circle c) return Math.PI * c.radius() * c.radius();
+    if (shape instanceof Square s) return s.side() * s.side();
+    // adding Triangle requires editing this method and risking existing, working cases
+    throw new IllegalArgumentException("Unknown shape");
+}
+```
+
+```java
+// FOLLOWS OCP — new shapes extend the system without modifying existing code
+public interface Shape {
+    double area();
+}
+public class Circle implements Shape {
+    public double area() { return Math.PI * radius * radius; }
+}
+public class Square implements Shape {
+    public double area() { return side * side; }
+}
+// Adding Triangle: just a NEW class, zero changes to any existing file
+```
+
+This is exactly the Strategy pattern from Chapter 57, and exactly why sealed types + exhaustive switch (Chapter 51) represent a deliberate, *opposite* trade-off — sometimes you genuinely **want** the compiler to force every call site to be updated when a new case is added, rather than allowing silent extension. Both are valid, context-dependent choices, not a universal rule that OCP always wins.
+
+## L — Liskov Substitution Principle
+
+**Subtypes must be substitutable for their base types without altering the correctness of the program.**
+
+```java
+// VIOLATES LSP — the classic "Square extends Rectangle" trap
+public class Rectangle {
+    protected int width, height;
+    public void setWidth(int width) { this.width = width; }
+    public void setHeight(int height) { this.height = height; }
+    public int getArea() { return width * height; }
+}
+
+public class Square extends Rectangle {
+    @Override public void setWidth(int width) { this.width = width; this.height = width; }   // forces both!
+    @Override public void setHeight(int height) { this.width = height; this.height = height; }
+}
+```
+
+```java
+public void resizeAndCheck(Rectangle r) {
+    r.setWidth(5);
+    r.setHeight(10);
+    assert r.getArea() == 50;   // PASSES for Rectangle, FAILS for Square (area would be 100) — LSP VIOLATED!
+}
+```
+
+`Square` technically "is-a" `Rectangle` mathematically, but substituting a `Square` where a `Rectangle` is expected silently breaks the caller's reasonable assumptions about how `setWidth`/`setHeight` behave independently — this is precisely why "is-a" alone (Chapter 10) isn't a sufficient test for correct inheritance; behavioral compatibility matters too. The fix here is usually to *not* model `Square` as a `Rectangle` subclass at all — favor a common `Shape` interface instead, exactly as in the OCP example above.
+
+## I — Interface Segregation Principle
+
+**Clients should not be forced to depend on methods they do not use.**
+
+```java
+// VIOLATES ISP — a "fat" interface forces irrelevant methods onto every implementer
+public interface Worker {
+    void work();
+    void eat();
+}
+
+public class RobotWorker implements Worker {
+    public void work() { /* ... */ }
+    public void eat() { throw new UnsupportedOperationException("Robots don't eat!"); }   // forced, meaningless
+}
+```
+
+```java
+// FOLLOWS ISP — smaller, focused interfaces
+public interface Workable {
+    void work();
+}
+public interface Eatable {
+    void eat();
+}
+
+public class HumanWorker implements Workable, Eatable { /* implements both, legitimately */ }
+public class RobotWorker implements Workable { /* only implements what actually applies */ }
+```
+
+Large, "fat" interfaces force implementers to either provide meaningless/throwing implementations for methods that don't apply to them, or violate the interface's contract outright — smaller, role-specific interfaces let each class implement only what it genuinely supports.
+
+## D — Dependency Inversion Principle
+
+**Depend on abstractions, not concretions. High-level modules shouldn't depend on low-level modules — both should depend on abstractions.**
+
+```java
+// VIOLATES DIP — OrderService is tightly coupled to a SPECIFIC concrete database implementation
+public class MySQLDatabase {
+    public void save(String data) { /* ... */ }
+}
+public class OrderService {
+    private final MySQLDatabase database = new MySQLDatabase();   // hardcoded, concrete dependency
+}
+```
+
+```java
+// FOLLOWS DIP — OrderService depends on an ABSTRACTION, not a specific implementation
+public interface Database {
+    void save(String data);
+}
+public class MySQLDatabase implements Database {
+    public void save(String data) { /* ... */ }
+}
+public class OrderService {
+    private final Database database;
+    public OrderService(Database database) { this.database = database; }   // injected — swappable
+}
+```
+
+**This is precisely the theoretical foundation of dependency injection**, which Spring's entire container is built around: your classes declare dependencies on *interfaces*, and Spring (or you, manually, via constructor injection) supplies a concrete implementation at runtime — meaning `OrderService` can work with `MySQLDatabase`, `PostgresDatabase`, or a test-double `InMemoryDatabase` interchangeably, with zero changes to `OrderService` itself.
+
+![Diagram: OrderService depending on the Database interface (an abstraction) rather than directly on MySQLDatabase, with the concrete implementation supplied externally via constructor injection](/diagrams/ch58-dependency-inversion-di.svg)
+
+## Key Takeaways
+
+- SRP: one class, one reason to change — mixing unrelated responsibilities causes unrelated changes to collide.
+- OCP: design so new behavior can be added via new code (new classes), not by modifying existing, working code.
+- LSP: a subtype must honor the base type's behavioral contract, not just its structural "is-a" relationship — the classic Square/Rectangle trap.
+- ISP: prefer small, focused interfaces over large ones that force irrelevant methods onto every implementer.
+- DIP: depend on abstractions (interfaces), not concrete classes — the direct theoretical basis for dependency injection frameworks like Spring.
+
+---
+
+## Interview Questions
+
+**1. What does the Single Responsibility Principle actually mean by "one reason to change"?**
+It means a class should be responsible to only one specific actor or concern, such that any single change to business requirements should require modifying, at most, one class for that specific concern — a class mixing multiple unrelated responsibilities (business logic, persistence, notification) has multiple, independent reasons any one of which could force a change, increasing the risk that unrelated changes interfere with each other within the same file.
+
+**2. How does splitting a class that violates SRP typically improve testability?**
+Each resulting smaller, single-responsibility class can be tested in isolation with a much narrower, more focused set of test cases specific to that one responsibility, without needing to set up or mock the concerns of unrelated responsibilities that a combined class would otherwise entangle together — for example, testing `Order.calculateTotal()`'s business logic no longer requires any database or email-sending setup once persistence and notification are extracted into their own classes.
+
+**3. What does the Open/Closed Principle mean by "open for extension, but closed for modification"?**
+New functionality should ideally be addable by writing new code (typically a new class implementing an existing interface/abstract type), without needing to modify existing, already-tested, working code to accommodate it — reducing the risk of introducing regressions into code that previously worked correctly, simply because an unrelated new feature was added.
+
+**4. How does the Strategy pattern (Chapter 57) directly support the Open/Closed Principle?**
+By having client code depend only on a common strategy interface rather than any specific concrete algorithm implementation, adding a new algorithm/strategy is simply a matter of creating a new class (or lambda) implementing that interface — no existing client code needs to change at all to accommodate the new strategy, directly achieving "open for extension, closed for modification."
+
+**5. Explain the classic "Square extends Rectangle" Liskov Substitution Principle violation.**
+If `Square` extends `Rectangle` and overrides `setWidth`/`setHeight` to keep both dimensions equal (preserving the mathematical fact that a square has equal sides), it violates a reasonable caller's assumption — inherited from `Rectangle`'s contract — that setting width and height are independent operations. Code written generically against `Rectangle` (like a test asserting a specific area after independently setting width and height) can behave correctly for actual `Rectangle` instances but incorrectly for substituted `Square` instances, breaking the substitutability LSP requires.
+
+**6. Why isn't a valid "is-a" relationship in the real world always sufficient justification for a class inheritance relationship in code?**
+LSP requires *behavioral* compatibility, not just conceptual/structural "is-a" compatibility — a subtype must honor the base type's existing contracts and the reasonable assumptions client code already makes about it, not merely share a plausible conceptual relationship. The Square/Rectangle case demonstrates this precisely: mathematically a square is unambiguously a rectangle, yet modeling it as a `Rectangle` subclass in code breaks the behavioral expectations `Rectangle`'s existing API already established.
+
+**7. What is a common fix for the Square/Rectangle LSP violation?**
+Avoid modeling `Square` as a subclass of `Rectangle` at all — instead, have both `Square` and `Rectangle` implement a common `Shape` interface (exposing only behaviorally-safe operations like `area()`), without either one inheriting from the other, sidestepping the behavioral contract mismatch entirely rather than trying to patch around it within an inheritance relationship that doesn't actually hold up.
+
+**8. What does the Interface Segregation Principle recommend, and what problem does it address?**
+It recommends favoring several small, focused, role-specific interfaces over one large "fat" interface bundling many unrelated methods together. This addresses the problem of forcing every implementing class to provide an implementation (even a meaningless, throwing, or empty one) for methods that don't actually apply to that particular class, simply because they happen to share a fat interface with other, more capable implementers.
+
+**9. In the `Worker`/`RobotWorker` example, what specifically goes wrong if `eat()` is bundled into the same interface as `work()`?**
+`RobotWorker`, which genuinely has no meaningful concept of eating, is nonetheless forced to provide *some* implementation of `eat()` to satisfy the `Worker` interface — typically either an empty no-op (silently misleading, since it looks like a valid, intentional implementation) or a thrown `UnsupportedOperationException` (which risks a runtime failure if any code generically calls `eat()` on a `Worker` reference without knowing it might actually be a `RobotWorker`), neither of which is a clean, honest representation of what a `RobotWorker` can actually do.
+
+**10. What does the Dependency Inversion Principle state, and how is "inversion" reflected in its name?**
+It states that high-level modules (business logic) should not depend directly on low-level modules (specific implementation details like a particular database), and that both should instead depend on shared abstractions (interfaces). The "inversion" refers to flipping the traditional dependency direction — rather than high-level code depending directly downward on low-level, concrete implementation details, both high-level and low-level code depend on an abstraction that sits between them, and the low-level implementation depends on (implements) that abstraction rather than the high-level code depending on the low-level implementation directly.
+
+**11. How does Dependency Inversion relate directly to dependency injection frameworks like Spring?**
+DIP provides the theoretical justification for designing classes that declare their dependencies as interface types in their constructors (or setters) rather than instantiating concrete dependencies directly (`new ConcreteThing()`) — dependency injection frameworks like Spring then handle the practical mechanics of actually supplying a concrete implementation for each declared interface dependency at runtime, based on configuration, entirely externally to the classes that declare the dependency.
+
+**12. What's a concrete, practical benefit of following DIP for unit testing?**
+Since a class depends on an interface (like `Database`) rather than a specific concrete implementation (`MySQLDatabase`), tests can supply a lightweight test double or mock implementation of that interface instead of the real one — allowing the class under test to be tested in complete isolation, without needing an actual database connection, network access, or other expensive/unavailable real-world dependencies during test execution.
+
+**13. Do the five SOLID principles ever conflict with or trade off against each other in practice?**
+Yes — for example, Chapter 51's sealed types with exhaustive switch expressions deliberately favor forcing every relevant call site to be updated when a new case is added (closer to "closed for extension, requiring modification everywhere relevant"), which is essentially the opposite trade-off from OCP's usual "add new code, don't modify existing code" guidance. Neither approach is universally correct — sealed types are the right choice when you specifically want the compiler to guarantee every case is handled (an intentionally closed, fully-enumerated set of possibilities), while OCP-style open extension is right when new, unforeseen implementations should be addable without touching existing code at all — SOLID principles are context-dependent guidelines to weigh against a specific situation's actual needs, not absolute, universally-applicable rules.

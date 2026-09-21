@@ -1,0 +1,198 @@
+---
+title: "Behavioral Design Patterns: Observer, Strategy, Command"
+description: "Observer for event notification, Strategy for interchangeable algorithms, and Command for encapsulating requests as objects."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Design Patterns & Clean Code"
+chapter: 57
+totalChapters: 65
+slug: "behavioral-design-patterns"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "design-patterns", "observer", "strategy", "command"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## What Behavioral Patterns Address
+
+Behavioral patterns deal with **communication and responsibility distribution** between objects — how objects interact, delegate work, and stay loosely coupled while still collaborating effectively.
+
+## Observer — Notifying Dependents of State Changes
+
+Defines a one-to-many dependency: when one object (the "subject") changes state, all its registered dependents ("observers") are notified automatically.
+
+```java
+public interface StockObserver {
+    void onPriceChange(String symbol, double newPrice);
+}
+
+public class Stock {
+    private final List<StockObserver> observers = new ArrayList<>();
+    private double price;
+
+    public void addObserver(StockObserver observer) { observers.add(observer); }
+
+    public void setPrice(double newPrice) {
+        this.price = newPrice;
+        notifyObservers();
+    }
+
+    private void notifyObservers() {
+        for (StockObserver observer : observers) {
+            observer.onPriceChange("AAPL", price);
+        }
+    }
+}
+```
+
+```java
+Stock appleStock = new Stock();
+appleStock.addObserver((symbol, price) -> System.out.println("Dashboard updated: " + symbol + " = " + price));
+appleStock.addObserver((symbol, price) -> System.out.println("Alert triggered for " + symbol));
+
+appleStock.setPrice(150.0);   // both observers are notified automatically
+```
+
+The subject (`Stock`) has no knowledge of what its observers actually do with the notification — it's fully decoupled, only knowing about the `StockObserver` interface. This is the exact conceptual foundation behind GUI event listeners, Spring's `ApplicationEventPublisher`, and reactive streams more broadly.
+
+![Diagram: Stock subject maintaining a list of registered StockObserver instances, broadcasting a price-change notification to all of them without knowing their concrete implementations](/diagrams/ch57-observer-notification-broadcast.svg)
+
+## Strategy — Interchangeable Algorithms
+
+Defines a family of interchangeable algorithms, encapsulated behind a common interface, letting the algorithm used vary independently of the client code that uses it.
+
+```java
+public interface DiscountStrategy {
+    double applyDiscount(double price);
+}
+
+public class NoDiscount implements DiscountStrategy {
+    public double applyDiscount(double price) { return price; }
+}
+
+public class PercentageDiscount implements DiscountStrategy {
+    private final double percentage;
+    public PercentageDiscount(double percentage) { this.percentage = percentage; }
+    public double applyDiscount(double price) { return price * (1 - percentage / 100); }
+}
+
+public class ShoppingCart {
+    private final DiscountStrategy discountStrategy;
+
+    public ShoppingCart(DiscountStrategy discountStrategy) {
+        this.discountStrategy = discountStrategy;
+    }
+
+    public double checkout(double totalPrice) {
+        return discountStrategy.applyDiscount(totalPrice);
+    }
+}
+```
+
+```java
+ShoppingCart cart = new ShoppingCart(new PercentageDiscount(20));
+System.out.println(cart.checkout(100.0));   // 80.0
+
+ShoppingCart regularCart = new ShoppingCart(new NoDiscount());
+System.out.println(regularCart.checkout(100.0));   // 100.0
+```
+
+Since `DiscountStrategy` is a functional interface (Chapter 33), it can also be supplied directly as a lambda without a dedicated class at all: `new ShoppingCart(price -> price * 0.9)`. Strategy is precisely what's happening every time you pass a `Comparator` (Chapter 23) or any other single-behavior functional interface into a method — the "algorithm" (comparison logic) varies independently of the code (like `Collections.sort()`) that uses it.
+
+## Command — Encapsulating a Request as an Object
+
+Turns a request (an action to perform, plus its arguments) into a standalone object, allowing that request to be parameterized, queued, logged, or undone.
+
+```java
+public interface Command {
+    void execute();
+    void undo();
+}
+
+public class Light {
+    public void on() { System.out.println("Light ON"); }
+    public void off() { System.out.println("Light OFF"); }
+}
+
+public class LightOnCommand implements Command {
+    private final Light light;
+    public LightOnCommand(Light light) { this.light = light; }
+    public void execute() { light.on(); }
+    public void undo() { light.off(); }
+}
+
+public class RemoteControl {
+    private final Deque<Command> history = new ArrayDeque<>();
+
+    public void pressButton(Command command) {
+        command.execute();
+        history.push(command);   // recorded for potential undo
+    }
+
+    public void pressUndo() {
+        if (!history.isEmpty()) {
+            history.pop().undo();
+        }
+    }
+}
+```
+
+```java
+RemoteControl remote = new RemoteControl();
+Light livingRoomLight = new Light();
+
+remote.pressButton(new LightOnCommand(livingRoomLight));   // "Light ON"
+remote.pressUndo();                                          // "Light OFF"
+```
+
+The `RemoteControl` never needs to know *what* a command actually does — it only knows how to `execute()` and `undo()` whatever `Command` object it's given, which is exactly what enables a generic undo history, a task queue, or deferred/scheduled execution of arbitrary actions, all built on the same simple interface. `Runnable` (Chapter 38) is essentially a minimal Command pattern (with no `undo()`), and this same encapsulate-a-request-as-an-object idea underlies task queues submitted to an `ExecutorService` (Chapter 41).
+
+## Key Takeaways
+
+- Observer decouples a subject from its dependents, notifying all registered observers of state changes without knowing what they do with that notification.
+- Strategy encapsulates interchangeable algorithms behind a common interface — most functional-interface-based method parameters (comparators, predicates) are a lightweight form of Strategy.
+- Command encapsulates a request as an object, enabling queuing, logging, and undo functionality — `Runnable` and `ExecutorService` task submission are real-world applications of this idea.
+- All three patterns achieve loose coupling by depending on interfaces/abstractions rather than concrete implementations, a recurring theme across the design patterns in this series.
+
+---
+
+## Interview Questions
+
+**1. What problem does the Observer pattern solve?**
+It lets one object (the subject) notify a dynamic, decoupled set of dependent objects (observers) whenever its state changes, without the subject needing any knowledge of what those observers actually do with the notification, or even how many observers exist — new observers can be added or removed at runtime without modifying the subject's code at all.
+
+**2. In the Observer pattern, does the subject need to know the concrete type of its observers?**
+No — the subject only depends on the observer interface (like `StockObserver`), never on any specific concrete implementing class, which is precisely what allows arbitrary, unrelated pieces of code to register interest in the subject's changes without the subject's own code needing any awareness of who's listening or why.
+
+**3. Give a real, widely-used example of the Observer pattern in Java or common frameworks.**
+GUI event listeners (a button's `addActionListener`) are a classic direct application. In the Spring ecosystem, `ApplicationEventPublisher` combined with `@EventListener`-annotated methods implements the same fundamental pattern — publishing an application event decouples the code raising the event from every piece of code that reacts to it, exactly like a subject notifying its registered observers.
+
+**4. What problem does the Strategy pattern solve, and how does it relate to functional interfaces covered earlier in this series?**
+It lets an algorithm's specific implementation vary independently of the code that uses it, by defining a common interface for a family of interchangeable behaviors and having client code depend only on that interface rather than any one specific algorithm. Since a Strategy interface is very often a single-method (functional) interface, Java 8's lambdas and method references let you supply a strategy directly inline as a lambda, without needing a dedicated named class for each strategy — this is exactly what's happening whenever you pass a `Comparator` or `Predicate` into a method, both being lightweight, ubiquitous applications of the Strategy pattern.
+
+**5. How does the Strategy pattern support the Open/Closed Principle (introduced formally in the next chapter)?**
+New algorithms/strategies can be added simply by creating new classes (or lambdas) implementing the existing strategy interface, without needing to modify the client code (`ShoppingCart` in the example) that uses whatever strategy it's given — the client is "closed" for modification but the system as a whole remains fully "open" to extension with new strategy implementations.
+
+**6. What does the Command pattern encapsulate, and what capabilities does that encapsulation enable?**
+It encapsulates an action (and any parameters/context needed to perform it) as a standalone object implementing a common interface (typically with an `execute()` method, and optionally `undo()`). This encapsulation enables treating actions as first-class values that can be stored, queued, logged, passed around, executed later, or reversed — capabilities that would be much harder to achieve if the action were only expressible as a direct, immediate method call.
+
+**7. How does `Runnable` relate conceptually to the Command pattern?**
+`Runnable` is essentially a minimal Command pattern implementation with a single `run()` method and no built-in support for undo or additional metadata — encapsulating "a unit of work to perform" as an object that can be passed around, stored, and executed later (or on a different thread), exactly the same fundamental idea the Command pattern formalizes with its `execute()`/`undo()` interface.
+
+**8. Why does `RemoteControl` in the Command example maintain a `Deque<Command>` for its history, and how does that enable undo functionality?**
+Each executed command is pushed onto the history stack (`Deque` used as a LIFO stack, per Chapter 22) right after being executed. To undo, the most recently executed command is popped off that stack and its `undo()` method is called, reversing that specific action — this generic mechanism works identically for *any* command implementing the `Command` interface, without `RemoteControl` needing any specific knowledge of what each individual command actually does.
+
+**9. What's the difference between the Strategy pattern and the Command pattern, given both encapsulate behavior behind an interface?**
+Strategy encapsulates an interchangeable *algorithm* — typically a pure computation with no significant side effects of its own, chosen to vary how a specific step of a larger operation is performed (e.g., how to calculate a discount). Command encapsulates a *request or action* to be performed, often with associated side effects and the specific goal of enabling that action to be treated as a value — stored, queued, logged, undone, or executed later — rather than simply varying one computational step within an otherwise-fixed larger process.
+
+**10. How would you extend the Command pattern example to support a queue of commands to be executed later, rather than immediately?**
+Instead of calling `command.execute()` immediately inside `pressButton()`, you could add the command to a `Queue<Command>` and have a separate mechanism (a scheduled task, a dedicated worker thread, or an `ExecutorService`) pull commands from that queue and execute them at an appropriate later time — the `Command` interface itself doesn't need to change at all, since it already fully encapsulates everything needed to perform the action whenever it's eventually executed.
+
+**11. Why is depending on interfaces (like `StockObserver`, `DiscountStrategy`, `Command`) rather than concrete classes a recurring theme across Observer, Strategy, and Command, and why does that matter?**
+In each pattern, the "coordinating" object (the subject, the shopping cart, the remote control) only interacts with an abstraction, never a specific concrete implementation, which is what allows new concrete behaviors (a new observer, a new discount strategy, a new command) to be introduced freely without ever needing to modify the coordinating object's own code — directly reflecting the "program to an interface, not an implementation" principle mentioned back in Chapter 18, and setting up the formal SOLID principles covered in the next chapter.
+
+**12. In the Observer example, what would happen if an observer's `onPriceChange()` implementation threw an exception — how might this affect other registered observers?**
+As written, an uncaught exception thrown by one observer during the `notifyObservers()` loop would propagate up and interrupt the loop entirely, meaning any observers not yet reached in that iteration would never receive the notification for that particular state change — a real-world robustness concern with a naive Observer implementation, typically addressed by wrapping each individual observer notification in its own try-catch (logging the failure) so that one misbehaving observer can't prevent the rest from being properly notified.

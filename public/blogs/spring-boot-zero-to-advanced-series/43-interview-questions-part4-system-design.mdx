@@ -1,0 +1,109 @@
+---
+title: "Interview Questions Part 4: System Design & Scenario-Based"
+description: "The final dedicated interview chapter — open-ended, whiteboard-style system design and judgment questions, answered by drawing on the full 39-chapter series rather than recalling a single topic."
+date: "2026-09-14"
+readTime: "20 min read"
+series: "spring-boot"
+part: 43
+tags: ["Spring Boot", "Interview Questions", "System Design"]
+---
+
+The first three interview chapters tested recall and synthesis within known topics. This one is different: these are the open-ended, "design X" or "here's a broken system, fix it" questions that show up in senior and staff-level interviews, where the actual skill being evaluated is *which* patterns from across this entire series you reach for, and why — not whether you can define one in isolation. Each answer models the structure a strong response should have: clarify scope, propose an approach, name the trade-offs, and say what you'd measure before committing.
+
+## 1. Design a URL shortener as a Spring Boot service.
+
+**Clarify scope first:** expected scale (reads vs. writes ratio — almost always read-heavy), whether custom aliases are needed, and whether analytics (click tracking) are in scope.
+
+**Core design:** A `POST /api/links` endpoint generates a short code (a base-62 encoding of an auto-incrementing ID, or a hash with collision handling) and persists `{shortCode, longUrl}` via Spring Data JPA (Chapter 9). `GET /{shortCode}` looks up and issues an HTTP redirect.
+
+**Where the series' patterns actually apply:**
+- This is overwhelmingly read-heavy — `@Cacheable` (Chapter 20) on the lookup, backed by Redis so it's consistent across instances, is the single highest-leverage optimization; a cache miss falls through to the database.
+- The lookup path needs to be fast and simple — resist the urge to make this its own microservice on day one (Chapter 23); a well-structured monolith module is entirely appropriate at typical scale.
+- If click analytics are in scope, don't write them synchronously in the redirect's request path — publish a `LinkClickedEvent` (Chapter 29) and let a separate consumer aggregate analytics asynchronously, keeping the redirect itself fast.
+- Rate limit the creation endpoint (Chapter 26/27's rate limiter concepts) to prevent abuse; the read/redirect path generally shouldn't be rate-limited the same way.
+
+**What I'd explicitly flag as a trade-off:** base-62 sequential IDs are simple but guessable/enumerable; if that's a concern, a hash-based approach trades a small amount of complexity (collision handling) for non-guessability.
+
+## 2. A `/api/search` endpoint has gotten steadily slower over six months. Walk through your diagnostic process.
+
+This is deliberately a "show your process" question, not a "guess the bug" one.
+
+1. **Metrics first (Chapter 19):** confirm the actual p95/p99 latency trend for this specific endpoint — "steadily slower over six months" suggests something growing linearly with data volume or usage, not a sudden regression from one deploy.
+2. **Distributed trace (Chapter 31)** on a recent slow request: is the time in the database, in a downstream call, or in application code?
+3. **If it's the database:** check for an N+1 pattern (Chapter 10) that was fine with a small dataset six months ago but now multiplies against a much larger one — this is the single most common real-world explanation for "was fine, now isn't, without any recent code change."
+4. **Check for a missing or degraded index** as the underlying table has grown — this is a case where the query itself (and even the ORM mapping) hasn't changed at all, but the data volume crossed a threshold where the existing index strategy stopped being sufficient.
+5. **Rule out connection pool contention (Chapter 36)** if the slowdown correlates with overall traffic growth rather than being isolated to this one endpoint.
+6. **Only after all of the above**, consider caching (Chapter 20) as a mitigation — and only if the search results tolerate some staleness, which isn't always true for "search."
+
+**The answer that signals seniority:** naming the order of investigation and *why* that order (cheapest, most likely causes first), not jumping straight to "add a cache" or "add an index" without evidence.
+
+## 3. Your team wants to create a new microservice for every new feature. How do you respond?
+
+This tests judgment, not a technical answer.
+
+**What I'd actually say:** revisit Chapter 23's decomposition criteria directly — ask what specific, present driver justifies a *new* service for this specific feature: does it need independent scaling right now, does a different team own it, is it a genuinely distinct bounded context? If the honest answer is "no, but it felt cleaner," that's the distributed-monolith risk in the making — the operational cost (a new deployable, its own database, its own on-call surface, its own entry in service discovery and the gateway) is being paid without a corresponding benefit.
+
+**A concrete, constructive alternative:** propose adding the feature as a well-isolated module within an existing, appropriately-scoped service first, with clean internal boundaries (Chapter 23's point about a well-structured monolith being easy to split later) — and revisit extracting it into its own service once a genuine driver actually materializes.
+
+**What I'd avoid saying:** a flat "no, microservices are bad" — the goal is calibrating the team's default toward deliberate, driver-based decisions, not toward reflexively avoiding services either.
+
+## 4. Design a notification system that needs to send email, SMS, and push notifications, triggered by events across several other services.
+
+**Core design:** a dedicated `notification-service` (Chapter 23) subscribing to relevant events (`OrderConfirmedEvent`, `PasswordResetRequestedEvent`, etc.) via Kafka (Chapter 29) — this is a textbook case for event-driven decoupling: the services triggering notifications (order-service, auth-service) shouldn't need to know or care how notifications are actually delivered.
+
+**Internal structure:** an abstraction (`NotificationChannel` interface) with implementations per channel (email, SMS, push), each calling its own external provider — wrap each external call with Resilience4j (Chapter 27), since third-party notification providers are exactly the kind of external dependency that needs circuit breakers and retries.
+
+**Idempotency is non-negotiable here (Chapter 29):** at-least-once delivery means a redelivered event must not send a duplicate email — track processed event IDs before dispatching.
+
+**Scaling consideration:** if SMS/push volume is very high and bursty, this consumer is a good candidate for its own dedicated consumer group with tuned concurrency (Chapter 29), decoupled entirely from how fast the *publishing* services produce events.
+
+**What I'd flag as worth discussing further:** whether failed notifications need a dead-letter queue and manual reprocessing path (Chapter 30's DLQ concept applies even though this example uses Kafka) versus being acceptable to simply log and drop, depending on the notification's business criticality (a password reset email is not optional; a marketing push notification might be).
+
+## 5. How would you design zero-downtime deployment for a Spring Boot service that also needs a database schema migration?
+
+**The core tension:** a naive deploy might run the new code against the old schema (or vice versa) for the brief window during a rolling deployment (Chapter 35), where old and new instances run simultaneously.
+
+**The pattern: expand/contract migrations.** Never ship a schema change and a code change that depends on it in the same deploy. Instead:
+1. **Expand:** deploy a migration (Chapter 12) that only *adds* — a new nullable column, a new table — fully backward-compatible with the currently-running old code.
+2. **Deploy the new code**, which can now read/write the new column, while the old column (if being replaced) is still also maintained for compatibility during the transition.
+3. **Contract:** once every instance is confirmed running the new code (no more old instances reading the old column), a later migration removes the now-unused old column.
+
+**Connects directly to:** Chapter 35's rolling deployment model (old and new pods coexisting briefly) and Chapter 12's migration discipline (never edit an applied migration — this pattern is exactly why: each step is its own new, additive migration).
+
+**What I'd flag as a common mistake:** a single migration that renames a column and a simultaneous code deploy that expects the new name — during the rolling deployment window, old instances (expecting the old name) start failing immediately.
+
+## 6. A colleague proposes putting a distributed cache (Redis) in front of every single service's database calls "to make everything faster." How do you respond?
+
+**Push back constructively, using Chapter 20's actual criteria:** caching helps read-heavy, relatively stable data — applying it uniformly to *every* database call, including frequently-changing or write-heavy data, adds real complexity (invalidation logic, TTL tuning, a new failure mode: stale data) without the corresponding benefit Chapter 20 requires to justify it.
+
+**A concrete, better process:** use the observability already in place (Chapter 19) to identify which *specific* queries are actually both frequent and expensive, and evaluate caching candidacy per query — not as a blanket architectural rule.
+
+**Name the specific risk of "cache everything":** a caching bug isn't just a performance non-improvement, it's a correctness bug (stale or, worse, cross-user data leakage per Chapter 20's warning) — the more places caching is applied without real justification, the larger that surface area becomes.
+
+**What I'd propose instead:** a short list of genuinely good candidates (a product catalog lookup, a rarely-changing configuration value) as a starting point, each with an explicit invalidation plan reviewed before implementation.
+
+## 7. Design a rate limiter that needs to work correctly across multiple instances of a service behind a load balancer.
+
+**Why this is harder than it sounds:** an in-memory, per-instance rate limiter (a simple counter in application memory) is fundamentally broken the moment there's more than one instance — a client could get N times the intended limit just by having requests randomly distributed across N instances, each independently tracking its own separate, inconsistent count.
+
+**The fix: shared, external state.** A Redis-backed token-bucket implementation (exactly Chapter 26's API Gateway rate limiter) — every instance checks and decrements against the same shared counter in Redis, so the limit is enforced consistently regardless of which instance happens to handle a given request.
+
+**Where to apply it:** centralize at the API Gateway (Chapter 26) for per-client/per-API-key limits at the system boundary; consider a second, narrower `@RateLimiter` (Chapter 27) on a specific downstream call if a particular internal dependency needs protecting from excessive internal traffic specifically, which is a distinct concern from gateway-level client rate limiting.
+
+**What I'd flag as worth clarifying:** whether the requirement is a hard limit (reject over the limit) or a soft, gradual throttle — this changes the choice of algorithm (token bucket vs. sliding window vs. leaky bucket) and is exactly the kind of scoping question worth asking before designing further.
+
+## 8. You're told a production incident occurred where a service's circuit breaker never tripped, even though the dependency it called was completely down for twenty minutes. How would you investigate?
+
+**First, check the obvious configuration culprits (Chapter 27):** was `@CircuitBreaker` actually applied to the correct method — the one that made the failing call — or was it accidentally applied to a wrapper method that caught and swallowed the exception before it could count as a failure? A caught, unrethrown exception never reaches the circuit breaker's failure tracking at all.
+
+**Check the sliding window configuration:** if `sliding-window-size` is very large relative to the actual call volume during the incident, twenty minutes of failures might not have been enough calls to reach the configured `failure-rate-threshold` — a mismatch between window size and actual traffic volume is a common, non-obvious misconfiguration.
+
+**Check whether the call had a Time Limiter at all (Chapter 27):** if the dependency was hanging rather than throwing an immediate error, and no timeout was configured, the circuit breaker's failure-rate tracking may never have registered these as failures in a timely way — a hang isn't automatically a tracked failure without an enforced timeout converting it into one.
+
+**Verify with the observability stack (Chapters 19, 31):** check whether Resilience4j's own exposed metrics show the circuit breaker's state and failure count over the incident window — this turns "why didn't it trip" from a guess into a directly measurable, confirmable answer.
+
+**What this scenario is really testing:** whether you understand that resilience patterns are only as good as their configuration and correct application — not a magic annotation that works correctly by default with zero attention to its specific settings.
+
+## Wrapping up
+
+This closes the four dedicated interview-prep chapters and the full 43-chapter "Spring Boot: Zero to Advanced" series. The topic chapters (1–39) built the knowledge; these four (40–43) are for review, recall drilling, and — in this final chapter especially — practicing the kind of open-ended reasoning that separates "knows the syntax" from "can be trusted to design the system."

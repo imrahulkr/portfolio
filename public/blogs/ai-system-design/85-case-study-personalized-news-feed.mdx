@@ -1,0 +1,92 @@
+---
+title: "Chapter 85: Case Study — Personalized News Feed"
+description: "Feed ranking design: multi-objective optimization beyond engagement, freshness versus relevance trade-offs, filter bubbles as a measurable diversity problem, and real-time feature freshness requirements."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 14
+partTitle: "Applied Case Studies"
+chapter: 85
+totalChapters: 96
+tags: ["ai-system-design", "news-feed", "multi-objective-ranking", "filter-bubbles", "case-study", "interview-prep"]
+---
+
+## Introduction
+
+Chapter 80's recommendation system optimized primarily for engagement. This chapter examines a system where optimizing for engagement alone produces a well-documented, measurable failure mode: a personalized news feed, where multi-objective optimization, freshness, and diversity all compete directly against raw engagement in ways this Part's earlier case studies didn't need to reconcile.
+
+## Multi-Objective Ranking: Engagement Is Not the Only Objective
+
+Directly extending Chapter 80's ranking architecture with a genuinely harder optimization problem: a feed ranker must balance engagement (will the user click/read), diversity (avoiding an over-narrow set of topics), and freshness (surfacing recent content) — three objectives that frequently conflict.
+
+```python
+def multi_objective_score(item, user, engagement_model, diversity_penalty_fn,
+                            freshness_weight: float) -> float:
+    """
+    Directly extends Ch. 80's single-objective ranking with an
+    explicit, weighted combination — the SAME "decompose into
+    distinct, separately-measurable dimensions" discipline this
+    series has applied throughout (Ch. 66, Ch. 75), now applied
+    to the ranking OBJECTIVE itself rather than only evaluation.
+    """
+    engagement_score = engagement_model.predict(item, user)
+    diversity_penalty = diversity_penalty_fn(item, user.recent_shown_items)
+    freshness_score = compute_freshness(item.published_at)
+    return (engagement_score - diversity_penalty
+            + freshness_weight * freshness_score)
+```
+
+**Why optimizing purely for predicted engagement produces the filter-bubble problem**: a model trained purely to maximize click-through will, by construction, learn to show more of whatever a specific user has previously engaged with — directly the same "the metric you optimize is the metric you get, regardless of what you actually wanted" concern Chapter 21 established generally, here manifesting as a measurable narrowing of content diversity over time that a purely engagement-focused offline metric would never flag as a problem, since it's optimizing exactly what it was told to optimize.
+
+## Diversity as a Measurable, Explicit Metric
+
+Directly extending Chapter 76's fairness-auditing discipline — diversity isn't a vague, unmeasurable aspiration but a concrete metric (topic entropy across a user's shown feed, or the fraction of shown items outside a user's top-3 historically-engaged categories) that should be tracked explicitly alongside engagement, exactly the same "measure the dimension you care about explicitly, don't assume an aggregate metric captures it" discipline this series established for fairness.
+
+```python
+def measure_feed_diversity(shown_items: list, user_history_categories: set) -> float:
+    novel_category_items = sum(1 for item in shown_items if item.category not in user_history_categories)
+    return novel_category_items / len(shown_items)
+```
+
+## Freshness: A Latency Requirement on the Data, Not Just the Serving Path
+
+Directly extending Chapter 27's low-latency serving discussion with a data-freshness requirement Chapter 80's more static item catalog didn't have: a news feed's item catalog itself changes continuously (new articles published every minute), meaning the candidate generation stage (Chapter 80's architecture) must index new content with minimal delay, or freshness suffers regardless of how fast the serving path itself is.
+
+## Evaluation: Long-Term Metrics Beyond Immediate Engagement
+
+Directly extending Chapter 22's A/B testing discipline with a specific pitfall: a feed change that increases immediate click-through can simultaneously decrease long-term user satisfaction and retention (if it optimizes for short-term engagement at diversity's expense) — requiring longer-horizon metrics (return rate over weeks, not just session-level clicks) to catch this trade-off that a short-window A/B test would miss entirely.
+
+## Key Takeaways
+
+- A news feed ranker must balance engagement, diversity, and freshness as explicitly competing objectives, directly extending Chapter 80's single-objective ranking architecture.
+- Optimizing purely for predicted engagement produces filter bubbles by construction — the metric you optimize is the metric you get, exactly Chapter 21's core evaluation principle now manifesting as a measurable content-diversity problem.
+- Diversity should be tracked as an explicit, measurable metric (topic entropy, novel-category fraction) rather than an unmeasured aspiration, directly extending Chapter 76's fairness-auditing discipline.
+- Freshness introduces a data-indexing latency requirement distinct from serving-path latency, and evaluating feed changes requires long-horizon metrics beyond immediate session engagement to catch trade-offs a short A/B test window would miss.
+
+---
+
+## Interview Questions
+
+**1. Why does optimizing purely for predicted engagement inevitably produce a filter bubble, rather than this being an occasional, avoidable side effect?**
+A model trained to maximize click-through learns, by the nature of its training objective, to show more of whatever pattern has historically driven clicks for a specific user — this is exactly what the objective function was designed to do, meaning the narrowing effect is a direct, structural consequence of the chosen objective rather than an incidental bug, directly the same "you get exactly what you optimize for" principle Chapter 21 established generally.
+*Follow-up: Would using a more sophisticated engagement-prediction model (better features, more data) resolve this problem?*
+No — a more accurate engagement model would, if anything, more PRECISELY identify and reinforce exactly the narrow content pattern that maximizes clicks, making the filter-bubble effect potentially WORSE rather than better, since the underlying problem is the objective function itself, not the model's accuracy at optimizing that objective.
+
+**2. Why must diversity be tracked as an explicit metric rather than trusted to emerge from a well-tuned engagement model?**
+An engagement-only model has no mechanism to value diversity at all — since diversity isn't part of what it was trained to predict, expecting it to emerge naturally misunderstands what the model is actually optimizing for, directly the same "an aggregate or unrelated metric doesn't automatically capture a distinct dimension you actually care about" principle Chapter 76 established for fairness, now applied to content diversity.
+*Follow-up: How would you decide the appropriate weighting between diversity and engagement in the multi-objective scoring function, rather than picking an arbitrary weight?*
+Run controlled A/B tests at several candidate diversity weightings, measuring both short-term engagement and longer-horizon retention metrics (this chapter's evaluation discussion) at each weighting, empirically identifying the weight that best balances immediate engagement against the longer-term retention cost of an overly narrow feed, following this series' consistent empirical-calibration discipline rather than guessing at an appropriate trade-off.
+
+**3. Why does a news feed's freshness requirement introduce a genuinely different engineering challenge than Chapter 80's more static recommendation catalog?**
+Chapter 80's catalog (products, movies) changes relatively slowly, meaning candidate generation's index can be refreshed on a more relaxed cadence; a news feed's catalog changes continuously and rapidly (new articles every minute), meaning the candidate-generation index itself must be updated with low latency or freshness suffers regardless of how fast the downstream ranking and serving path performs — a data-pipeline latency requirement this chapter's earlier case studies didn't need to solve.
+*Follow-up: How would you architect the candidate-generation indexing pipeline to meet this freshness requirement, connecting to Chapter 58's vector-database material?*
+I'd use a streaming ingestion pipeline (directly extending Chapter 8's batch-versus-streaming data pipeline discussion) that indexes new articles into the vector database (Chapter 58) as they're published, rather than a periodic batch re-index — ensuring new content becomes candidate-generation-eligible within seconds or minutes of publication rather than waiting for a longer batch cycle.
+
+**4. Why might a short-window A/B test fail to catch a feed change that increases immediate engagement while harming long-term user satisfaction?**
+A short-window test captures immediate, session-level behavior (did the user click more within this test window), which can genuinely increase even as a narrower, more filter-bubble-prone feed gradually erodes the user's longer-term satisfaction and platform trust — an effect that only manifests over a longer horizon (declining weekly return rate) that a short A/B test window simply hasn't run long enough to observe.
+*Follow-up: What specific experimental design change would you recommend to catch this longer-horizon effect, extending Chapter 22's A/B testing discipline?*
+Run a longer-duration holdout experiment specifically tracking longer-horizon retention metrics (weekly active return rate, session frequency over several weeks) alongside the standard short-term engagement metrics, directly extending Chapter 22's experimental design to include a longer observation window specifically calibrated to catch the kind of delayed, cumulative effect a short-window test structurally cannot detect.
+
+**5. How would you diagnose whether a declining feed engagement metric stems from a genuine content-quality problem versus an over-aggressive diversity penalty, extending this Part's diagnostic discipline?**
+Directly extending this series' consistent component-isolation diagnostic approach — separately measure the engagement-model component's OWN predictive accuracy (is it still correctly predicting which items a user would click, in isolation) versus the actual, observed engagement outcomes after the diversity penalty has been applied to final rankings — if the engagement model's own predictions remain accurate but the final, diversity-adjusted ranking underperforms, this points toward the diversity weighting being too aggressive rather than a genuine content-quality or engagement-model problem.
+*Follow-up: What remediation would each of these two diagnoses point toward?*
+An over-aggressive diversity penalty points toward reducing the diversity weight in the multi-objective scoring function (this chapter's `freshness_weight`-style parameter) and re-validating through A/B testing; a genuine content-quality or engagement-model problem points toward investigating the underlying engagement model itself (features, training data, or a genuine content-supply issue) — two entirely different remediation paths this diagnostic separation correctly distinguishes.

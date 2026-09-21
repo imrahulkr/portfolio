@@ -1,0 +1,207 @@
+---
+title: "Dockerizing & Deploying Spring Boot: Containers & Kubernetes Basics"
+description: "Chapter 3's executable JAR made deployment simple for one instance. This chapter covers packaging that JAR into a container correctly, and the Kubernetes concepts that make Part 7's architecture actually run in production."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 35
+tags: ["Spring Boot", "Docker", "Kubernetes", "Deployment"]
+---
+
+Chapter 3 explained why a Spring Boot JAR is self-contained and easy to run anywhere. This chapter covers the actual, current standard for "anywhere": a container, orchestrated by Kubernetes — and connects several ideas from Part 7 (health checks, service discovery, config) to their real infrastructure home.
+
+## A naive Dockerfile, and why it's wasteful
+
+```dockerfile
+FROM eclipse-temurin:21-jre
+COPY target/demo-0.0.1-SNAPSHOT.jar app.jar
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+This works, but treats the entire fat JAR (Chapter 3) as one unchanging blob. Change one line of application code, and Docker must re-upload the *entire* JAR — including every third-party dependency — to every environment, since Docker's layer caching invalidates everything from the changed layer onward.
+
+## Layered JARs — the actual fix
+
+Spring Boot builds JARs with distinct internal layers by default: dependencies (which rarely change), Spring Boot's own loader, application resources, and application classes (which change on every commit).
+
+```dockerfile
+FROM eclipse-temurin:21-jre AS builder
+WORKDIR /app
+COPY target/demo-0.0.1-SNAPSHOT.jar app.jar
+RUN java -Djarmode=layertools -jar app.jar extract
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=builder /app/dependencies/ ./
+COPY --from=builder /app/spring-boot-loader/ ./
+COPY --from=builder /app/snapshot-dependencies/ ./
+COPY --from=builder /app/application/ ./
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+```
+
+```
+Naive: one layer, the whole JAR       Layered: dependencies cached separately
+┌─────────────────────────┐          ┌─────────────────────────┐
+│    entire fat JAR          │          │  dependencies (rarely     │  ← cached, reused
+│  (changes = re-upload       │          │  changes)                  │     across builds
+│   everything, every time)   │          ├─────────────────────────┤
+└─────────────────────────┘          │  application classes       │  ← only this
+                                       │  (changes every commit)    │     layer changes
+                                       └─────────────────────────┘
+```
+
+This multi-stage build extracts the JAR into its natural layers, then copies them into the final image in order of change frequency — the dependencies layer, unchanged between builds, is reused from Docker's cache, and only the small application-classes layer needs rebuilding and re-uploading on a typical code change. For a real application, this is the difference between a multi-hundred-megabyte re-upload and a few-kilobyte one on every deploy.
+
+## Health checks and Kubernetes probes (connecting to Chapter 19)
+
+```yaml
+# Kubernetes deployment manifest (excerpt)
+livenessProbe:
+  httpGet:
+    path: /actuator/health/liveness
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /actuator/health/readiness
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+```
+
+This is the concrete, real-world destination for Chapter 19's liveness/readiness distinction: Kubernetes calls these exact endpoints to decide whether to restart a pod (liveness failing) or temporarily stop routing traffic to it (readiness failing) — the health indicators built back in Part 6 are what this orchestration layer actually depends on to make those decisions correctly.
+
+```
+             Kubernetes polls both endpoints continuously
+                          │
+        ┌─────────────────┴─────────────────┐
+        ▼                                     ▼
+  livenessProbe fails                  readinessProbe fails
+  → Kubernetes RESTARTS the pod        → Kubernetes stops routing
+    (assumes it's unrecoverable)          traffic to this pod,
+                                           but does NOT restart it
+```
+
+## Externalized configuration in Kubernetes (connecting to Chapter 5/25)
+
+```yaml
+env:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "prod"
+  - name: SPRING_DATASOURCE_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: db-credentials
+        key: password
+```
+
+Kubernetes' own `ConfigMap` and `Secret` resources are a natural fit for exactly the environment-variable-based configuration precedence Chapter 5 established — the same `application.yml` and profile mechanism from Part 1 works unchanged, with Kubernetes supplying the environment-specific values at the infrastructure level rather than (or alongside) Spring Cloud Config Server from Chapter 25.
+
+## Scaling and the discovery connection (Chapter 24)
+
+```yaml
+spec:
+  replicas: 3
+```
+
+Setting `replicas: 3` is what makes Chapter 24's entire premise concrete — Kubernetes runs three independent instances of a service, each with its own pod IP, and its built-in Service resource provides a stable DNS name resolving to whichever pods are currently healthy, functioning as a form of service discovery in its own right (recall Chapter 24's note that a platform's built-in discovery can sometimes substitute for Eureka entirely).
+
+## Best practices & gotchas
+
+- **Always use layered JAR extraction for container images**, not the naive single-layer approach — the build-time and deployment-time savings compound significantly over the life of a real project with frequent deploys.
+- **Never bake secrets into a container image.** Even a "private" image registry isn't a substitute for proper secret management — use Kubernetes Secrets, a dedicated secrets manager, or Config Server (Chapter 25), never a value hardcoded into a Dockerfile or baked-in properties file.
+- **Set explicit memory and CPU limits/requests on every container.** Without them, one misbehaving pod can consume a node's entire resource pool, starving every other pod scheduled there — and the JVM itself needs to be told its container memory limit (or run a version that detects it automatically, which modern JVMs do) to avoid over-allocating heap.
+- **Distinguish `initialDelaySeconds` thoughtfully between liveness and readiness.** A liveness probe that fires too early, before a slow-starting application has genuinely finished initializing, causes Kubernetes to restart a perfectly healthy application repeatedly — a subtle, self-inflicted outage.
+- **Use a minimal base image** (a JRE, not a full JDK, in production; distroless or slim variants where feasible) — smaller images pull faster, start faster, and have a smaller attack surface.
+
+## Quick reference
+
+| Concept | Purpose |
+|---|---|
+| Layered JAR | Splits a fat JAR into cacheable layers by change frequency |
+| Liveness probe | Determines whether Kubernetes should restart a pod |
+| Readiness probe | Determines whether Kubernetes should route traffic to a pod |
+| ConfigMap / Secret | Kubernetes-native externalized configuration, feeding Spring's `Environment` |
+| `replicas` | The number of running instances of a service — the scaling knob discovery depends on |
+
+## Wrapping up
+
+Containers and Kubernetes are where nearly every concept from Parts 6 and 7 becomes literally, physically real — health checks that gate real traffic, configuration sourced externally, and service discovery backed by an actual orchestration platform. **Chapter 36** covers what happens once that deployed application needs to perform better under real load: connection pools, the N+1 problem, and JVM/GC fundamentals.
+
+## Interview Questions
+
+**1. Why does re-uploading an entire fat JAR on every deployment become a real problem at scale, and how does layered JAR extraction address it?**
+A naive single-layer Docker image treats the whole JAR (application code plus every dependency) as one unit — any code change invalidates Docker's cache for that entire layer, forcing a full re-upload of potentially hundreds of megabytes of unchanged third-party dependencies alongside the actual, small code change. Layered JAR extraction splits the JAR into separate layers by how frequently their contents actually change (dependencies rarely, application classes on every commit), so Docker's layer caching can reuse the unchanged dependency layers and only needs to rebuild/re-upload the small, frequently-changing application layer.
+
+*Follow-up: In a CI/CD pipeline deploying many times per day, what's the cumulative impact of this optimization compared to the naive approach?* Over many deployments per day, the naive approach would repeatedly consume significant network bandwidth and registry storage re-uploading identical, unchanged dependency bytes on every single deploy, meaningfully slowing down each deployment's build/push time — the layered approach's dependency-layer caching means most deploys only need to push a small delta, which compounds into substantially faster, cheaper deployment cycles across a high-frequency CI/CD pipeline.
+
+**2. What's the difference between a Kubernetes liveness probe and a readiness probe, and how does this map directly onto Chapter 19's health check concepts?**
+A liveness probe determines whether Kubernetes should restart a pod — failing it signals the application is in a broken, unrecoverable state. A readiness probe determines whether Kubernetes should route traffic to a pod — failing it signals the application is temporarily unable to serve requests correctly but shouldn't necessarily be restarted. This is a direct, literal implementation of Chapter 19's liveness-vs-readiness distinction: the actuator endpoints built there (`/actuator/health/liveness`, `/actuator/health/readiness`) are exactly what these Kubernetes probes are configured to poll.
+
+*Follow-up: What would likely happen if a team mistakenly configured both probes to check the exact same `/actuator/health` endpoint, with no distinction between liveness and readiness concerns?* A transient issue that should only affect readiness (like a temporarily unavailable downstream dependency, from Chapter 19's earlier example) would also fail the liveness check under this misconfiguration, causing Kubernetes to unnecessarily restart a pod that wasn't actually broken or unrecoverable — restarting doesn't fix an external dependency being temporarily down, so this misconfiguration would cause pointless restart churn without addressing the actual underlying issue, and potentially worsen the situation if restarts themselves add load or delay recovery.
+
+**3. Why is it important that a container's memory and CPU limits be explicitly set, rather than left unconfigured?**
+Without explicit limits, a single pod experiencing a memory leak or unusually heavy load could consume all of a node's available resources, starving every other pod scheduled on that same node — even ones completely unrelated to the misbehaving service; explicit limits ensure Kubernetes enforces a ceiling on each pod's resource consumption, containing the impact of any one pod's problems to just that pod rather than degrading the entire node's other workloads.
+
+*Follow-up: Why does the JVM specifically need special consideration regarding container memory limits, beyond what a typical native application might need?* Older or misconfigured JVMs could historically detect the host machine's total physical memory rather than the container's actual, more restrictive memory limit, potentially allocating a heap far larger than the container is actually permitted to use — leading to the container being forcibly killed (an OOMKill) once it exceeds its real limit; modern JVM versions (aligned with this series' Java 21 target) are container-aware by default and correctly detect and respect the container's actual memory limit, but this historical gotcha is exactly why it's worth explicitly understanding and verifying rather than assuming works correctly by default in every environment.
+
+**4. How does a Kubernetes `Service` resource relate to the service discovery concept introduced in Chapter 24 with Eureka?**
+A Kubernetes `Service` provides a stable DNS name that automatically resolves to whichever pods backing that service are currently healthy and ready — conceptually providing the same core capability Eureka provides (resolving a logical service name to the current set of healthy instance addresses), just implemented natively by the orchestration platform itself rather than by an application-level registry and client library that the application needs to explicitly integrate with.
+
+*Follow-up: Given this overlap, why might a team deploying to Kubernetes still choose to also run Eureka, rather than relying purely on Kubernetes' built-in service discovery?* As discussed back in Chapter 24, a team might still choose Eureka if they need consistent service discovery behavior across a mixed deployment environment (not exclusively Kubernetes), or if their existing Spring Cloud-based tooling and patterns (like Feign's `@FeignClient` name resolution, or the `@LoadBalanced` client pattern) are already built assuming Eureka-style discovery and switching entirely to Kubernetes-native discovery would require reworking that existing integration — it's a legitimate trade-off between leveraging platform-native capability versus consistency with an existing Spring Cloud-based architecture.
+
+**5. How do Kubernetes `ConfigMap` and `Secret` resources relate to the configuration precedence Chapter 5 established?**
+They're typically surfaced to a running container as environment variables (or mounted files), which Spring Boot's configuration mechanism already knows how to read according to the precedence order Chapter 5 established — environment variables sit above the packaged `application.yml` in that precedence, meaning Kubernetes can override an application's baseline configuration for a specific deployment environment using the exact same mechanism (environment variable precedence) the series established from the very beginning, just supplied by the orchestration platform rather than manually set on a command line.
+
+*Follow-up: Does using Kubernetes ConfigMaps/Secrets for configuration make Spring Cloud Config Server (Chapter 25) redundant?* Not necessarily — they can be complementary rather than mutually exclusive: Kubernetes-native configuration is often well-suited for infrastructure-level, environment-specific values and secrets tied closely to the deployment platform itself, while Config Server's Git-backed, centrally-versioned model (with its `@RefreshScope` runtime-refresh capability from Chapter 25) can still provide value for broader, more frequently-adjusted application-level configuration that benefits from that specific workflow — many real systems use both, each for the kind of configuration it's best suited to, similar to earlier "use both tools for what they're each good at" patterns established in Part 7.
+
+**6. Why is using a JRE base image (rather than a full JDK) recommended for a production container image?**
+A JDK includes development and build tooling (compilers, debuggers, and other utilities) that a running production application never actually needs — a JRE contains only what's required to *run* already-compiled Java applications, resulting in a meaningfully smaller image that pulls and starts faster, and reduces the attack surface by not including unnecessary tooling that could theoretically be leveraged if the container were ever compromised.
+
+*Follow-up: Is there ever a legitimate reason to include a full JDK in a container image intended to actually run in production, rather than just during the build stage?* Generally no for the final runtime image — the multi-stage build pattern shown in this chapter's Dockerfile example specifically uses a build stage (which might reasonably need more tooling) separately from the final runtime stage, ensuring the actual deployed image only contains what's needed to run the already-built application; a legitimate JDK-in-production scenario would be genuinely unusual, perhaps limited to specific diagnostic/debugging tooling requirements in an exceptional troubleshooting scenario, rather than a normal, ongoing production configuration.
+
+**7. What's the risk of setting a liveness probe's `initialDelaySeconds` too low for an application with a genuinely slow startup sequence?**
+If the liveness probe begins checking before the application has actually finished its startup sequence (still initializing beans, warming caches, or performing other legitimate startup work), it may report as failing simply because the application isn't fully ready yet — not because it's actually broken — causing Kubernetes to prematurely and repeatedly restart a perfectly healthy, still-starting application, potentially preventing it from ever successfully completing startup at all if each restart resets the clock before initialization can finish.
+
+*Follow-up: How would you determine an appropriate `initialDelaySeconds` value for a specific application, rather than guessing?* Measure the application's actual typical startup time under realistic conditions (ideally including the specific environment/resources it will run under in production, since startup time can vary with available CPU/memory) and set `initialDelaySeconds` with a reasonable safety margin beyond that measured value — some teams additionally use Kubernetes' `startupProbe` feature specifically to handle variable or slow startup times more robustly, delaying the liveness probe's involvement entirely until a separate startup probe first confirms the application has finished initializing.
+
+**8. Why might a service's number of replicas need to change dynamically in production, and what Kubernetes feature supports this beyond manually editing the `replicas` value?**
+Real-world traffic naturally fluctuates (daily/weekly patterns, unexpected spikes), and a fixed replica count set for typical/average load would either waste resources during low-traffic periods or be insufficient during genuine traffic spikes; Kubernetes' Horizontal Pod Autoscaler (HPA) can automatically adjust the replica count within a configured range based on observed metrics (CPU utilization, memory usage, or custom metrics like those exposed via Micrometer/Actuator from Chapter 19), scaling out under load and back in when load subsides, without requiring manual intervention for every fluctuation.
+
+*Follow-up: How does the Horizontal Pod Autoscaler's use of custom application metrics connect back to the observability work covered in Chapter 19?* HPA can be configured to scale based on custom metrics beyond basic CPU/memory — for example, a metric like Kafka consumer lag (relevant to Chapter 29) or a custom business metric exposed via Micrometer — meaning the same observability instrumentation built for debugging and dashboards in Chapter 19 can also directly feed automated infrastructure scaling decisions, extending that instrumentation's value beyond just human-facing dashboards and alerts into automated, metric-driven operational behavior.
+
+**9. Why does the chapter emphasize that secrets should never be baked into a container image, even a "private" one?**
+A container image, once built, persists in a registry and potentially in various caches, build logs, and any environment it's ever been pulled to — a baked-in secret remains embedded in every layer and every copy of that image indefinitely, accessible to anyone with access to the image itself (which is often a broader group than those who should have access to the specific secret), and rotating a compromised or expired secret would require rebuilding and redeploying the entire image rather than simply updating a value in a secrets store; "private" registry access control is a weaker, less precise protection boundary than dedicated secret management specifically designed for this purpose.
+
+*Follow-up: What's a practical workflow difference between rotating a database password stored as a Kubernetes Secret versus one baked into a container image?* Rotating a Kubernetes Secret typically involves updating the Secret resource itself and having the application pick up the new value (potentially via a rolling restart, or dynamically if the application supports runtime credential refresh) — no rebuild of the container image is required at all; rotating a baked-in secret would require modifying the Dockerfile or build process, rebuilding the entire image, and redeploying it everywhere it's used, a substantially heavier and slower process for something that should ideally be quick and low-risk to do regularly as a security best practice.
+
+**10. How does this chapter's Dockerfile connect to the executable JAR concept established back in Chapter 3?**
+Chapter 3 established that a Spring Boot JAR is self-contained and runnable via `java -jar app.jar` with no external server needed — this chapter's Dockerfile builds directly on that property, since packaging the application into a container is fundamentally just wrapping that same self-contained, executable JAR (or its extracted layers) together with a JVM runtime into one deployable unit; none of Chapter 3's fundamental packaging model changes, containerization simply adds a standardized, portable runtime environment around it.
+
+*Follow-up: Would containerization be meaningfully harder or different if Spring Boot still required an external, separately-installed application server the way pre-Boot Spring applications historically did?* Yes, meaningfully harder — without Spring Boot's embedded server model (Chapter 3), a container image would additionally need to separately install, configure, and manage a standalone application server (like an external Tomcat) as its own component within the image, coordinate deploying the WAR into that server correctly, and handle the added complexity of that server's own configuration and lifecycle within the container — Spring Boot's embedded-server, self-contained JAR model is precisely what makes the simple, direct Dockerfile pattern shown in this chapter possible in the first place.
+
+**11. What's the relationship between `replicas: 3` in a Kubernetes deployment and the load-balancing behavior discussed in Chapters 24 and 26?**
+Setting `replicas: 3` creates three actual, independently running instances of the service, and both service-discovery-based load balancing (Chapter 24's `@LoadBalanced`/Eureka-based resolution, or Kubernetes' own native Service-based resolution) and the API Gateway's routing (Chapter 26, using `lb://service-name`) depend on there genuinely being multiple healthy instances registered to distribute requests across — `replicas` is the concrete infrastructure setting that makes the load-balancing concepts covered throughout Part 7 something with actual multiple instances to balance across, rather than a theoretical capability with nothing to apply it to.
+
+*Follow-up: If a service is scaled to `replicas: 3` but its readiness probe is currently failing for one of those three pods, how many instances would actually receive routed traffic?* Only two — a pod whose readiness probe is currently failing is excluded from the pool of instances that Kubernetes' Service (or an integrated discovery mechanism reading the same readiness state) considers available to route traffic to, even though it still counts toward the total `replicas: 3` count and Kubernetes will still attempt to keep it running (assuming its liveness probe is passing) — this directly reflects Chapter 19's readiness-probe purpose: temporarily removing a not-yet-ready or currently-struggling instance from active traffic routing without necessarily restarting it.
+
+**12. Why might a team choose a "distroless" or minimal base image over a standard, full-featured Linux-based JRE image for their production containers?**
+A distroless or minimal image contains only the essential runtime dependencies needed to actually run the application (the JRE and its direct requirements), deliberately excluding a full operating system's shell, package manager, and other utilities that a typical Linux distribution image would include by default — this further reduces the image size (faster pulls/starts) and meaningfully shrinks the attack surface, since there's no shell or package manager available for an attacker to exploit even if they did manage to gain some level of access to a running container.
+
+*Follow-up: What's a practical trade-off or inconvenience a team might encounter when using a distroless image, compared to a standard base image with a full shell available?* Routine debugging techniques that rely on shelling into a running container (`kubectl exec -it pod -- /bin/sh`) to inspect files, run diagnostic commands, or troubleshoot interactively aren't available at all in a distroless image, since there's no shell present to exec into — teams using distroless images typically need to rely more heavily on external observability tooling (the metrics, logs, and tracing covered in Chapters 19, 22, and 31) rather than ad hoc interactive debugging inside the container itself, which is a reasonable trade-off given how much this series has emphasized building strong observability as a first-class concern rather than a fallback.
+
+**13. How does the multi-stage Dockerfile pattern shown in this chapter (a `builder` stage and a separate final stage) improve on a single-stage build beyond just the layered-JAR benefit?**
+A multi-stage build lets the `builder` stage include whatever tools are needed to extract/prepare the application (potentially a full JDK, build tools, or other utilities) without any of those tools ending up in the final image at all — only the specific artifacts explicitly copied via `COPY --from=builder` make it into the final, much leaner runtime image, cleanly separating "what's needed to prepare the deployable artifact" from "what's needed to actually run it," which keeps the final production image as minimal as possible regardless of how much tooling the build/preparation process itself required.
+
+*Follow-up: If a team's build process required running tests or additional build steps beyond just extracting the layered JAR, where would that logic fit within this multi-stage pattern?* That additional logic would typically belong within the `builder` stage (or an even earlier stage in a longer multi-stage pipeline) — since anything in a stage not explicitly copied forward via `COPY --from=builder` is simply discarded and never appears in the final image, a build stage can freely run tests, compile code, generate reports, or perform any other build-time activity without any concern about those tools or artifacts bloating the final, minimal runtime image that actually gets deployed.
+
+**14. Why does this chapter describe containers and Kubernetes as making "several ideas from Part 7... literally, physically real" rather than introducing entirely new concepts?**
+Because the concepts themselves — service discovery, health-based traffic routing, externalized configuration, horizontal scaling — were already fully explained throughout Parts 6 and 7 at the application/pattern level; this chapter's contribution is showing the actual, concrete infrastructure (Kubernetes probes, Services, ConfigMaps, replica counts) that those application-level patterns integrate with and depend on in a genuine production deployment, rather than introducing new architectural ideas the reader hasn't already encountered.
+
+*Follow-up: Why is it valuable to have learned the application-level concepts (Chapters 19, 24, 25) before this infrastructure-level chapter, rather than the reverse order?* Understanding *why* a health check needs to distinguish liveness from readiness, or *why* configuration needs to be externalized and precedence-ordered, gives meaningful context for *why* the specific Kubernetes features (separate liveness/readiness probes, ConfigMaps/Secrets) are designed the way they are — encountering the infrastructure first, without that underlying application-level reasoning already in place, would risk treating these Kubernetes features as arbitrary configuration syntax to memorize rather than the concrete solution to problems the reader already deeply understands from having built the application-level patterns first.
+
+**15. Summarize how this chapter connects the deployment/infrastructure layer back to the entire series, from Chapter 3's executable JAR through Part 7's distributed systems patterns.**
+Chapter 3 established that a Spring Boot application packages into one self-contained, runnable artifact with no external server dependency — this chapter shows that same artifact, made even more efficient to distribute via layered container images, becoming the deployable unit that Kubernetes orchestrates at scale. Every subsequent concept covered — health checks (Chapter 19) becoming real liveness/readiness probes, externalized configuration (Chapters 5, 25) becoming ConfigMaps and Secrets, and service discovery (Chapter 24) finding its natural infrastructure-native counterpart in Kubernetes Services — demonstrates that the application-level patterns built throughout this series aren't abstract exercises, but the exact mechanisms real production infrastructure depends on and integrates with directly.
+
+*Follow-up: Looking ahead, why might Chapter 36's performance tuning topics (connection pools, the N+1 problem, JVM/GC fundamentals) be a natural next step after establishing how an application is actually deployed and scaled?* Once an application is genuinely running across multiple replicas under real, orchestrated infrastructure (this chapter) and observable end-to-end (Chapters 19, 22, 31), the natural next question becomes making each individual instance perform as efficiently as possible under real production load — connection pool sizing interacts directly with how many replicas are running and what resource limits each container has, and JVM/GC behavior is directly shaped by the container memory limits this chapter discussed, making performance tuning a logical, connected continuation rather than an isolated, unrelated topic.

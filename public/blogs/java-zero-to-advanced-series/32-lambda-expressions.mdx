@@ -1,0 +1,138 @@
+---
+title: "Lambda Expressions"
+description: "Lambda syntax, how lambdas capture variables, the relationship between lambdas and functional interfaces, and lambdas vs anonymous classes."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Functional Programming"
+chapter: 32
+totalChapters: 65
+slug: "lambda-expressions"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "lambdas", "functional-programming"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## What a Lambda Actually Is
+
+A lambda expression is a concise, anonymous implementation of a **functional interface** (Chapter 12) — an interface with exactly one abstract method. It's syntax for "here's a block of code to run later," without the ceremony of a named class or an anonymous class.
+
+```java
+// Before lambdas — anonymous class
+Comparator<String> byLength = new Comparator<String>() {
+    @Override
+    public int compare(String a, String b) {
+        return Integer.compare(a.length(), b.length());
+    }
+};
+
+// With a lambda
+Comparator<String> byLength = (a, b) -> Integer.compare(a.length(), b.length());
+```
+
+## Lambda Syntax Variations
+
+```java
+Runnable noArgs = () -> System.out.println("Running");
+
+Function<Integer, Integer> square = x -> x * x;                    // single param, no parens needed
+Function<Integer, Integer> squareExplicit = (Integer x) -> x * x;  // explicit type, parens required
+
+BiFunction<Integer, Integer, Integer> add = (a, b) -> a + b;        // multiple params, parens required
+
+Function<Integer, Integer> squareBlock = x -> {                    // block body — needs explicit return
+    int result = x * x;
+    return result;
+};
+```
+
+Rules: parentheses are optional for exactly one untyped parameter, mandatory otherwise. A single expression body implicitly returns its value; a block body (`{ }`) requires an explicit `return` statement if the functional interface method returns a value.
+
+## Lambdas Require a Functional Interface — the Compiler Infers It
+
+A lambda has no inherent type of its own — the compiler determines what functional interface it's implementing from the **target context** (a variable's declared type, a method parameter's type, a return type).
+
+```java
+Runnable r = () -> System.out.println("run");        // target type: Runnable
+Callable<String> c = () -> "result";                   // target type: Callable<String>
+
+// The exact same lambda syntax "() -> System.out.println(x)" could implement
+// ANY compatible functional interface, depending purely on context
+```
+
+This is why a functional interface must have exactly one abstract method (Chapter 12) — with more than one, the compiler couldn't know which method's signature the lambda's body and parameters are meant to satisfy.
+
+## Variable Capture — "Effectively Final"
+
+A lambda can access local variables and parameters from its enclosing scope, but only if they're **effectively final** — never reassigned after initialization, even if not explicitly marked `final`.
+
+```java
+int base = 10;
+Function<Integer, Integer> addBase = x -> x + base;   // OK — base is never reassigned
+
+int counter = 0;
+// counter = counter + 1;                              // if this line existed, counter would NOT be effectively final
+// Runnable increment = () -> counter++;                // COMPILE ERROR either way — can't reassign a captured variable
+```
+
+The lambda body would compile if it only *reads* an effectively-final variable, but any attempt to *reassign* a captured local variable from within the lambda body itself is always a compile error, regardless of effective finality elsewhere.
+
+**Why this restriction exists:** the lambda (like a local/anonymous class, Chapter 14) may execute after the enclosing method has already returned and its stack frame is gone. The compiler captures a **snapshot copy** of the variable's value at lambda-creation time rather than a live reference to the stack slot — allowing reassignment after that snapshot was taken would create ambiguity about which value the lambda should actually see.
+
+![Diagram: lambda instance holding a captured copy of a local variable's value, independent of the now-destroyed stack frame of the method that created it](/diagrams/ch32-lambda-variable-capture.svg)
+
+## Lambdas vs. Anonymous Classes — Real Differences, Not Just Syntax
+
+- **`this` binding**: inside a lambda, `this` refers to the *enclosing* instance (lexical scoping) — exactly as if the lambda's body were ordinary code at that point. Inside an anonymous class, `this` refers to the anonymous class instance itself.
+- **Compilation mechanism**: lambdas are compiled using `invokedynamic` and generated at runtime via `LambdaMetafactory`, not as a separate compiled `.class` file per lambda the way anonymous classes are — this makes lambdas generally more efficient to create, especially when the same lambda expression is evaluated repeatedly.
+- **Interface restriction**: a lambda can only implement a functional interface (exactly one abstract method); an anonymous class can implement any interface or extend any class, regardless of method count.
+
+## Key Takeaways
+
+- A lambda is a concise implementation of a functional interface's single abstract method; its type is inferred entirely from context, not declared explicitly.
+- Captured local variables must be effectively final — read-only from the lambda's perspective, since a snapshot copy is captured, not a live reference.
+- Unlike anonymous classes, `this` inside a lambda refers to the enclosing instance, not the lambda itself.
+- Lambdas compile via `invokedynamic`/`LambdaMetafactory`, not a generated class file per lambda — generally more efficient than the equivalent anonymous class.
+
+---
+
+## Interview Questions
+
+**1. What is a lambda expression, fundamentally, in terms of the type system?**
+It's a concise syntax for providing an implementation of a functional interface's single abstract method. A lambda has no standalone type of its own — the compiler infers which functional interface it implements entirely from the surrounding context (the declared type of the variable, parameter, or return type it's being assigned or passed to).
+
+**2. Why must a lambda expression's target type be a functional interface with exactly one abstract method?**
+Because the lambda's parameter list and body must map unambiguously onto some interface method's signature — if the interface had two or more abstract methods, the compiler would have no way to determine which method the lambda's parameters and body are meant to implement.
+
+**3. What does it mean for a local variable to be "effectively final," and why does this matter for lambdas?**
+It means the variable is assigned exactly once and never reassigned afterward anywhere in its scope, even though it isn't explicitly declared `final`. Lambdas (like local and anonymous classes, Chapter 14) can only capture effectively-final local variables, because the lambda's execution may outlive the enclosing method's stack frame, and the compiler handles this by capturing an immutable snapshot copy of the variable's value at the point of lambda creation, which would become inconsistent if the original variable could still change afterward.
+
+**4. What compile error occurs if you try to reassign a captured local variable from within a lambda body?**
+The compiler rejects it outright — reassigning a variable captured by a lambda is a compile-time error (specifically, it fails the "effectively final" requirement, since a variable that's ever reassigned, even from inside the lambda itself, cannot be effectively final), regardless of whether the reassignment happens inside or outside the lambda body.
+
+**5. Can a lambda modify an instance field of its enclosing class?**
+Yes — instance fields aren't subject to the effectively-final restriction, since they live on the heap as part of the enclosing object, not on a stack frame that could disappear before the lambda runs. A lambda can freely read and reassign instance fields of its enclosing class through the implicit `this` reference it captures.
+
+**6. What's the difference in `this` binding between a lambda and an anonymous class implementing the same interface?**
+Inside a lambda, `this` refers to the instance of the *enclosing* class — lambdas don't introduce their own `this` scope at all, behaving exactly like ordinary code written directly at that point in the enclosing method. Inside an anonymous class, `this` refers to the anonymous class instance itself, requiring `EnclosingClass.this` if you specifically need to reach the enclosing instance from within it.
+
+**7. How are lambdas actually compiled — do they produce a separate `.class` file the way anonymous classes do?**
+No — lambdas are compiled using the `invokedynamic` bytecode instruction, with the actual functional interface implementation generated dynamically at runtime by `LambdaMetafactory` on first use, rather than being emitted as a separate, named synthetic class file at compile time the way each anonymous class is. This generally makes lambda creation more efficient, especially for lambdas evaluated many times, since there's less per-instance class-loading overhead.
+
+**8. Can a lambda implement an interface with default methods, as long as it has only one abstract method?**
+Yes — default methods (and static methods) don't count toward the "single abstract method" requirement for a functional interface (Chapter 12), so an interface can have any number of default/static methods alongside exactly one abstract method and still be a valid target for a lambda, which only ever implements that one abstract method.
+
+**9. Why can't a lambda expression stand alone without any target type context, like `var x = (a, b) -> a + b;`?**
+Because a lambda's meaning depends entirely on the functional interface it's meant to implement (parameter types are inferred from that interface's abstract method signature), and `var` alone provides no such interface to infer against — the compiler has no way to determine what type `x` should even be, so this specific combination is a compile error requiring an explicit target type instead.
+
+**10. What does the compiler do if a lambda's body doesn't match the functional interface's expected parameter count or return type?**
+It's a compile-time type mismatch error, exactly like passing a wrongly-typed argument to a regular method — for example, assigning a two-parameter lambda to a variable typed as `Function<T, R>` (which expects exactly one parameter) fails to compile, since the lambda's shape doesn't satisfy that interface's single abstract method's signature.
+
+**11. Is it legal for a lambda's block body to have a code path that doesn't return a value, if the functional interface's method has a non-void return type?**
+No — just like a regular method, if the functional interface's abstract method declares a return type other than `void`, every possible execution path through the lambda's block body must return a value of that type (or throw), or the compiler reports a missing-return-statement error, identical to the requirement for ordinary method bodies.
+
+**12. Why might overusing very short, cryptic lambda expressions hurt code readability, and what's a common mitigation?**
+Deeply nested or overly terse lambdas (especially with generic single-letter parameter names in complex chains) can be significantly harder to read and debug than an equivalent named method reference or a slightly more verbose but clearly-named lambda, particularly once stack traces or debugging are involved. A common mitigation is extracting non-trivial lambda logic into a well-named private method and referencing it via a method reference (Chapter 34) instead of inlining complex logic directly as a lambda.

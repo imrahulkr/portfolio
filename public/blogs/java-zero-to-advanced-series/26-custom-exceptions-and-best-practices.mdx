@@ -1,0 +1,157 @@
+---
+title: "Custom Exceptions & Best Practices"
+description: "Designing your own exception hierarchy, exception chaining with cause, and practical guidelines for exceptions in real codebases."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Exception Handling & I/O"
+chapter: 26
+totalChapters: 65
+slug: "custom-exceptions-and-best-practices"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "exceptions", "best-practices"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 11
+---
+
+## Defining a Custom Exception
+
+A custom exception is just a class extending `Exception` (checked) or `RuntimeException` (unchecked), typically adding domain-specific context.
+
+```java
+public class InsufficientFundsException extends RuntimeException {
+    private final double shortfall;
+
+    public InsufficientFundsException(String message, double shortfall) {
+        super(message);
+        this.shortfall = shortfall;
+    }
+
+    public double getShortfall() {
+        return shortfall;
+    }
+}
+```
+
+```java
+public void withdraw(double amount) {
+    if (amount > balance) {
+        throw new InsufficientFundsException(
+            "Cannot withdraw " + amount + ", balance is " + balance,
+            amount - balance
+        );
+    }
+    balance -= amount;
+}
+```
+
+Extra fields like `shortfall` let calling code programmatically react to *why* the exception happened, not just log a message string.
+
+## Checked vs. Unchecked for Your Own Exceptions
+
+```java
+public class InvalidOrderException extends Exception {          // checked — caller must handle
+    public InvalidOrderException(String message) { super(message); }
+}
+
+public class OrderNotFoundException extends RuntimeException {  // unchecked — programming/data error
+    public OrderNotFoundException(String message) { super(message); }
+}
+```
+
+A practical rule of thumb: make it **checked** if calling code can realistically do something meaningful to recover (retry, prompt the user for different input) and you want to *force* that decision at compile time. Make it **unchecked** if the failure typically reflects a bug or an unrecoverable-at-that-layer condition where forcing every caller to handle it adds ceremony without real benefit — which is why most exceptions in modern Spring-based codebases (validation failures, "not found" conditions handled by a global exception handler) tend to be unchecked.
+
+## Exception Chaining — Preserving the Root Cause
+
+When you catch one exception and throw a different, higher-level one, always pass the original as the **cause** rather than discarding it.
+
+```java
+public void loadUserPreferences(String userId) {
+    try {
+        readFromDisk(userId);
+    } catch (IOException e) {
+        throw new PreferencesLoadException("Could not load preferences for " + userId, e);   // e is the cause
+    }
+}
+```
+
+```java
+try {
+    loadUserPreferences("u123");
+} catch (PreferencesLoadException e) {
+    e.printStackTrace();
+    // Output includes:
+    // PreferencesLoadException: Could not load preferences for u123
+    //   at ...
+    // Caused by: java.io.IOException: ...
+    //   at ...
+}
+```
+
+Without passing `e` as the cause, the original stack trace and exception type are lost entirely, making the underlying root cause much harder — sometimes impossible — to diagnose in production logs.
+
+## Constructor Conventions for Custom Exceptions
+
+Following the standard `Exception`/`RuntimeException` constructor conventions makes your custom exception behave predictably with logging frameworks and other tooling that expect them:
+
+```java
+public class ServiceException extends RuntimeException {
+    public ServiceException(String message) { super(message); }
+    public ServiceException(String message, Throwable cause) { super(message, cause); }
+    public ServiceException(Throwable cause) { super(cause); }
+}
+```
+
+## Best Practices Checklist
+
+- **Never swallow exceptions silently** (`catch (Exception e) {}` with an empty body) — at minimum, log them; swallowed exceptions are one of the hardest categories of bugs to diagnose after the fact.
+- **Catch specific exceptions**, not a blanket `catch (Exception e)`, unless you're at a genuine top-level boundary intentionally preventing any single failure from crashing the whole process.
+- **Include actionable context** in exception messages — "Order 12345 not found for user u789" is far more useful during an incident than "Not found."
+- **Don't use exceptions for routine control flow** — throwing and catching an exception is significantly more expensive than a normal conditional check (largely due to stack trace capture), and using them for expected, frequent conditions (like "end of iteration") is both a performance anti-pattern and confusing to read.
+- **Always preserve the cause** when wrapping exceptions, as shown above.
+
+## Key Takeaways
+
+- Extend `RuntimeException` for most domain exceptions in modern codebases unless you specifically want to force compile-time handling.
+- Add fields to custom exceptions when calling code needs to programmatically react to the failure's specifics, not just log a message.
+- Always chain the original exception as the cause when wrapping it in a new exception type.
+- Never silently swallow exceptions, and avoid using exceptions for routine, expected control flow.
+
+---
+
+## Interview Questions
+
+**1. When would you design a custom exception as checked (`extends Exception`) versus unchecked (`extends RuntimeException`)?**
+Choose checked when calling code can realistically take a meaningful, different recovery action depending on this specific failure, and you want the compiler to force that decision to be made explicitly at every call site. Choose unchecked when the condition usually reflects a bug, an unrecoverable failure at that layer, or a condition better handled centrally (like a global exception handler in a web framework) — forcing every intermediate caller to declare or catch it would add ceremony without real benefit.
+
+**2. Why is it good practice to add custom fields (like a shortfall amount) to a custom exception rather than only encoding that information in the message string?**
+A message string is meant for human readers (logs, stack traces) and typically isn't parsed programmatically. Dedicated fields let calling code catch the exception and make programmatic decisions based on the structured data (e.g., checking `exception.getShortfall()` to decide whether to offer a specific top-up amount), which is far more robust and less error-prone than parsing a formatted message string.
+
+**3. What does "exception chaining" mean, and why does it matter?**
+It means passing an originally-caught exception as the "cause" argument when constructing and throwing a new, higher-level exception (`new ServiceException("msg", originalException)`), rather than discarding it. It matters because the resulting stack trace preserves the full causal chain — the "Caused by:" section — letting anyone debugging the issue later see both the high-level failure and the actual underlying root cause, instead of only ever seeing the wrapping exception with no indication of what originally went wrong.
+
+**4. What happens to the original stack trace information if you catch an exception and throw a new one without passing the original as the cause?**
+It's permanently lost — the new exception's stack trace only reflects where *it* was created and thrown, with no reference back to the original exception's type, message, or where it actually occurred. Anyone debugging a production incident from logs alone would see only the wrapping exception, with no way to determine the actual underlying failure.
+
+**5. Why is silently swallowing an exception (an empty `catch` block) considered a serious anti-pattern?**
+It hides evidence that something went wrong at the exact moment it happened, meaning the program continues running in what may be an inconsistent or partially-failed state with no diagnostic trail — by the time the resulting incorrect behavior surfaces elsewhere (often much later, and far from the actual cause), there's often no log entry or stack trace left to explain why, making the bug dramatically harder to diagnose than if the exception had simply been logged or allowed to propagate.
+
+**6. Why is using exceptions for routine, expected control flow (like signaling "end of data" in a loop) considered a performance anti-pattern?**
+Constructing an exception (even before it's ever thrown) involves capturing the current call stack, which is a relatively expensive operation compared to a simple conditional check or a sentinel return value — using exceptions for a code path that executes frequently and isn't actually exceptional at all incurs that cost unnecessarily on every iteration, and it also makes the code's control flow considerably harder to read and reason about compared to a plain `if`/loop-termination condition.
+
+**7. What are the standard constructor overloads a well-designed custom exception class typically provides, and why?**
+Typically four: a no-arg constructor, one taking just a message, one taking just a cause (`Throwable`), and one taking both a message and a cause — mirroring the constructors `Exception`/`RuntimeException` themselves provide. Providing this full set makes your custom exception behave predictably and flexibly for any calling code that wants to either supply a fresh message, wrap an existing cause, or both, without forcing awkward workarounds.
+
+**8. What's the risk of catching the broad `Exception` type instead of specific exception types in application code?**
+It can silently catch and mishandle genuinely unexpected exceptions (including ones from unrelated bugs, like a `NullPointerException` from a coding mistake) alongside the specific, anticipated exceptions the catch block was actually designed to handle — potentially masking serious bugs as if they were the expected, "already handled" condition, and making the code's true error-handling intent unclear to future readers.
+
+**9. In a Spring Boot application, why might a `NotFoundException` for a missing database record commonly be designed as unchecked rather than checked?**
+Modern Spring applications typically use a centralized `@ControllerAdvice`/`@ExceptionHandler` mechanism to translate specific exceptions into appropriate HTTP responses (like a 404) at one place in the codebase, rather than requiring every single service or repository method up the call chain to explicitly catch or declare a checked exception for what is often a routine, expected outcome (a record simply not existing). Making it unchecked lets it propagate cleanly up to that centralized handler without polluting every intermediate method signature with `throws` declarations.
+
+**10. What information should a well-written exception message include to be genuinely useful during a production incident?**
+Enough specific, actionable context to identify exactly what failed and with what inputs — for example, relevant identifiers (order ID, user ID), the operation being attempted, and ideally the actual invalid or problematic value involved — rather than a generic statement like "An error occurred" or "Invalid input," which gives an on-call engineer nothing concrete to search logs for or reproduce.
+
+**11. Can a custom exception class be both an unchecked exception and still carry a checked exception as its cause?**
+Yes — the type of the wrapping exception (checked or unchecked) is entirely independent of the type of its cause. It's common, for example, to catch a checked `IOException`, and wrap it in a custom unchecked `ServiceException` (extending `RuntimeException`) whose cause is set to that original `IOException`, effectively converting a checked failure into an unchecked one at a chosen architectural boundary while still preserving full diagnostic information.

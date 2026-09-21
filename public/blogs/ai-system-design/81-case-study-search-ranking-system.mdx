@@ -1,0 +1,89 @@
+---
+title: "Chapter 81: Case Study — Search Ranking System"
+description: "End-to-end search ranking design: query understanding, retrieval, learning-to-rank, and relevance evaluation — synthesizing hybrid search and re-ranking concepts from Part 11 with classical ranking."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 14
+partTitle: "Applied Case Studies"
+chapter: 81
+totalChapters: 96
+tags: ["ai-system-design", "search-ranking", "learning-to-rank", "case-study", "interview-prep"]
+---
+
+## Introduction
+
+Chapter 80's recommendation system shared its two-stage architecture directly with Chapter 62's and Chapter 63's hybrid search and re-ranking material. This chapter builds the complete search ranking system those chapters were building toward: query understanding, multi-signal retrieval, learning-to-rank, and the specific evaluation discipline search relevance requires.
+
+## Query Understanding: Before Retrieval Even Begins
+
+Directly extending Chapter 63's query-rewriting discussion — a search system first classifies query intent (navigational, informational, transactional) and may rewrite or expand the query before retrieval, since retrieval quality is bounded by the quality of what's actually searched for.
+
+```python
+def understand_query(raw_query: str, intent_classifier, query_expander) -> dict:
+    intent = intent_classifier.classify(raw_query)  # Ch. 63's rewriting motivation
+    expanded_terms = query_expander.expand(raw_query) if intent == "informational" else []
+    return {"original": raw_query, "intent": intent, "expanded_terms": expanded_terms}
+```
+
+## Retrieval: Hybrid Search as the Default Architecture
+
+Directly reusing Chapter 62's hybrid search — combining keyword (BM25) and semantic (embedding) retrieval, since search queries span both exact-match needs (a specific product SKU) and semantic needs (a natural-language question), the identical justification Chapter 62 established for RAG retrieval now applied to general search.
+
+## Learning-to-Rank: Beyond Chapter 63's Re-ranking
+
+Chapter 63 introduced re-ranking generally; a production search ranker typically uses **learning-to-rank** — a model trained specifically on relevance-labeled query-document pairs, optimizing ranking metrics (NDCG) directly rather than a generic classification objective.
+
+```python
+def train_ltr_model(training_pairs: list, model) -> None:
+    """
+    Learning-to-rank directly extends Ch. 63's re-ranking concept
+    with a TRAINING objective specifically optimized for RANKING
+    QUALITY (NDCG), not classification accuracy — Ch. 21's
+    "match the metric to the actual goal" principle, applied here.
+    """
+    model.fit(training_pairs, objective="ndcg")  # pairwise or listwise
+                                                     # loss, not pointwise
+                                                     # classification loss
+```
+
+**Why NDCG, not accuracy, is the correct training objective**: directly extending Chapter 21's evaluation discipline — search ranking quality depends on the *relative ordering* of results, not on correctly classifying each result as relevant/irrelevant in isolation; a classification-trained model can achieve high per-item accuracy while still producing a poor overall ranking, exactly the kind of metric-goal mismatch Chapter 21 warned against.
+
+## Evaluation: NDCG, Human Relevance Judgments, and Online Metrics
+
+Directly extending Chapter 66's faithfulness-evaluation discipline to search relevance specifically — offline NDCG against human-labeled relevance judgments provides a repeatable, pre-deployment signal, but must be validated against online metrics (click-through rate, dwell time) through A/B testing (Chapter 22), since human relevance judgments and actual user satisfaction can diverge.
+
+## Key Takeaways
+
+- Query understanding (intent classification, expansion) precedes retrieval, since retrieval quality is bounded by the quality of the query actually searched.
+- Hybrid search (Chapter 62) is the default retrieval architecture for general search, spanning both exact-match and semantic query needs.
+- Learning-to-rank trains directly on ranking-quality objectives (NDCG) rather than classification accuracy, directly following Chapter 21's "match the metric to the actual goal" discipline.
+- Offline relevance metrics require online A/B validation (Chapter 22), since human relevance judgments and actual user engagement can diverge.
+
+---
+
+## Interview Questions
+
+**1. Why does query understanding need to happen before retrieval, rather than relying on retrieval to handle ambiguous queries directly?**
+Retrieval quality is fundamentally bounded by what's actually searched for — an ambiguous or under-specified query fed directly to retrieval will retrieve based on that ambiguity, while classifying intent and expanding the query first (Chapter 63's rewriting motivation) narrows the search to what the user actually needs before the retrieval stage even runs, directly the same "fix the input before the expensive stage processes it" cascade-economics logic Chapter 51 and Chapter 63 established.
+*Follow-up: What risk does query expansion introduce if applied indiscriminately to every query, regardless of intent?*
+Expanding a navigational query (a user searching for a specific, known destination) with additional, unrelated terms could dilute retrieval precision by broadening the search away from the user's actual, specific target — exactly why this chapter's `understand_query` function conditions expansion on intent classification rather than applying it universally.
+
+**2. Why is NDCG the appropriate training objective for learning-to-rank rather than binary classification accuracy?**
+Search ranking quality depends on the relative ORDER of results, not merely whether each individual result is correctly labeled relevant or irrelevant — a model could achieve high classification accuracy while still ranking a highly relevant result below a moderately relevant one, producing a poor user experience despite good per-item accuracy; NDCG directly measures ranking quality by weighting correctly-ordered relevant results near the top of the list more heavily.
+*Follow-up: Why might a pointwise loss function still be used in some learning-to-rank systems despite this NDCG-alignment argument?*
+Pointwise losses are computationally simpler and can serve as a reasonable approximation when the primary goal is roughly separating relevant from irrelevant items rather than achieving precise fine-grained ordering — a legitimate cost-quality trade-off, though pairwise or listwise losses more directly optimize the actual ranking-quality objective this chapter argues for.
+
+**3. Why must offline NDCG scores be validated against online A/B testing before trusting them as a proxy for user satisfaction?**
+Human relevance judgments (used to compute offline NDCG) reflect what labelers consider objectively relevant, which can diverge from what actually satisfies real users in their specific context and intent — directly the same "average-case, organic validation doesn't guarantee real-world outcomes" gap Chapter 74 established for adversarial robustness, here applied to the gap between labeled relevance and actual user satisfaction.
+*Follow-up: What online metric would most directly reveal this specific divergence, if offline NDCG improved but users were less satisfied?*
+A declining click-through rate or dwell time despite an improved offline NDCG score would directly reveal this divergence, prompting investigation into whether the relevance judgments used for offline evaluation actually reflect real user needs for this specific query population.
+
+**4. How would you diagnose whether a search system's poor relevance stems from retrieval or from the learning-to-rank stage, extending this Part's stage-by-stage diagnostic discipline?**
+Directly analogous to Chapter 60's RAG diagnosis and Chapter 80's candidate-generation-versus-ranking diagnosis — check whether the truly relevant document appears anywhere in the retrieved candidate set (a retrieval-recall problem if not) versus whether it appears but is ranked poorly (a learning-to-rank problem if so), isolating the responsible stage before remediating either.
+*Follow-up: Why might hybrid search's own two components (keyword and semantic) need this same diagnostic separation?*
+A relevant document might be retrievable by keyword matching but missed by semantic search (or vice versa) — checking each retrieval mechanism's individual recall separately, per Chapter 62's original hybrid-search justification, reveals which specific mechanism is under-performing for a given query type before deciding whether to adjust fusion weighting or improve one mechanism specifically.
+
+**5. Why might a search system need different ranking models for different query intents (navigational vs. informational), rather than a single, universal ranker?**
+Directly extending Chapter 69's specialization principle — a single, generalist ranker handling genuinely different query types (a precise, exact-match navigational need versus an open-ended, semantic informational need) faces the same increased-difficulty problem Chapter 68 identified for an over-broad tool set, while intent-specific rankers, each optimized for their narrower query type's specific relevance signals, achieve higher precision within their scope.
+*Follow-up: What would justify NOT splitting into intent-specific rankers, despite this specialization argument?*
+Following this series' consistent evidence-based escalation discipline — if a single ranker's measured performance across both query types is already acceptable and the volume of one intent type is too small to justify separately training and maintaining a dedicated model, the added complexity of intent-specific rankers wouldn't be justified by demonstrated need, echoing Chapter 69's "escalate architectural complexity only when diagnosed evidence justifies it" principle.

@@ -1,0 +1,140 @@
+---
+title: "Serialization & Deserialization"
+description: "The Serializable marker interface, serialVersionUID, transient fields, the security risks of Java native serialization, and modern JSON-based alternatives."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Exception Handling & I/O"
+chapter: 31
+totalChapters: 65
+slug: "serialization-and-deserialization"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "serialization"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## What Serialization Is
+
+Serialization converts an object's state into a byte stream (for storage or network transmission); deserialization reconstructs an equivalent object from that byte stream. Java's built-in mechanism uses the `Serializable` marker interface.
+
+```java
+public class Employee implements Serializable {
+    private String name;
+    private double salary;
+    // constructors, getters...
+}
+```
+
+```java
+// Serializing
+try (ObjectOutputStream out = new ObjectOutputStream(new FileOutputStream("employee.dat"))) {
+    out.writeObject(new Employee("Rahul", 90000));
+}
+
+// Deserializing
+try (ObjectInputStream in = new ObjectInputStream(new FileInputStream("employee.dat"))) {
+    Employee e = (Employee) in.readObject();   // requires an explicit cast
+}
+```
+
+`Serializable` is a **marker interface** — it declares no methods at all. Its sole purpose is to signal to the JVM's serialization mechanism "instances of this class are allowed to be serialized"; attempting to serialize a non-`Serializable` object throws `NotSerializableException`.
+
+## `serialVersionUID` — Version Compatibility
+
+```java
+public class Employee implements Serializable {
+    private static final long serialVersionUID = 1L;
+    // ...
+}
+```
+
+Every serialized object embeds a `serialVersionUID` identifying the exact class "shape" it was serialized against. When deserializing, the JVM compares the stream's UID against the currently-loaded class's UID — a mismatch throws `InvalidClassException`.
+
+If you don't declare it explicitly, the JVM computes one automatically based on the class's structure (fields, methods, etc.) — but that computed value can **change** across compiler versions or even trivial-seeming code changes, silently breaking deserialization of previously-serialized data. **Always declare `serialVersionUID` explicitly** for any class you intend to serialize long-term, and increment it deliberately only when you intend to signal a genuine incompatibility.
+
+## `transient` — Excluding Fields from Serialization
+
+```java
+public class UserSession implements Serializable {
+    private String username;
+    private transient String temporaryAuthToken;   // deliberately excluded from serialization
+
+    // after deserialization, temporaryAuthToken will be null, regardless of its value before serialization
+}
+```
+
+Mark a field `transient` when it shouldn't (or can't meaningfully) be persisted — security-sensitive data, derived/cacheable values that can be recomputed, or non-serializable types like an open `Thread` or `Socket` reference.
+
+## Why Java Native Serialization Is Widely Discouraged Today
+
+Java's built-in serialization has well-documented, serious problems that have made it largely obsolete for new code:
+
+- **Security risk** — `readObject()` reconstructs an object without going through its constructor or any validation logic, which historically enabled a well-known class of **deserialization vulnerabilities**: crafted byte streams that, upon deserialization, trigger unintended code execution via "gadget chains" in libraries present on the classpath. This has led to serious real-world CVEs across the Java ecosystem.
+- **Fragility** — `serialVersionUID` mismatches and structural class changes routinely break backward compatibility with previously-serialized data.
+- **No cross-language interoperability** — the serialized format is Java-specific, unreadable by any other language or platform.
+- **Poor performance and verbosity** compared to modern alternatives.
+
+**Modern guidance:** avoid `java.io.Serializable` for anything beyond narrow, trusted internal use (like passing objects between JVM processes you fully control). For virtually all real-world data interchange — APIs, message queues, caching, persistence — use a JSON library (Jackson, used by default in Spring Boot) or another explicit, well-audited format like Protocol Buffers, rather than native Java serialization.
+
+```java
+// Modern approach — Jackson (used automatically by Spring Boot's REST controllers)
+ObjectMapper mapper = new ObjectMapper();
+String json = mapper.writeValueAsString(employee);   // {"name":"Rahul","salary":90000.0}
+Employee restored = mapper.readValue(json, Employee.class);
+```
+
+![Diagram: comparison showing Java native serialization producing an opaque, Java-only binary format versus Jackson producing a readable, cross-language-compatible JSON string](/diagrams/ch31-native-serialization-vs-json.svg)
+
+## `Externalizable` — Full Manual Control (Rarely Used Today)
+
+For cases genuinely requiring Java's native mechanism with full control over the exact byte format, `Externalizable` (unlike `Serializable`) requires you to implement `writeExternal()`/`readExternal()` explicitly, taking complete responsibility for every field — offering more control (and potential performance gains) at the cost of significantly more code and responsibility for correctness.
+
+## Key Takeaways
+
+- `Serializable` is a marker interface with no methods; it signals eligibility for Java's built-in serialization mechanism.
+- Always declare `serialVersionUID` explicitly to avoid silent, compiler-version-dependent compatibility breakage.
+- `transient` excludes a field from serialization entirely — it's restored as the type's default value (`null`, `0`, `false`) on deserialization.
+- Java native serialization carries serious, well-documented security risks; prefer JSON (Jackson) or another explicit format for real-world data interchange.
+
+---
+
+## Interview Questions
+
+**1. What is a marker interface, and why is `Serializable` a good example of one?**
+A marker interface declares no methods at all — its only purpose is to tag a class with some special meaning that other code (in this case, the JVM's serialization mechanism) can check for via `instanceof`. `Serializable` doesn't require implementing any behavior; simply declaring `implements Serializable` signals to `ObjectOutputStream` that instances of this class are permitted to be serialized, and its complete absence causes a `NotSerializableException` at serialization time.
+
+**2. What is `serialVersionUID`, and what happens if you don't declare it explicitly?**
+It's a version identifier embedded in serialized data, used during deserialization to verify that the sender's and receiver's class definitions are compatible. If not declared explicitly, the JVM computes one automatically based on the class's structure — but this computed value can change silently across different compiler versions or even seemingly trivial code edits, meaning previously-serialized data can unexpectedly fail to deserialize (`InvalidClassException`) after an unrelated code change, purely because the auto-computed UID shifted.
+
+**3. What does marking a field `transient` do, and what value does it have after deserialization?**
+It excludes that field from the serialization process entirely — its value is never written to the byte stream. Upon deserialization, the field is left at its type's default value (`null` for objects, `0`/`0.0` for numeric primitives, `false` for `boolean`), regardless of what value it held on the original object before serialization.
+
+**4. Why might you mark a field `transient` even if it technically could be serialized?**
+Common reasons include security (avoiding persisting sensitive data like an in-memory auth token or password in a potentially insecure serialized form), derived/cacheable data that can be cheaply recomputed after deserialization rather than persisted, and fields whose type genuinely isn't `Serializable` at all (like an open `Thread`, `Socket`, or database `Connection` reference), which would otherwise cause serialization of the containing object to fail outright.
+
+**5. What is the well-known security concern with Java's native `ObjectInputStream.readObject()`?**
+`readObject()` reconstructs an object directly from a byte stream without going through the class's normal constructor or any input validation the class might otherwise enforce, which historically enabled "deserialization gadget chain" attacks — a maliciously crafted byte stream that, when deserialized, chains together method calls across classes already present on the classpath to achieve unintended and potentially dangerous behavior, including remote code execution in some documented real-world vulnerabilities.
+
+**6. Why is it risky to call `readObject()` on data received from an untrusted source (e.g., over a network from an external client)?**
+Because deserialization can trigger arbitrary code execution paths through gadget chains regardless of what the target class's own code does, simply deserializing untrusted bytes can be dangerous even if the receiving application's own logic never directly "trusts" the resulting object's contents — the danger occurs during the deserialization process itself, before the application even gets a chance to validate anything.
+
+**7. What are the practical alternatives to Java native serialization for real-world data interchange, and why are they generally preferred?**
+JSON (via Jackson, the Spring Boot default), Protocol Buffers, and Avro are common alternatives. They're generally preferred because they use well-audited, narrower parsing logic that doesn't invoke arbitrary application code as a side effect of parsing, they're cross-language and cross-platform compatible (unlike Java's Java-only binary format), and they're typically more compact and better-performing for the common case of structured data interchange between services.
+
+**8. What's the difference between `Serializable` and `Externalizable`?**
+`Serializable` relies on the JVM's default reflection-based mechanism to automatically serialize all non-transient fields, requiring no method implementations from the class itself. `Externalizable` requires the class to implement `writeExternal()`/`readExternal()` explicitly, taking complete, manual responsibility for exactly what gets written and read — offering finer control and potential performance benefits, at the cost of considerably more implementation responsibility and risk of bugs if a field is accidentally omitted.
+
+**9. If a class has a field referencing an object of a non-`Serializable` type, what happens when you try to serialize an instance of that class?**
+Serialization fails with a `NotSerializableException` naming the specific non-serializable type, unless that particular field is marked `transient` (in which case it's simply skipped rather than causing a failure) — every non-transient field's runtime type must itself be serializable (recursively, through its own fields) for the overall object graph to serialize successfully.
+
+**10. Can you change a class's fields (add or remove one) after data has already been serialized with the old class definition, and still deserialize that old data successfully?**
+Sometimes, if `serialVersionUID` is kept unchanged and the modification is compatible with Java's default deserialization rules — for example, adding a new field is generally safe (it simply gets its default value when reading old data that predates it), but removing or changing the type of an existing field is more likely to cause `InvalidClassException` or silently incorrect data, depending on the specifics. This inherent fragility is a major reason schema-based formats with explicit, well-defined versioning and compatibility rules are preferred for anything requiring long-term data compatibility.
+
+**11. Why does deserializing an object bypass the class's normal constructor?**
+Java's default deserialization mechanism reconstructs the object's field values directly from the byte stream using reflection, specifically so the reconstructed object's state matches exactly what was serialized — invoking the normal constructor (which might apply defaulting logic, validation, or side effects meant only for fresh object creation) could produce a different, incorrect result than faithfully restoring the exact previously-serialized state.
+
+**12. In a Spring Boot REST API, why does a `@RestController` method typically not rely on `java.io.Serializable` at all for converting objects to and from HTTP request/response bodies?**
+Spring Boot uses Jackson by default to convert Java objects to and from JSON for REST API request/response bodies — a completely separate mechanism from Java's native `Serializable`/`ObjectOutputStream` serialization, which operates on JSON text (readable, cross-language, and driven by getter/setter reflection or annotations) rather than Java's proprietary binary object-graph format. A DTO class used in a REST API generally has no need to implement `Serializable` at all unless it's separately required for some other purpose, like being cached via a mechanism that specifically requires it.

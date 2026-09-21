@@ -1,0 +1,168 @@
+---
+title: "Executor Framework & Thread Pools"
+description: "ExecutorService, the standard thread pool factories, Future for retrieving results, and graceful shutdown."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Concurrency & Multithreading"
+chapter: 41
+totalChapters: 65
+slug: "executor-framework-and-thread-pools"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "concurrency", "executor-service", "thread-pools"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## Why Not Just Create a `Thread` Per Task?
+
+Creating a new OS thread is relatively expensive (memory for its stack, kernel-level bookkeeping), and an unbounded number of concurrently created threads can exhaust system resources entirely. The **Executor framework** (`java.util.concurrent`) decouples *submitting* a task from *how and when* it actually runs, typically via a managed, reusable pool of worker threads.
+
+```java
+ExecutorService executor = Executors.newFixedThreadPool(4);
+
+executor.submit(() -> System.out.println("Task running on: " + Thread.currentThread().getName()));
+
+executor.shutdown();   // initiates orderly shutdown — covered in detail below
+```
+
+## Standard Thread Pool Factories
+
+```java
+Executors.newFixedThreadPool(4);        // fixed number of threads, unbounded queue for excess tasks
+Executors.newCachedThreadPool();        // grows as needed, reuses idle threads, shrinks after 60s idle
+Executors.newSingleThreadExecutor();    // exactly one thread — tasks run sequentially, in submission order
+Executors.newScheduledThreadPool(2);    // supports delayed and periodic task execution
+```
+
+**Modern guidance:** `Executors`' convenience factories are now generally discouraged in production code, because several of them (`newFixedThreadPool`, `newCachedThreadPool`) use an effectively **unbounded queue or unbounded thread count**, which can silently exhaust memory or threads under sustained heavy load rather than failing fast. Since Java 19+ (and formalized as a general recommendation), constructing a `ThreadPoolExecutor` directly with explicit, bounded queue and pool-size limits is preferred for production systems:
+
+```java
+ExecutorService executor = new ThreadPoolExecutor(
+    4,                                  // core pool size
+    8,                                  // maximum pool size
+    60L, TimeUnit.SECONDS,              // idle thread keep-alive time
+    new LinkedBlockingQueue<>(100),     // BOUNDED task queue — fails fast rather than growing unboundedly
+    new ThreadPoolExecutor.CallerRunsPolicy()   // rejection policy when queue AND pool are both full
+);
+```
+
+![Diagram: ThreadPoolExecutor architecture showing tasks submitted into a bounded queue, worker threads pulling from the queue, and the rejection handler triggering when both the pool and queue are full](/diagrams/ch41-threadpoolexecutor-architecture.svg)
+
+## `Runnable` vs. `Callable` — With or Without a Result
+
+```java
+executor.submit((Runnable) () -> System.out.println("no result"));   // Runnable — no return value
+
+Future<Integer> future = executor.submit(() -> {                      // Callable<Integer> — returns a value
+    Thread.sleep(1000);
+    return 42;
+});
+```
+
+`Runnable.run()` returns nothing and cannot throw a checked exception. `Callable<V>.call()` returns a value of type `V` and can throw a checked exception — use `Callable` whenever the task needs to produce a result or might fail with a checked exception.
+
+## `Future` — Retrieving a Result Later
+
+```java
+Future<Integer> future = executor.submit(() -> {
+    Thread.sleep(1000);
+    return 42;
+});
+
+System.out.println("Doing other work while the task runs...");
+
+Integer result = future.get();   // BLOCKS until the task completes, then returns its result
+System.out.println(result);      // 42
+```
+
+```java
+future.get(2, TimeUnit.SECONDS);   // blocks at most 2 seconds, then throws TimeoutException if still not done
+future.isDone();                    // non-blocking check
+future.cancel(true);                 // attempts to cancel; true = interrupt if already running
+```
+
+`Future.get()` re-throws any exception the task itself threw, wrapped in an `ExecutionException` — always check `getCause()` to find the actual underlying exception. `CompletableFuture` (Chapter 42) builds on `Future` to add composable, non-blocking result handling, which is generally preferred over calling `get()` and blocking.
+
+## Graceful Shutdown
+
+```java
+executor.shutdown();   // stops accepting NEW tasks; already-submitted tasks continue running to completion
+
+try {
+    if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+        executor.shutdownNow();   // forcibly attempts to stop actively-executing tasks (via interrupt)
+    }
+} catch (InterruptedException e) {
+    executor.shutdownNow();
+    Thread.currentThread().interrupt();
+}
+```
+
+- **`shutdown()`** — graceful: rejects new task submissions, but lets already-queued and already-running tasks finish naturally.
+- **`shutdownNow()`** — aggressive: attempts to interrupt actively-running tasks and returns the list of tasks that were still queued but never started.
+
+**Forgetting to shut down an `ExecutorService`** (especially ones backed by non-daemon threads, which is the default) is a common resource leak — the application/JVM may never exit cleanly, since the executor's worker threads keep running indefinitely, waiting for more tasks that will never come.
+
+## `invokeAll()` and `invokeAny()`
+
+```java
+List<Callable<Integer>> tasks = List.of(() -> compute1(), () -> compute2(), () -> compute3());
+
+List<Future<Integer>> results = executor.invokeAll(tasks);   // waits for ALL to complete, returns all Futures
+
+Integer firstResult = executor.invokeAny(tasks);              // returns as soon as ANY ONE completes successfully,
+                                                                // cancelling the rest
+```
+
+## Key Takeaways
+
+- The Executor framework decouples task submission from thread management, avoiding the cost and risk of creating unbounded raw threads.
+- Prefer explicitly configuring a `ThreadPoolExecutor` with a bounded queue over the unbounded `Executors` convenience factories for production systems.
+- `Future.get()` blocks and can throw `ExecutionException` wrapping the task's actual exception; `CompletableFuture` (Chapter 42) offers a non-blocking alternative.
+- Always call `shutdown()` (or `shutdownNow()`) on an `ExecutorService` when done with it, or its threads can keep the application running indefinitely.
+
+---
+
+## Interview Questions
+
+**1. Why is using the Executor framework generally preferred over manually creating and managing raw `Thread` objects for every task?**
+Creating an OS-backed thread is relatively expensive, and an application creating a new thread per task with no upper bound risks exhausting system memory or thread resources entirely under load. The Executor framework manages a pool of reusable worker threads, decoupling task submission from execution details, and provides higher-level utilities (bounded queuing, graceful shutdown, result retrieval via `Future`) that would otherwise need to be manually and error-pronely reimplemented.
+
+**2. What's the difference between `Runnable` and `Callable` in the context of task submission?**
+`Runnable.run()` takes no arguments, returns nothing (`void`), and cannot throw a checked exception. `Callable<V>.call()` returns a value of type `V` and is permitted to throw a checked exception — `Callable` is the right choice whenever a submitted task needs to produce a result or might fail with a checked exception that the caller needs to handle.
+
+**3. Why are the `Executors` convenience factory methods (`newFixedThreadPool`, `newCachedThreadPool`) increasingly discouraged for production code?**
+Several of them use an effectively unbounded internal queue (`newFixedThreadPool`) or an effectively unbounded thread count (`newCachedThreadPool`), meaning a sustained burst of task submissions under heavy load can cause unconstrained memory growth (from an ever-growing queue) or unconstrained thread creation, rather than failing fast or applying explicit backpressure. Constructing a `ThreadPoolExecutor` directly with an explicit, bounded queue and a defined rejection policy gives predictable, controlled behavior under overload instead.
+
+**4. What does `Future.get()` do, and what happens if the underlying task threw an exception?**
+It blocks the calling thread until the associated task completes, then returns its result. If the task itself threw an exception during execution, `get()` re-throws it wrapped inside an `ExecutionException` — the actual original exception is accessible via `executionException.getCause()`, not thrown directly.
+
+**5. What's the difference between `executor.shutdown()` and `executor.shutdownNow()`?**
+`shutdown()` initiates a graceful shutdown: it immediately stops accepting new task submissions, but allows already-submitted (queued and currently-running) tasks to complete normally. `shutdownNow()` is more aggressive — it attempts to interrupt any actively-executing tasks (though interruption is cooperative and a task must actually respond to it), and returns a list of tasks that were still waiting in the queue but never started.
+
+**6. Why is forgetting to call `shutdown()` on an `ExecutorService` considered a resource leak?**
+The threads in a thread pool are, by default, non-daemon threads, which means they keep the JVM alive indefinitely — if an `ExecutorService` is never shut down, its worker threads remain alive forever, idly waiting for more tasks that may never come, preventing the application from exiting cleanly even after all its actual application logic has finished.
+
+**7. What's the difference between `invokeAll()` and `invokeAny()`?**
+`invokeAll(tasks)` submits a collection of tasks and blocks until *all* of them complete, returning a `List<Future<T>>` containing each task's outcome (successful or exceptional) in the same order the tasks were submitted. `invokeAny(tasks)` blocks only until *any one* task completes successfully, immediately returning that single result and cancelling the remaining still-running tasks — useful when you only need the first available successful result from several redundant or alternative computation strategies.
+
+**8. What is a `RejectedExecutionException`, and when is it thrown?**
+It's thrown when a task is submitted to an `ExecutorService` that cannot accept it — either because the executor has already been shut down, or because both its worker-thread pool and its bounded task queue are simultaneously full and no rejection-handling policy (or a policy like `AbortPolicy`, the default) is configured to handle the overflow gracefully in some other way.
+
+**9. What does `ThreadPoolExecutor.CallerRunsPolicy` do, and why might it be a reasonable choice for a bounded thread pool's rejection policy?**
+When both the pool and its task queue are full, `CallerRunsPolicy` executes the rejected task directly on the thread that attempted to submit it (rather than throwing an exception or silently discarding the task), which has the effect of naturally slowing down the task-submitting thread — since it's now busy executing the task itself instead of submitting more work — providing a simple form of backpressure that reduces load on the overwhelmed pool without losing any submitted work.
+
+**10. What is the difference between an `ExecutorService`'s "core pool size" and "maximum pool size"?**
+The core pool size is the number of threads the pool tries to keep alive even when idle (unless explicitly configured to time them out), representing the pool's normal, steady-state capacity. The maximum pool size is the upper bound on the total number of threads the pool will create under load — additional threads beyond the core size are only created once the task queue itself is full, and they may be terminated after being idle beyond the configured keep-alive time, unlike core threads.
+
+**11. Why does a `Callable` task's exception get wrapped in `ExecutionException` rather than being thrown directly from `Future.get()`?**
+Because the task actually executes asynchronously on a different thread than the one calling `get()`, the exception can't propagate through a normal synchronous call stack the way it would in single-threaded code — `ExecutionException` acts as a wrapper explicitly signaling "the asynchronous task itself failed with this cause," distinguishing it from other possible failures of `get()` itself, like `InterruptedException` (if the waiting thread is interrupted) or `TimeoutException` (for the timed overload).
+
+**12. If a thread pool's task queue is unbounded, what problem can arise even if the pool's maximum size limit is configured correctly?**
+Because tasks are always accepted into the unbounded queue rather than ever triggering the pool to grow toward its maximum size or invoking a rejection policy, a sustained rate of task submission exceeding the rate tasks are actually completed causes the queue itself to grow without bound — consuming ever-increasing memory and potentially leading to an `OutOfMemoryError`, entirely bypassing whatever maximum-pool-size safety limit was configured, since that limit only governs thread count, not queue size.
+
+**13. Why does `ScheduledExecutorService` exist separately from a regular `ExecutorService`, and what capability does it add?**
+It extends the standard `ExecutorService` interface with methods for scheduling tasks to run after an initial delay, or repeatedly at a fixed rate or fixed delay (`scheduleAtFixedRate`, `scheduleWithFixedDelay`), which a plain `ExecutorService` has no built-in concept of — providing a managed, thread-pool-backed alternative to manually implementing delayed or periodic execution logic with raw `Thread.sleep()` loops.

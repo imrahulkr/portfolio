@@ -1,0 +1,153 @@
+---
+title: "JIT Compilation & Bytecode"
+description: "Reading basic bytecode with javap, tiered compilation (C1/C2), inlining, escape analysis, and why microbenchmarks are deceptively hard to write correctly."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "JVM Internals, Memory & Performance"
+chapter: 48
+totalChapters: 65
+slug: "jit-compilation-and-bytecode"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "jvm", "jit", "bytecode", "performance"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 11
+---
+
+## Looking at Actual Bytecode with `javap`
+
+```java
+public class Add {
+    public static int add(int a, int b) {
+        return a + b;
+    }
+}
+```
+
+```bash
+javac Add.java
+javap -c Add
+```
+
+```
+public static int add(int, int);
+  Code:
+     0: iload_0
+     1: iload_1
+     2: iadd
+     3: ireturn
+```
+
+Bytecode is a stack-based instruction set: `iload_0`/`iload_1` push the two `int` parameters onto an operand stack, `iadd` pops both, adds them, and pushes the result, and `ireturn` pops and returns that result. You'll rarely read raw bytecode day-to-day, but recognizing this shape helps demystify what `javac` actually produces and what the JVM's execution engine actually operates on.
+
+## Tiered Compilation: Interpreter → C1 → C2
+
+Modern HotSpot JVMs use **tiered compilation**, progressively investing more compilation effort into code proven to be genuinely "hot":
+
+```
+Interpreter (Tier 0)
+     ↓  (method called somewhat frequently)
+C1 — Client Compiler (Tier 1-3)   — compiles quickly, applies basic, "safe" optimizations
+     ↓  (method called VERY frequently)
+C2 — Server Compiler (Tier 4)    — compiles slower, but applies much more aggressive, profile-guided optimizations
+```
+
+![Diagram: tiered compilation pipeline showing a method starting interpreted, promoted to C1 compilation after moderate call frequency, then promoted again to C2 after sustained high call frequency](/diagrams/ch48-tiered-compilation-pipeline.svg)
+
+This staged approach balances two competing goals: fast application startup (interpretation and quick C1 compilation get code running sooner) and strong steady-state throughput (C2's more expensive, aggressive optimization pays off for methods that will run millions of times over a long-lived process).
+
+## Key JIT Optimizations
+
+### Inlining
+
+The JIT can replace a method call with the called method's actual body directly at the call site, eliminating call overhead entirely and opening the door to further optimization of the combined code.
+
+```java
+private int square(int x) { return x * x; }
+
+public int compute(int a) {
+    return square(a) + 1;   // JIT may inline this to: return (a * a) + 1;  — no actual method call at runtime
+}
+```
+
+Small, frequently-called methods (getters, simple helper methods) are prime inlining candidates — this is a big part of why "premature manual optimization" advice like avoiding small helper methods for performance reasons is usually misguided in Java: the JIT often eliminates their overhead entirely anyway.
+
+### Escape Analysis and Stack Allocation
+
+If the JIT can prove an object never "escapes" the method it's created in (no reference to it is returned, stored in a field, or passed elsewhere), it can potentially allocate that object **on the stack** instead of the heap (or eliminate the allocation entirely via **scalar replacement**, replacing the object with its individual fields as separate local variables) — avoiding heap allocation and its associated GC pressure entirely.
+
+```java
+public int computeDistance(int x1, int y1, int x2, int y2) {
+    Point p1 = new Point(x1, y1);   // if the JIT proves p1/p2 never escape this method...
+    Point p2 = new Point(x2, y2);   // ...it may avoid heap-allocating them entirely
+    return Math.abs(p2.x - p1.x) + Math.abs(p2.y - p1.y);
+}
+```
+
+### Deoptimization — When the JIT's Assumptions Turn Out Wrong
+
+C2's aggressive optimizations are often based on **speculative assumptions** derived from observed runtime behavior (like "this call site has only ever seen one concrete implementation of this interface, so treat it like a direct call rather than a polymorphic one"). If that assumption is later violated (a second implementation actually does show up), the JVM performs **deoptimization** — discarding the optimized native code and falling back to interpretation for that method, before potentially re-optimizing later with updated, corrected assumptions.
+
+## Why Microbenchmarking Java Correctly Is Hard
+
+```java
+// NAIVE, LIKELY MISLEADING microbenchmark
+long start = System.nanoTime();
+for (int i = 0; i < 1000; i++) {
+    doWork();
+}
+long elapsed = System.nanoTime() - start;
+```
+
+This naive approach is misleading for several JIT-related reasons:
+- **Warm-up** — the first many iterations run interpreted (or under C1), which is dramatically slower than the eventual, fully-JIT-optimized (C2) steady state — mixing cold and warm iterations together produces meaningless average timings.
+- **Dead code elimination** — if the JIT determines a computed result is never actually used, it may eliminate the "work" entirely, timing essentially nothing.
+- **Deoptimization noise** — if the benchmark's usage pattern doesn't match real-world usage, the JIT's speculative optimizations may not reflect production behavior at all.
+
+**The standard, correct tool for JVM microbenchmarking is JMH (Java Microbenchmark Harness)**, an OpenJDK project specifically designed to correctly handle JIT warm-up, dead-code elimination, and other JVM-specific measurement pitfalls that make naive hand-rolled timing loops unreliable.
+
+## Key Takeaways
+
+- Bytecode is a stack-based instruction set; `javap -c` lets you inspect what `javac` actually produces.
+- Tiered compilation (interpreter → C1 → C2) balances fast startup against strong long-running throughput.
+- Inlining and escape analysis/scalar replacement are major JIT optimizations that often make small helper methods and short-lived local objects effectively free.
+- Never hand-roll a `System.nanoTime()`-based microbenchmark for serious performance measurement — use JMH, which correctly accounts for JIT warm-up and related pitfalls.
+
+---
+
+## Interview Questions
+
+**1. What is bytecode, and what tool lets you inspect the bytecode `javac` produces for a class?**
+Bytecode is the platform-independent, stack-based intermediate instruction set the JVM executes, produced by compiling Java source with `javac`. The `javap -c ClassName` command disassembles a compiled `.class` file, printing its bytecode instructions in a human-readable form.
+
+**2. What is tiered compilation, and why does the JVM use multiple compilation tiers instead of just one?**
+Tiered compilation progressively applies increasing levels of compilation effort to a method based on how frequently it's actually called — starting with interpretation, moving to the quicker, more conservative C1 (client) compiler for moderately-hot methods, and finally to the slower but far more aggressively-optimizing C2 (server) compiler for genuinely hot methods. Using multiple tiers balances fast application startup (interpretation and C1 get code running quickly, without waiting for expensive C2 compilation) against strong steady-state throughput (C2's heavier optimization investment pays off specifically for methods that will execute a very large number of times over a long-running process).
+
+**3. What is method inlining, and why does it matter for performance?**
+Inlining replaces a call to a method with that method's actual body directly at the call site, eliminating the overhead of the method call itself (stack frame setup, parameter passing, return) and, critically, opening up further optimization opportunities across the now-combined code that wouldn't have been visible across a genuine method call boundary. It's why writing small, well-named helper methods in Java generally doesn't carry the performance penalty many developers assume — the JIT frequently inlines them away entirely once they're identified as hot.
+
+**4. What is escape analysis, and what optimization can it enable?**
+Escape analysis is the JIT's determination of whether a given object's reference ever "escapes" the method (or thread) it was created in — for example, by being returned, stored in a field, or passed to another method that might retain it. If an object provably never escapes, the JIT can potentially avoid heap-allocating it entirely, instead allocating it on the stack or eliminating the allocation altogether via scalar replacement (treating its fields as independent local variables) — reducing both allocation cost and downstream garbage-collection pressure.
+
+**5. What is deoptimization, and why does the JIT sometimes need to "undo" a previous optimization?**
+The JIT's most aggressive optimizations (particularly under C2) are often based on speculative assumptions derived from observed runtime behavior so far — for instance, assuming a particular call site always resolves to the same concrete method implementation. If a later execution violates that assumption (a different implementation actually gets called), the previously-optimized native code is no longer valid, so the JVM discards it and falls back to interpreting that method again, potentially re-optimizing later with corrected, updated assumptions once the new behavior stabilizes.
+
+**6. Why might a naive `System.nanoTime()`-based loop give misleading results when trying to measure a method's performance?**
+Early iterations execute interpreted or under the less-optimized C1 tier, which is substantially slower than the method's eventual fully-JIT-optimized steady state — averaging cold, warming, and fully-warm iterations together produces a number that doesn't represent either the cold-start or the steady-state performance accurately. Additionally, if the computed result is never actually used, the JIT's dead-code elimination may remove the very work being "measured" entirely, silently timing an empty loop instead.
+
+**7. What is JMH, and why is it recommended over hand-written timing loops for microbenchmarking Java code?**
+JMH (Java Microbenchmark Harness) is an OpenJDK-maintained tool purpose-built for reliably microbenchmarking JVM code, correctly handling well-known measurement pitfalls like JIT warm-up (running enough "warm-up" iterations before actually measuring), dead-code elimination (using specific patterns to ensure computed results are genuinely consumed so the JIT can't optimize the work away), and other JVM-specific quirks that make naive hand-rolled benchmarking loops unreliable and frequently misleading.
+
+**8. Why does the "cold start" performance of a JVM application (e.g., the first requests handled after startup) tend to be slower than its later, sustained performance?**
+Immediately after startup, most methods haven't yet been executed enough times to be promoted to JIT-compiled native code — early execution runs interpreted (the slowest execution mode) while the JVM gathers the call-frequency and type-profile information needed to decide which methods are worth compiling, and at which tier. As the application continues running, increasingly many hot methods get progressively compiled (first to C1, then C2), and overall throughput improves until it reaches its fully "warmed up" steady state.
+
+**9. How does the concept of JIT warm-up relate to practices like Kubernetes readiness probes or load-balancer warm-up periods for newly-deployed Java service instances?**
+A freshly-started JVM-based service instance may perform noticeably worse than an already-running instance until its hot code paths have been JIT-compiled, so sending it full production traffic load immediately after startup (before it's had a chance to warm up) can result in elevated latency or even cascading failures if it can't keep up. This is a practical, real-world motivation for gradual traffic ramp-up strategies and readiness checks that account for warm-up time, not just basic process-liveness, when deploying new instances of a Java service.
+
+**10. Does the JIT compiler's existence mean developers should generally avoid writing small, frequently-called helper methods for fear of call overhead?**
+No — this is a common but largely outdated concern from earlier, less sophisticated JIT implementations. Modern HotSpot JITs are specifically effective at inlining small, hot methods, frequently eliminating call overhead entirely once such methods are identified as worth optimizing — favoring clear, well-factored code with small, well-named methods is generally the right default, with the JIT handling much of the associated performance concern automatically, rather than manually inlining logic by hand for a performance benefit that's often illusory or already handled by the compiler.
+
+**11. What's a realistic scenario where understanding tiered compilation and warm-up would directly inform a production troubleshooting decision?**
+If a service exhibits elevated latency specifically in the first few minutes after a deployment/restart, but then stabilizes to normal performance, understanding JIT warm-up explains this pattern directly (rather than mistakenly investigating it as a code regression or infrastructure issue) and points toward solutions like a gradual traffic ramp-up, a dedicated warm-up phase hitting critical code paths before accepting real production traffic, or evaluating flags like `-XX:TieredStopAtLevel` or Class Data Sharing (CDS) to influence startup/warm-up characteristics for that specific deployment's needs.

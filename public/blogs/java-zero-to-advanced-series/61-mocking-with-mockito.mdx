@@ -1,0 +1,187 @@
+---
+title: "Mocking with Mockito"
+description: "Why mocks isolate the unit under test, core Mockito API (mock/when/verify), argument matchers, and mocks vs stubs vs spies."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Testing & Build Tools"
+chapter: 61
+totalChapters: 65
+slug: "mocking-with-mockito"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "testing", "mockito", "mocking"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## Why Mocking Exists — Isolating the Unit Under Test
+
+A **unit test** should test one specific unit of code in isolation, without depending on the real behavior (or availability) of its collaborators — a database, an external API, another service. Mockito lets you create **mock objects** — fake stand-ins for real dependencies — that behave exactly as the test dictates, letting you test your class's logic completely independently of its actual dependencies' real implementations.
+
+```java
+public class OrderService {
+    private final PaymentGateway paymentGateway;   // a real implementation would call an external API
+    public OrderService(PaymentGateway paymentGateway) { this.paymentGateway = paymentGateway; }
+
+    public boolean placeOrder(Order order) {
+        return paymentGateway.charge(order.getTotal());
+    }
+}
+```
+
+Without mocking, testing `OrderService.placeOrder()` would require an actual, real `PaymentGateway` — meaning tests would be slow, flaky (dependent on external network availability), and potentially cost real money on every test run. A mock `PaymentGateway` sidesteps all of that entirely.
+
+## Creating Mocks and Stubbing Behavior
+
+```java
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+class OrderServiceTest {
+
+    @Test
+    void placesOrderWhenPaymentSucceeds() {
+        PaymentGateway mockGateway = mock(PaymentGateway.class);        // creates a fake PaymentGateway
+        when(mockGateway.charge(100.0)).thenReturn(true);                 // stub: "when called with 100.0, return true"
+
+        OrderService service = new OrderService(mockGateway);
+        Order order = new Order(100.0);
+
+        assertTrue(service.placeOrder(order));
+    }
+
+    @Test
+    void rejectsOrderWhenPaymentFails() {
+        PaymentGateway mockGateway = mock(PaymentGateway.class);
+        when(mockGateway.charge(100.0)).thenReturn(false);                // different stubbed behavior for this test
+
+        OrderService service = new OrderService(mockGateway);
+        assertFalse(service.placeOrder(new Order(100.0)));
+    }
+}
+```
+
+By default, a mock's methods return sensible defaults (`null`, `0`, `false`, an empty `Optional`/collection) unless explicitly stubbed with `when(...).thenReturn(...)` — this is what makes it easy to configure only the exact specific behavior each individual test actually needs.
+
+## `@Mock` and `@InjectMocks` — Annotation-Based Setup
+
+```java
+@ExtendWith(MockitoExtension.class)   // JUnit 5 integration
+class OrderServiceTest {
+
+    @Mock
+    private PaymentGateway paymentGateway;
+
+    @InjectMocks
+    private OrderService orderService;   // Mockito automatically injects the @Mock fields via constructor
+
+    @Test
+    void placesOrderWhenPaymentSucceeds() {
+        when(paymentGateway.charge(100.0)).thenReturn(true);
+        assertTrue(orderService.placeOrder(new Order(100.0)));
+    }
+}
+```
+
+`@Mock` creates a mock without the explicit `mock(...)` call; `@InjectMocks` automatically constructs the class under test, injecting any matching `@Mock` fields into its constructor — reducing setup boilerplate, especially useful when a class has several dependencies.
+
+## Verifying Interactions
+
+```java
+@Test
+void chargesCorrectAmount() {
+    PaymentGateway mockGateway = mock(PaymentGateway.class);
+    OrderService service = new OrderService(mockGateway);
+
+    service.placeOrder(new Order(150.0));
+
+    verify(mockGateway).charge(150.0);              // asserts charge(150.0) was called EXACTLY once
+    verify(mockGateway, times(1)).charge(150.0);     // equivalent, explicit
+    verify(mockGateway, never()).charge(999.0);      // asserts charge(999.0) was NEVER called
+}
+```
+
+`verify()` is for asserting on **side effects** (a method that returns `void`, or whose return value the test doesn't otherwise check) — confirming a particular interaction genuinely happened, exactly as expected, rather than checking a returned value.
+
+## Argument Matchers
+
+```java
+import static org.mockito.ArgumentMatchers.*;
+
+when(mockGateway.charge(anyDouble())).thenReturn(true);   // matches ANY double argument
+when(mockRepo.findById(eq("order-123"))).thenReturn(Optional.of(order));
+
+verify(mockGateway).charge(argThat(amount -> amount > 0));   // custom matching logic
+```
+
+**Important rule: if you use an argument matcher for even one argument in a call, every argument in that same call must use a matcher** — you cannot mix a literal value and a matcher in the same stubbing/verification call; use `eq(value)` to wrap a literal when it needs to appear alongside another matcher.
+
+## Mock vs. Stub vs. Spy — Precise Terminology
+
+- **Mock** — a fully fake object with programmable behavior; typically also used to *verify* interactions occurred (Mockito's `mock()`).
+- **Stub** — narrower term for an object providing canned answers to calls, generally without verification of interaction (in casual usage, people often say "stub" and "mock" interchangeably, but the distinction matters in strict terminology).
+- **Spy** — wraps a **real** object, letting most calls proceed to the real implementation while selectively overriding specific method behaviors.
+
+```java
+List<String> realList = new ArrayList<>();
+List<String> spyList = spy(realList);
+
+spyList.add("real item");            // actually executes on the real underlying ArrayList
+when(spyList.size()).thenReturn(100); // but THIS specific call is overridden
+
+System.out.println(spyList.get(0));   // "real item" — genuinely from the real list
+System.out.println(spyList.size());   // 100 — the overridden, stubbed value
+```
+
+![Diagram: mock object with entirely fake, programmed behavior versus a spy wrapping a real object where most calls pass through to real behavior except specifically stubbed methods](/diagrams/ch61-mock-vs-spy-behavior.svg)
+
+Spies are used sparingly — reaching for a spy is often (though not always) a signal that the class under test could be better designed for full dependency injection and mocking, rather than needing to partially fake a concrete, real object.
+
+## Key Takeaways
+
+- Mocking isolates the unit under test from its real dependencies, making tests fast, deterministic, and independent of external systems.
+- `when(...).thenReturn(...)` stubs a mock's return value; `verify(...)` asserts that a specific interaction actually occurred.
+- Mixing literal arguments and matchers in the same call is not allowed — wrap literals with `eq()` when combined with other matchers.
+- Use spies sparingly, and only when genuinely needing most of a real object's behavior with a few specific overrides — for most cases, a full mock with explicit dependency injection is cleaner.
+
+---
+
+## Interview Questions
+
+**1. What is the primary purpose of using mock objects in unit tests?**
+To isolate the specific unit of code under test from its real dependencies (databases, external APIs, other services), so the test verifies only that unit's own logic, remains fast and deterministic (no network calls, no real I/O), and doesn't fail due to an unrelated dependency being unavailable, slow, or in an unexpected state.
+
+**2. What does `when(mock.method(args)).thenReturn(value)` do?**
+It stubs the mock's behavior — configuring that specifically when `method` is called with matching arguments, the mock should return the specified value, rather than the default value it would otherwise return (`null`, `0`, `false`, etc.) for an unstubbed call on that mock.
+
+**3. What is the difference between using `when().thenReturn()` and `verify()`?**
+`when().thenReturn()` configures what a mock *should do* when called in a certain way (setting up behavior for the test to rely on). `verify()` checks, after the code under test has run, whether a specific interaction with the mock *actually happened* as expected — used for asserting side effects, particularly for void methods or methods whose return value the test doesn't otherwise check.
+
+**4. What is the rule about mixing argument matchers and literal values in the same mock call, and why does it exist?**
+If any argument in a given stubbing or verification call uses an argument matcher (like `anyDouble()` or `argThat(...)`), every other argument in that same call must also use a matcher — you cannot mix a raw literal value with a matcher in the same call; use `eq(literalValue)` to wrap a literal that needs to appear alongside a matcher. This rule exists because Mockito internally tracks matchers via a shared stack mechanism during the call, and mixing matcher and non-matcher arguments in the same invocation would create ambiguity in how Mockito interprets the call.
+
+**5. What's the difference between a mock and a spy in Mockito?**
+A mock is an entirely fake object with no real underlying implementation — every method returns a default value unless explicitly stubbed. A spy wraps a genuinely real object instance, and by default delegates every call through to that real object's actual implementation, except for specific methods you explicitly override/stub — letting most of the real behavior remain intact while selectively faking only particular interactions.
+
+**6. Why might using a spy be considered a "code smell" or a sign that a class's design could be improved?**
+Needing to partially fake a concrete, real object (rather than fully mocking a cleanly-injected interface dependency) can indicate the class under test isn't structured for easy dependency injection — for example, it might be instantiating its own dependencies internally rather than receiving them via constructor injection — making a full, clean mock impractical and forcing a spy as a workaround, when improving the class's design to properly accept injected dependencies would typically make testing simpler and more standard.
+
+**7. What do `@Mock` and `@InjectMocks` do, and how do they reduce boilerplate compared to manual `mock()` calls?**
+`@Mock` annotates a field to be automatically created as a mock by Mockito's JUnit 5 extension, without an explicit `mock(SomeClass.class)` call. `@InjectMocks` annotates the field holding the actual class under test, and Mockito automatically constructs an instance of it, injecting any matching `@Mock`-annotated fields into its constructor (or setters/fields) automatically — reducing the manual setup code needed, especially for classes with several dependencies that would otherwise each need explicit mock creation and manual wiring.
+
+**8. By default, what does a mock's method return if it hasn't been explicitly stubbed?**
+A type-appropriate default value: `null` for reference types, `0`/`0.0`/etc. for numeric primitives, `false` for `boolean`, and empty instances for certain well-known types like `Optional` (`Optional.empty()`) or collections (an empty `List`/`Set`/`Map`) — this default behavior lets tests configure only the specific stubbed behaviors that particular test actually cares about, without needing to explicitly account for every single method a mocked interface might expose.
+
+**9. What does `verify(mockObject, never()).someMethod()` assert?**
+It asserts that `someMethod()` was never called on the mock at all during the test's execution up to that point — useful for confirming that some interaction genuinely did *not* happen, such as verifying a payment gateway's `charge()` method was never invoked when an order validation should have failed before reaching that step.
+
+**10. Why are mock-based unit tests generally faster and more reliable than tests exercising real dependencies (like an actual database)?**
+Mocks execute purely in memory with no real I/O, network calls, or external system state involved — eliminating both the inherent latency of real external calls and the flakiness risk of relying on an external system's actual availability, current state, or network conditions at test-run time, both of which are common sources of slow, unreliable ("flaky") tests when real dependencies are used directly in unit tests.
+
+**11. If a class under test constructs its own dependencies internally with `new SomeDependency()` rather than receiving them via constructor parameters, why does this make mocking that dependency difficult?**
+Mockito's standard mocking approach relies on substituting a mock object *in place of* a real dependency, which requires the class under test to actually accept that dependency from the outside (via constructor or setter injection) rather than hardcoding its own concrete instantiation internally — if a dependency is created with `new` directly inside the class, there's no straightforward way for a test to intercept and replace it with a mock, since the class controls its own dependency creation entirely internally. This is a direct, practical motivation for favoring dependency injection (Chapter 58's Dependency Inversion Principle) in testable code design.
+
+**12. What's the difference between asserting a mock's stubbed return value indirectly (by checking the result of the method under test) versus using `verify()` directly on the mock?**
+Checking the result of the method under test verifies the *observable outcome* of the class's behavior (e.g., `placeOrder()` returning `true`), which is generally the preferred, more black-box style of testing focused on behavior rather than implementation detail. Using `verify()` directly checks that a *specific internal interaction* with a dependency occurred as expected — useful specifically when the interaction itself (not just its ultimate effect on a return value) is the actual behavior being tested, such as confirming a notification was sent, even if that side effect doesn't directly affect the method's return value.

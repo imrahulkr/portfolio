@@ -1,0 +1,143 @@
+---
+title: "Interview Questions I — Core Concepts Grab-Bag"
+description: "20+ standalone system design interview questions spanning networking, caching, databases, and the CAP theorem — drawn from across Parts 1-3 of this series."
+series: "system-design"
+seriesOrder: 62
+part: "Dedicated Interview Chapters"
+partOrder: 10
+slug: "interview-questions-core-concepts"
+tags: ["system-design", "interview-prep", "networking", "caching", "databases"]
+readingTime: "18 min"
+publishedAt: "2026-09-15"
+updatedAt: "2026-09-15"
+---
+
+## Introduction
+
+This is the first of three dedicated interview chapters, collecting standalone questions in the style you're likely to encounter in a rapid-fire technical screen or as warm-up questions before a full design exercise. This chapter draws from Parts 1-3 (Foundations, Scalability, and Databases & Storage). Unlike the topic chapters, these questions aren't tied to one specific concept — they're mixed, cross-cutting, and reflect how interviewers actually probe breadth.
+
+---
+
+## Networking & Foundations
+
+### 1. What's the difference between a forward proxy and a reverse proxy, and how would you explain this to someone who's never heard either term?
+**Answer:** A forward proxy sits in front of clients and represents them to the outside world — think of it as a client's own gatekeeper, hiding the client's identity from whatever server it talks to. A reverse proxy sits in front of servers and represents them to the outside world — a server's gatekeeper, hiding the server's internal structure from whatever client talks to it. The simplest way to explain it: ask "whose interests does this proxy protect?" If it's the caller's, it's forward; if it's the callee's, it's reverse.
+
+**Follow-up:** *Is a CDN edge node a forward or reverse proxy?* — Reverse — it represents the origin server's content to the world, caching and serving on the origin's behalf.
+
+### 2. Why does HTTP/2 multiplexing reduce the practical impact of TCP's connection-establishment overhead compared to HTTP/1.1?
+**Answer:** HTTP/1.1 often opens multiple parallel TCP connections per host to work around head-of-line blocking, meaning the TCP handshake (and TLS handshake) cost is paid multiple times per page load. HTTP/2 multiplexes many requests over a single connection, so that setup cost is paid once and amortized across every request that follows.
+
+**Follow-up:** *Why doesn't HTTP/2 fully eliminate head-of-line blocking, motivating HTTP/3?* — Because HTTP/2 still runs over a single TCP connection, and TCP guarantees strict, in-order byte delivery — a single lost packet stalls every multiplexed stream on that connection, not just the one it belonged to. HTTP/3's QUIC transport handles each stream's reliability independently, avoiding this.
+
+### 3. A junior engineer says "we should always use UDP since it's faster than TCP." How do you respond?
+**Answer:** UDP has lower overhead per packet, but "faster" isn't a universal property independent of the workload — TCP's reliability, ordering, and congestion control exist because most applications need them, and reimplementing equivalent guarantees at the application layer (if UDP-based data genuinely requires them) often erases any raw speed advantage. UDP is the right choice specifically when occasional packet loss is tolerable and low latency matters more than perfect delivery (video calls, live gaming) — not as a universal default.
+
+**Follow-up:** *Name a real protocol that uses UDP as a transport but adds its own reliability layer on top.* — QUIC (which HTTP/3 runs on) — it's built on UDP but implements its own reliability, ordering, and congestion control, giving it TCP-like guarantees with more flexibility around head-of-line blocking.
+
+### 4. Why is DNS described as a distributed system worth studying in its own right, beyond just "how domain names resolve"?
+**Answer:** DNS demonstrates hierarchical caching at massive scale, extreme read/write asymmetry (billions of lookups, comparatively rare updates), and a deliberate eventual-consistency trade-off (TTL-based staleness accepted in exchange for scalability) — it's a working, decades-old example of several core distributed systems principles this series covers, operating at a scale most engineers will never personally build but can learn a great deal from.
+
+**Follow-up:** *What's the practical lesson from DNS TTLs for someone planning an infrastructure migration?* — Lower the TTL well before the migration so cached records expire quickly once you cut over, rather than leaving users stuck on stale records for the old TTL's full duration.
+
+### 5. What's the difference between availability and fault tolerance, and can a system be one without the other?
+**Answer:** Availability is about minimizing total downtime; fault tolerance is about continuing to function correctly, without user-perceptible disruption, while a failure is actively happening. A system can achieve excellent availability (fast recovery after each failure) without being fully fault-tolerant if each individual failure still causes a brief, perceptible blip during failover.
+
+**Follow-up:** *Why is true fault tolerance rarely pursued for typical web applications?* — It requires active-active redundancy with zero-delay failover and sophisticated in-flight-request handling — a level of engineering investment usually reserved for safety-critical or extremely high-stakes systems, since the cost/benefit rarely justifies it for typical consumer-facing products.
+
+---
+
+## Scalability & Load Balancing
+
+### 6. Why is "just add more servers" an incomplete answer to a scaling question unless the candidate also addresses statelessness?
+**Answer:** Horizontal scaling only works cleanly if any server instance can handle any incoming request — if servers hold session state in local memory, a load balancer can't freely distribute load across them without either sticky sessions (which weakens the benefit) or externalizing that state. "Add more servers" without addressing this dependency is an incomplete, potentially incorrect answer.
+
+**Follow-up:** *What's the quickest fix for an existing stateful application that needs to scale horizontally without a full rewrite?* — Externalize session state to a shared store like Redis, so any instance can serve any request by reading shared state rather than relying on local memory.
+
+### 7. Explain why Least Connections generally outperforms Round Robin for workloads with variable request costs.
+**Answer:** Round Robin assumes every request takes roughly the same time to process, distributing purely by turn order regardless of actual server load. If some requests are far more expensive than others, a server handling several expensive requests in a row still receives new requests in its turn under Round Robin, becoming overloaded. Least Connections routes based on real-time active connection count, naturally avoiding servers that are currently busy with expensive work.
+
+**Follow-up:** *When might Round Robin's simplicity actually be preferable despite this?* — For genuinely uniform, short-lived requests where the overhead of tracking real-time connection counts provides negligible benefit over the simpler, stateless Round Robin counter.
+
+### 8. Why can a cache actually hurt performance for certain workloads, and how would you recognize this case in an interview?
+**Answer:** A cache helps when there's meaningful read repetition — the same data requested multiple times. For write-heavy workloads with little to no read repetition (each piece of data is read once or never), a cache adds write overhead (populating the cache) and complexity (invalidation) with no compensating benefit, since there's little reuse to amortize that cost against. Recognizing this requires explicitly asking about the read/write ratio and access pattern before assuming caching is automatically beneficial.
+
+**Follow-up:** *Give a concrete example of data that shouldn't be cached for this reason.* — A one-time-use verification code or a write-once audit log entry that's rarely, if ever, read back — caching either adds overhead without meaningful reuse benefit.
+
+### 9. What's a cache stampede, and why doesn't a simple TTL alone fully protect against it?
+**Answer:** A cache stampede happens when a popular cache entry expires and many concurrent requests all miss simultaneously, flooding the database at once. A TTL alone doesn't prevent this — it actually causes it, since expiration is exactly what triggers the simultaneous miss. Mitigations require additional mechanisms: probabilistic early refresh (recomputing slightly before expiry) or a lock ensuring only one request repopulates the cache while others briefly wait.
+
+**Follow-up:** *Why might a very short TTL make cache stampedes worse, not better?* — A shorter TTL means the popular key expires and needs to be recomputed more frequently, increasing the frequency of stampede-risk windows, even if each individual window is otherwise identical in severity.
+
+### 10. In your own words, explain why an LRU cache needs a doubly linked list rather than a singly linked list, in a way a non-expert could follow.
+**Answer:** When you access an item and need to move it to the "most recently used" end, you have to detach it from wherever it currently sits in the list — which means updating the connections on both sides of it. A singly linked list only lets you look forward from a node, not backward, so you'd have to walk from the very start of the list just to find what points to the node you're removing. A doubly linked list already knows both neighbors, so removing and reinserting a node is instant, no matter where in the list it was.
+
+**Follow-up:** *Why does the HashMap in this same design need to store direct references to the linked list nodes, not just the keys?* — Without a direct reference, finding a specific node to reposition would require scanning the list — defeating the whole point of using a HashMap for O(1) lookup in the first place.
+
+---
+
+## Databases & Storage
+
+### 11. When would you choose a document database over a relational database, and what's the biggest risk in making that choice?
+**Answer:** Choose a document database when the data is genuinely semi-structured or heterogeneous (different records having different shapes) and you don't need complex, multi-record transactions or joins across entities. The biggest risk is losing the enforced structural integrity a relational schema provides — without discipline, a document collection can accumulate inconsistent, malformed records over time since there's no schema-level enforcement unless you explicitly add validation rules.
+
+**Follow-up:** *What's a middle-ground option if you want some structural flexibility without abandoning a relational database entirely?* — Use a JSON/JSONB column type within an otherwise relational schema for the specific fields that are genuinely variable, keeping the rest of the schema fully structured and validated.
+
+### 12. Why does a B+Tree's leaf-node linking specifically benefit range queries, and what would happen without it?
+**Answer:** B+Tree leaves are linked in sorted sequence, so once you locate the starting point of a range query, you can simply follow the links forward without re-traversing the tree from the root for each subsequent value. Without this linking, each value in the range would require a fresh root-to-leaf traversal, turning an efficient sequential scan into repeated, redundant tree lookups.
+
+**Follow-up:** *Does this same benefit apply to a plain B-Tree (not B+Tree)?* — Not as cleanly — a classic B-Tree stores data in internal nodes too and doesn't guarantee the same linked-leaf structure, so range scans are less naturally efficient, which is part of why B+Trees are the more common real-world implementation.
+
+### 13. Explain the core trade-off an LSM Tree makes, and identify one real-world database that uses this design.
+**Answer:** An LSM Tree buffers writes in memory and flushes them sequentially to disk, achieving very high write throughput at the cost of read predictability (a read may need to check multiple SSTables) and write amplification (compaction rewrites data multiple times over its lifetime). Cassandra is a well-known real-world database built on this design, specifically chosen for its write-heavy, high-throughput use cases.
+
+**Follow-up:** *What single mechanism most directly mitigates the read-cost downside of this trade-off?* — Bloom filters per SSTable, letting reads cheaply skip SSTables that definitely don't contain the queried key.
+
+### 14. Why is "we replicate our database" not, by itself, a complete answer to "how do you achieve high availability"?
+**Answer:** Replication alone doesn't specify what happens during a failure — you also need automatic failover (detecting the primary is down and promoting a replica), a way to prevent split-brain during that failover (typically requiring quorum-based consensus), and clarity on whether replication is synchronous or asynchronous (which determines whether any data could be lost during failover). "We replicate" describes a mechanism, not a complete availability strategy.
+
+**Follow-up:** *Why does asynchronous replication specifically risk data loss during failover, that synchronous replication avoids?* — With asynchronous replication, the primary acknowledges a write before confirming a replica has received it — if the primary fails immediately after that acknowledgment but before replicating the write, that write is lost when a replica is promoted, since the replica never received it.
+
+### 15. Why is choosing a shard key described as "the single most consequential decision" in a sharded system's design?
+**Answer:** The shard key determines both load distribution (a poor choice creates hotspots) and query efficiency (a shard key aligned with common query patterns lets most queries hit a single shard; a misaligned one forces expensive scatter-gather queries across every shard) — and changing a shard key after the fact typically requires re-migrating enormous amounts of already-distributed data, making it a decision with very high switching costs once a system is live.
+
+**Follow-up:** *Why is `tenant_id` often cited as a strong shard key for multi-tenant SaaS applications specifically?* — Nearly every query in a multi-tenant application is naturally already scoped to one tenant, so sharding by tenant means the vast majority of real queries hit exactly one shard — directly aligning the shard key with the actual, dominant access pattern.
+
+### 16. What's the practical difference between ACID's "Consistency" and CAP theorem's "Consistency," and why does this terminology collision matter?
+**Answer:** ACID's Consistency means a transaction leaves the database satisfying its own defined constraints (foreign keys, uniqueness rules) — it's about data validity. CAP's Consistency means every node returns the same, most-recent value — it's about agreement across replicas. A system can satisfy one without the other. This matters because using "consistency" without specifying which meaning is intended leads to genuinely confusing, talking-past-each-other conversations in technical discussions.
+
+**Follow-up:** *What more precise term is often used instead of CAP's "Consistency" to avoid this ambiguity?* — Linearizability, or sometimes "replica agreement" — terms that specifically describe the cross-node recency guarantee without colliding with ACID's unrelated usage of the same word.
+
+### 17. Why does PACELC add meaningful value over CAP theorem alone?
+**Answer:** CAP only describes behavior during a network partition — a comparatively rare event. PACELC additionally addresses the trade-off that exists during normal, partition-free operation: choosing between latency and consistency on every single request, which is a far more frequently-relevant, everyday design consideration than the rare partition scenario CAP focuses on exclusively.
+
+**Follow-up:** *Give an example of a system that's PA/EL under PACELC's classification, and explain both halves of that label.* — DynamoDB in its default configuration — PA means it favors Availability over Consistency during a partition; EL means it favors Latency over Consistency during normal operation, acknowledging writes quickly without waiting for full cross-replica confirmation.
+
+### 18. Explain, without using the word "eventual," what eventual consistency actually guarantees.
+**Answer:** It guarantees that if you stop making changes to a piece of data, every copy of that data across the system will, given enough time, come to agree on the same value — but it makes no promise about exactly when that agreement happens, and a read taken before that point might return an outdated value.
+
+**Follow-up:** *Why is this guarantee still meaningfully different from "no guarantee at all"?* — It rules out permanent, indefinite divergence — copies are guaranteed to eventually converge rather than potentially disagreeing forever, which distinguishes it from a system with genuinely no consistency guarantee whatsoever.
+
+### 19. Why might causal consistency be described as "the practical sweet spot" for many social/collaborative features, compared to both linearizability and pure eventual consistency?
+**Answer:** Linearizability is often more than these features actually need, at a real latency/availability cost. Pure eventual consistency can produce genuinely confusing results (like a reply appearing before the post it's replying to). Causal consistency specifically preserves the order of *related* events while leaving unrelated events free to be seen in any order — matching what social/collaborative features actually require (a reply after its parent) without paying for guarantees they don't need (a global, real-time-accurate order across entirely unrelated content).
+
+**Follow-up:** *What data structure is commonly used to implement causal consistency, and what specific problem does it solve?* — Vector clocks — they distinguish genuinely causally-related events (one happened because of the other) from truly concurrent, independent events, which a simple timestamp cannot reliably do given clock skew across machines.
+
+### 20. Why is 2PC (Two-Phase Commit) rarely used for coordinating transactions across independently-owned microservices today, despite providing genuine atomicity?
+**Answer:** 2PC requires participants to hold locks from the moment they vote "yes" until they receive the coordinator's final instruction — if the coordinator crashes or is delayed during this window, participants can be stuck blocking indefinitely. This blocking behavior, combined with the coordinator being a single point of failure and the added latency of multiple synchronous round trips, makes it poorly suited to loosely-coupled, independently-scaled, network-separated microservices, where the Saga pattern's non-blocking, compensate-on-failure approach is generally preferred instead.
+
+**Follow-up:** *What does the Saga pattern give up compared to 2PC in exchange for avoiding this blocking behavior?* — Isolation — intermediate, partially-completed states of a Saga are genuinely visible to other observers, unlike a true ACID transaction, which never exposes intermediate states before it fully commits.
+
+### 21. A candidate claims "object storage is basically a more modern file system." Why is this framing inaccurate, and what should they say instead?
+**Answer:** Object storage and file storage are genuinely different abstractions with different trade-offs, not a strict upgrade path — object storage sacrifices in-place partial modification (an object must be replaced wholly) and true hierarchical directories (it uses a flat namespace with prefixes simulating folders) in exchange for virtually unlimited horizontal scalability and rich metadata support. A more accurate framing: they're suited to different access patterns, and choosing between them should depend on whether the workload needs in-place edits and hierarchy (favoring file storage) or massive scale and simple whole-object access (favoring object storage).
+
+**Follow-up:** *Give a concrete access pattern where file storage remains clearly superior despite object storage's scalability advantages.* — A shared configuration directory actively edited by multiple internal tools, needing frequent small in-place edits, directory-level listing, and file-locking semantics — object storage's whole-object-replacement model is a poor fit here regardless of its scalability strengths.
+
+### 22. Why does storing a large binary file (like a user's uploaded video) directly as a BLOB column in a relational database count as an anti-pattern, even on a database that technically supports BLOB storage?
+**Answer:** It bloats the database with data that doesn't benefit from relational features (joins, transactions across it), slows down routine operations like backups and replication that now have to move much larger volumes of data, and forfeits object storage's purpose-built scalability for exactly this kind of large binary content. The standard, better pattern stores the file in object storage and keeps only a reference (a URL or key) in the relational database.
+
+**Follow-up:** *What's the one piece of information the database absolutely still needs to store in this pattern?* — The object storage key/reference (and typically some lightweight metadata like upload timestamp or file size) — enough to locate and describe the file without duplicating its actual content.
+
+## Summary
+
+This chapter collected 22 standalone questions spanning networking fundamentals, load balancing, caching, and database/storage concepts from Parts 1-3 of this series. The next dedicated interview chapter shifts focus to distributed systems and messaging — consistent hashing, consensus, rate limiting, and the messaging patterns from Parts 4-5.

@@ -1,0 +1,155 @@
+---
+title: "Understanding Heap, Stack & Metaspace"
+description: "What actually lives in each memory region, common OutOfMemoryError and StackOverflowError scenarios, and key JVM memory tuning flags."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "JVM Internals, Memory & Performance"
+chapter: 47
+totalChapters: 65
+slug: "heap-stack-and-metaspace"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "jvm", "memory", "heap", "stack"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## Heap — Where Objects Live
+
+Every object and array you create with `new` lives on the heap, regardless of where the reference variable pointing to it is declared. The heap is shared across all threads and is the memory region the garbage collector (Chapter 46) manages.
+
+```java
+public void process() {
+    Employee emp = new Employee("Rahul");   // the Employee OBJECT is on the heap;
+                                              // the "emp" REFERENCE VARIABLE is on this thread's stack
+}
+```
+
+![Diagram: a method's stack frame holding a reference variable, with an arrow pointing to the actual object data stored on the shared heap](/diagrams/ch47-heap-vs-stack-reference.svg)
+
+## Stack — Where Method Calls and Local Variables Live
+
+Each thread has its own private stack, composed of **stack frames** — one pushed for every method call, popped when that method returns. A frame holds that specific invocation's local variables, method parameters, and partial results.
+
+```java
+public void methodA() {
+    int x = 5;
+    methodB();
+}
+public void methodB() {
+    int y = 10;
+}
+```
+
+```
+Stack (grows downward as calls nest):
+┌─────────────────┐
+│ methodB frame    │  <- y = 10
+├─────────────────┤
+│ methodA frame    │  <- x = 5
+├─────────────────┤
+│ main frame       │
+└─────────────────┘
+```
+
+When `methodB()` returns, its entire frame is popped and discarded instantly — this is why local variables are so cheap and fast compared to heap allocation: no garbage collector involvement is needed at all for stack-frame cleanup.
+
+## `StackOverflowError` — Uncontrolled Recursion
+
+```java
+public void recurse() {
+    recurse();   // no base case — each call pushes another frame, indefinitely
+}
+```
+
+```
+Exception in thread "main" java.lang.StackOverflowError
+    at com.example.Demo.recurse(Demo.java:5)
+    at com.example.Demo.recurse(Demo.java:5)
+    ... (repeated thousands of times)
+```
+
+Each thread's stack has a fixed maximum size (configurable via `-Xss`, default varies by platform, often around 512KB–1MB). Uncontrolled or excessively deep recursion (missing or incorrect base case, or simply a legitimately very deep call chain) exhausts that space, throwing `StackOverflowError` — this is an `Error`, not an `Exception` (Chapter 25), reflecting that it typically signals a serious, likely unrecoverable program bug rather than an anticipated condition.
+
+## `OutOfMemoryError` — Several Distinct Flavors
+
+```java
+List<byte[]> leak = new ArrayList<>();
+while (true) {
+    leak.add(new byte[1_000_000]);   // keeps allocating and RETAINING references — never eligible for GC
+}
+```
+
+```
+Exception in thread "main" java.lang.OutOfMemoryError: Java heap space
+```
+
+- **`OutOfMemoryError: Java heap space`** — the heap is full of still-reachable (not garbage) objects, and the GC cannot free enough space for a new allocation — usually a genuine memory leak (objects unintentionally kept reachable, e.g., via a growing static collection) or simply an undersized heap for the actual workload.
+- **`OutOfMemoryError: Metaspace`** — too many classes have been loaded (common with certain dynamic proxy/bytecode-generation-heavy frameworks, or classloader leaks from repeatedly redeploying an application without properly releasing old class loaders).
+- **`OutOfMemoryError: GC overhead limit exceeded`** — the JVM is spending an excessive proportion of total CPU time on GC (by default, more than 98%) while reclaiming very little memory each cycle — a signal that the heap is nearly full of live data with almost nothing left to collect, rather than a transient spike.
+- **`StackOverflowError`** is technically a *different* error entirely (per-thread stack exhaustion, not heap exhaustion) but is frequently discussed alongside `OutOfMemoryError` scenarios in interviews, since both stem from a JVM memory region being exhausted.
+
+## Metaspace — Class Metadata (Replaced PermGen in Java 8)
+
+Before Java 8, class metadata lived in a fixed-size region called **PermGen (Permanent Generation)**, which was a notoriously common source of `OutOfMemoryError: PermGen space` in applications that dynamically generated or reloaded many classes. Java 8 replaced PermGen with **Metaspace**, allocated from **native (off-heap) memory** rather than the JVM heap, and by default sized dynamically, growing as needed up to the machine's available native memory (or a configured `-XX:MaxMetaspaceSize` limit) — largely eliminating the old PermGen-sizing headaches, though Metaspace exhaustion (from excessive class loading or classloader leaks) remains possible.
+
+## Key JVM Memory Tuning Flags
+
+```bash
+-Xms512m          # initial heap size
+-Xmx2g            # maximum heap size
+-Xss512k          # per-thread stack size
+-XX:MaxMetaspaceSize=256m   # cap metaspace growth (unbounded by default)
+-XX:+UseG1GC      # explicitly select the G1 garbage collector (default since Java 9 anyway)
+```
+
+Setting `-Xms` and `-Xmx` to the **same value** is a common production practice — it avoids the overhead of the JVM dynamically resizing the heap during operation, at the cost of always reserving the maximum configured memory upfront, which is usually the right trade-off for a long-running server process with a well-understood memory profile.
+
+## Key Takeaways
+
+- Objects live on the shared heap; local variables and method call state live on each thread's own private stack.
+- `StackOverflowError` results from stack exhaustion (typically runaway recursion); `OutOfMemoryError` has several distinct flavors, each pointing to a different underlying cause (heap, metaspace, or GC-overhead exhaustion).
+- Metaspace (Java 8+) replaced the old, fixed-size PermGen, using native memory and dynamic sizing by default.
+- Setting `-Xms` equal to `-Xmx` is a common production tuning practice to avoid runtime heap-resizing overhead.
+
+---
+
+## Interview Questions
+
+**1. What's the fundamental difference between what's stored on the heap versus the stack?**
+The heap stores all objects and arrays, shared across every thread in the JVM, and is managed by the garbage collector. The stack stores each thread's own private sequence of stack frames — one per active method call — holding that call's local variables, parameters, and partial computation state; it's never shared between threads and requires no garbage collection, since frames are simply popped when their method returns.
+
+**2. If a local variable is a reference to an object, where does the reference itself live, and where does the object it points to live?**
+The reference variable itself lives on the stack, as part of the stack frame for the method where it's declared. The actual object it refers to lives on the heap, regardless of where any variable referencing it happens to be declared.
+
+**3. Why is stack-frame cleanup essentially free compared to heap object cleanup?**
+A stack frame is simply popped off the stack the instant its method returns — there's no need to determine reachability or run any collection algorithm, since the frame's entire contents become irrelevant the moment the method call ends. Heap objects, by contrast, may still be reachable from other parts of the program after a given method returns, so determining when they're safe to reclaim requires the garbage collector's more involved reachability analysis (Chapter 46).
+
+**4. What typically causes a `StackOverflowError`, and why is it classified as an `Error` rather than an `Exception`?**
+It's typically caused by excessively deep (often infinite, due to a missing or broken base case) recursive method calls, where each call pushes another stack frame until the thread's fixed stack size limit is exhausted. It's classified as an `Error` because it generally signals a serious, likely unrecoverable programming defect (or a fundamentally mismatched algorithm/data-size assumption) rather than an anticipated, recoverable runtime condition — consistent with the `Error`/`Exception` distinction established in Chapter 25.
+
+**5. What's the difference between `OutOfMemoryError: Java heap space` and `OutOfMemoryError: Metaspace`?**
+"Java heap space" means the heap itself is full of objects the GC considers still reachable (live), leaving no room for new object allocations — commonly caused by a memory leak (objects unintentionally retained via a lingering reference) or simply an undersized heap for the actual workload. "Metaspace" means the region storing class metadata has been exhausted, typically from loading an excessive number of classes — often seen with heavy dynamic class generation/proxying, or from repeatedly reloading an application without properly releasing the old class loaders and their associated classes.
+
+**6. What replaced PermGen in Java 8, and what was the key structural difference?**
+Metaspace replaced PermGen. The key difference is that PermGen was allocated from a fixed-size portion of the JVM's own managed memory (making `OutOfMemoryError: PermGen space` a common, frustrating tuning problem when class metadata needs exceeded the configured size), while Metaspace is allocated from native (off-heap) memory and, by default, grows dynamically as needed rather than being capped at a small fixed size upfront.
+
+**7. Can Metaspace still be exhausted, even though it's not fixed-size by default like PermGen was?**
+Yes — while Metaspace grows dynamically by default (up to the machine's available native memory, or an explicitly configured `-XX:MaxMetaspaceSize` cap), sustained excessive class loading (from a genuine classloader leak, or an application generating an unbounded number of unique dynamic classes over time) can still eventually exhaust available native memory or hit a configured cap, still producing `OutOfMemoryError: Metaspace`.
+
+**8. What does `OutOfMemoryError: GC overhead limit exceeded` specifically indicate, as distinct from a plain heap-space `OutOfMemoryError`?**
+It indicates the JVM detected it's spending an excessive proportion (by default, more than 98%) of total execution time performing garbage collection while reclaiming only a very small amount of memory each cycle — a signal that the heap is nearly entirely full of genuinely live, reachable data with almost nothing left to actually collect, rather than merely being temporarily full at a single moment. This distinction matters because it points more specifically at either an undersized heap for a legitimately large working set, or a slow-building leak that's just now reaching a critical point.
+
+**9. Why might setting `-Xms` and `-Xmx` to the same value be a recommended production practice for a long-running server application?**
+Leaving them different allows the JVM to dynamically grow (and potentially shrink) the heap during operation, which involves its own overhead (allocating additional memory from the OS, adjusting internal GC structures) at moments that can be unpredictable and potentially poorly timed relative to the application's actual load. Setting them equal reserves the full maximum heap size upfront, avoiding that runtime resizing overhead entirely — a sensible trade-off for a long-running process where the memory footprint is well-understood and available system memory isn't a tight constraint.
+
+**10. What does `-Xss` control, and what happens if it's set too small for an application that uses moderately deep recursion?**
+`-Xss` sets the size of each thread's stack. If set too small relative to the application's actual call depth (particularly for legitimately deep, though non-infinite, recursive algorithms), previously-working code can start throwing `StackOverflowError` even without any actual bug in the recursion's base case — simply because there isn't enough stack space allocated to accommodate the genuinely required call depth.
+
+**11. Is the heap shared across all threads, or does each thread get its own heap?**
+The heap is a single region shared across all threads in the JVM — this is precisely why objects (unlike stack-frame local variables) can be freely passed between threads and require explicit synchronization (Chapter 39) when accessed concurrently by multiple threads, since there's genuinely one shared copy of that object's data rather than independent per-thread copies.
+
+**12. Why might a memory leak in Java still occur despite having automatic garbage collection?**
+Garbage collection only reclaims objects that are genuinely *unreachable* — if application code unintentionally keeps a reference to an object alive longer than actually needed (a classic example: continuously adding entries to a static `List` or `Map` with no corresponding removal logic, or registering listeners/callbacks that are never unregistered), the GC correctly considers that object still reachable and therefore never eligible for collection, even though the application has no further legitimate use for it — this is exactly what a "memory leak" means in a garbage-collected language: unintentional, lingering reachability, not literally lost/unreclaimable memory the way a leak works in a manually-managed language like C.

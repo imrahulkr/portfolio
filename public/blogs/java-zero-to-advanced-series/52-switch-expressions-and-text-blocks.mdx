@@ -1,0 +1,181 @@
+---
+title: "Switch Expressions & Text Blocks"
+description: "The full arrow-syntax switch expression with yield, and multi-line text blocks with their incidental whitespace stripping rules."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Modern Java (9-21)"
+chapter: 52
+totalChapters: 65
+slug: "switch-expressions-and-text-blocks"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "switch-expressions", "text-blocks", "java14", "java15"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 11
+---
+
+## Switch Expressions in Full (Java 14+)
+
+Chapter 5 introduced the basic arrow syntax; here's the complete picture, including multi-statement branches and `yield`.
+
+```java
+int numLetters = switch (day) {
+    case MONDAY, FRIDAY, SUNDAY -> 6;
+    case TUESDAY -> 7;
+    case THURSDAY, SATURDAY -> 8;
+    case WEDNESDAY -> {
+        System.out.println("Midweek check-in");   // arrow form CAN have a block body...
+        yield 9;                                    // ...but a block body MUST use yield to produce the value
+    }
+};
+```
+
+- **Arrow (`->`) branches** — no fall-through, each branch is independent; a single expression implicitly becomes the switch's value, or a `{ }` block must explicitly `yield` a value.
+- **`yield`** — the switch-expression equivalent of `return` for a regular method — it's how a block-bodied arm produces its value. It's specific to switch expressions and not valid as a general statement outside one.
+
+## Traditional `case:` Labels Can Still Be Used as an Expression Too
+
+```java
+int numLetters = switch (day) {
+    case MONDAY:
+    case FRIDAY:
+    case SUNDAY:
+        yield 6;
+    case TUESDAY:
+        yield 7;
+    default:
+        yield 8;
+};
+```
+
+This colon-based form still exhibits fall-through between `case` labels exactly like the traditional switch *statement* (Chapter 5) — but as an *expression*, every possible path must still ultimately `yield` a value, and the compiler still requires exhaustiveness (a `default`, or, for a sealed type/enum, provably complete coverage). **In practice, the arrow form is preferred for switch expressions** — it avoids fall-through pitfalls entirely and is far more common in modern code; the colon form is mostly relevant for reading legacy code migrated from a statement to an expression with minimal changes.
+
+## Exhaustiveness — Compiler-Enforced Completeness
+
+```java
+enum Status { PENDING, ACTIVE, CLOSED }
+
+String describe(Status status) {
+    return switch (status) {
+        case PENDING -> "Waiting";
+        case ACTIVE -> "In progress";
+        // COMPILE ERROR if CLOSED is missing — a switch EXPRESSION over an enum must be exhaustive
+    };
+}
+```
+
+A switch **statement** (no value produced) is never required to be exhaustive — an unmatched case simply does nothing. A switch **expression** (used to produce a value) *must* be exhaustive, since every possible input needs to produce *some* value — this is enforced at compile time for enums and sealed types (Chapter 51), and requires an explicit `default` for open-ended types like `int`/`String`.
+
+## Text Blocks (Java 15+) — Multi-Line String Literals
+
+Before text blocks, embedding multi-line text (JSON, SQL, HTML) required escaped quotes and explicit `\n` concatenation, which was both verbose and visually noisy.
+
+```java
+// Before text blocks
+String json = "{\n" +
+              "  \"name\": \"Rahul\",\n" +
+              "  \"role\": \"Engineer\"\n" +
+              "}";
+
+// With a text block
+String json = """
+        {
+          "name": "Rahul",
+          "role": "Engineer"
+        }
+        """;
+```
+
+A text block is delimited by triple double-quotes (`"""`), with the opening delimiter followed immediately by a newline (required) and the content following on subsequent lines.
+
+## Incidental Whitespace Stripping
+
+The compiler automatically strips **incidental leading whitespace** — common leading indentation shared across all lines, driven by the position of the *closing* `"""` delimiter — while preserving whatever *relative* indentation you intentionally included.
+
+```java
+String block = """
+        Line one
+        Line two
+        """;
+// The actual string content: "Line one\nLine two\n"
+// The leading indentation matching the closing """ position is stripped from EVERY line
+```
+
+```java
+String indented = """
+        Line one
+            Indented line two
+        """;
+// Content: "Line one\n    Indented line two\n"
+// Relative extra indentation on "Indented line two" IS preserved
+```
+
+![Diagram: text block source showing the closing triple-quote delimiter's column position determining the baseline that gets stripped from every line, with extra indentation beyond that baseline preserved](/diagrams/ch52-text-block-whitespace-stripping.svg)
+
+Moving the closing `"""` further left or right changes how much leading whitespace is stripped from every line — this is a frequently-tested, easy-to-get-wrong detail: the stripping baseline is determined by the *closing delimiter's* position, not the opening one.
+
+## Escape Sequences and Embedded Quotes in Text Blocks
+
+```java
+String block = """
+        She said "hello" to me.
+        """;
+// Regular double quotes inside a text block don't need escaping, UNLESS three appear consecutively
+
+String withBackslash = """
+        Line one \
+        continues here on the same logical line
+        """;
+// A trailing backslash suppresses the following line terminator — joining two source lines into one logical line
+```
+
+```java
+String noTrailingNewline = """
+        No trailing newline here""";   // closing """ immediately after content — no final \n included
+```
+
+## Key Takeaways
+
+- Arrow-syntax switch expressions never fall through; a block-bodied arm must use `yield` to produce its value.
+- A switch used as an expression must be exhaustive (compiler-enforced for enums/sealed types); a switch statement never requires exhaustiveness.
+- Text blocks (`"""`) eliminate manual escaping and concatenation for multi-line strings, with incidental leading whitespace stripped based on the closing delimiter's position.
+- A trailing `\` in a text block suppresses the line terminator, joining two source lines into one logical line without an embedded newline.
+
+---
+
+## Interview Questions
+
+**1. What is `yield` used for in a switch expression, and how does it relate to `return` in a regular method?**
+`yield` produces the value for a switch expression from within a block (`{ }`) branch, playing the same conceptual role `return` plays for exiting a method with a value — it's specifically scoped to switch expressions and isn't valid as a general-purpose statement anywhere else in the language.
+
+**2. Why doesn't a single-expression arrow branch (`case MONDAY -> 6;`) need an explicit `yield`?**
+The arrow syntax implicitly treats a single expression as the branch's produced value directly — `yield` is only required when a branch's body is a full `{ }` block containing multiple statements, since in that case the compiler has no single trailing expression to automatically treat as the result, requiring an explicit statement to designate which value the block should produce.
+
+**3. Does the traditional colon-based `case:` label syntax still exhibit fall-through when used inside a switch expression?**
+Yes — even within a switch *expression*, the older colon-based case-label form still falls through between cases exactly as it does in a switch statement, requiring an explicit `yield` (playing the role `break` plays in a statement) to stop at the intended case and produce a value; this fall-through behavior is exactly why the newer arrow syntax, which never falls through, is strongly preferred for switch expressions in modern code.
+
+**4. Why must a switch expression be exhaustive, while a switch statement is not required to be?**
+A switch expression must produce a value for every possible input, since the language requires an expression to always evaluate to something — an unhandled case would leave no defined value to produce, which the compiler refuses to allow. A switch statement, by contrast, doesn't need to produce any value at all — if no case matches and there's no default, the statement simply does nothing and execution continues normally afterward, which is a perfectly valid (if sometimes unintentional) outcome for a statement.
+
+**5. If you switch on an `enum` with an expression and don't include a `default` case, what determines whether the compiler accepts it as exhaustive?**
+The compiler checks whether every single constant declared in that enum is covered by some case in the switch — if all constants are explicitly handled, the switch is considered exhaustive without needing a `default`, since the compiler has complete knowledge of every possible enum value. If even one constant is missing from the cases (and there's no `default` to catch it), the compiler rejects the switch expression as non-exhaustive.
+
+**6. What determines how much leading whitespace is stripped from each line of a text block?**
+The column position of the *closing* `"""` delimiter establishes the baseline — whitespace up to that column, common to every line (including the closing delimiter's own line), is treated as incidental indentation added purely for source-code readability and is stripped from the actual string content; any additional indentation beyond that baseline on a given line is preserved as meaningful content.
+
+**7. If you want to include a trailing newline in a text block's actual string content, how would you structure it, and how would you avoid one if you didn't want it?**
+Placing the closing `"""` on its own line, after the last line of actual content, results in the string ending with a newline character. Placing the closing `"""` immediately after the last character of content, on the same line (no line break before it), produces a string with no trailing newline at all.
+
+**8. What does a trailing backslash (`\`) at the end of a line inside a text block do?**
+It suppresses the line terminator that would otherwise be included at that point in the resulting string, effectively joining that source line with the next one into a single logical line in the actual string content — useful for wrapping a long line of text across multiple source lines purely for source readability, without introducing an actual line break in the resulting string value.
+
+**9. Do you need to escape a single embedded double quote character inside a text block, the way you would in a traditional string literal?**
+No — a single (or even a pair of) embedded double quote characters inside a text block don't require escaping, since the text block is delimited by *triple* quotes; escaping is only necessary if three or more consecutive double quotes would otherwise appear in the content, which could be visually confused with the block's own closing delimiter.
+
+**10. Why are text blocks particularly useful for embedding SQL queries or JSON payloads directly in Java source code?**
+Such content is naturally multi-line and typically contains many embedded double quotes (JSON keys/values, SQL string literals) — text blocks let this content be written in a form that visually resembles the actual target format almost exactly as-is, without the substantial visual noise of manual `\n` concatenation and escaped quotes that traditional string literals would require for the same multi-line, quote-heavy content.
+
+**11. Is a text block's type `String`, or some special new type introduced alongside the feature?**
+A text block produces an ordinary `java.lang.String` value, with no new type introduced — it's purely an alternative *syntax* for writing certain string literals in source code (specifically, ones that are naturally multi-line and/or contain many embedded quotes), fully interchangeable with regular string literals and every existing `String` method and API once compiled.

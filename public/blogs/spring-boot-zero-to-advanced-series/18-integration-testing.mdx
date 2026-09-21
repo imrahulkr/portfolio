@@ -1,0 +1,262 @@
+---
+title: "Integration Testing: Testcontainers, @DataJpaTest & @WebMvcTest"
+description: "Unit tests with mocks can't catch a wrong query or a real serialization bug. Integration tests trade speed for realism — and Testcontainers means that realism no longer requires a shared, flaky test database."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 18
+tags: ["Spring Boot", "Testing", "Testcontainers"]
+---
+
+Chapter 17 closed on the exact gap unit tests leave open: a mocked repository never actually executes a query, so a broken `@Query` annotation passes every unit test while being genuinely wrong. This chapter covers testing against real infrastructure — without the classic pain of a shared, flaky test database.
+
+## The old, painful way: a shared test database
+
+Before Testcontainers, integration tests typically pointed at a shared database instance (a dedicated "test" database on a real server, or a fragile in-memory substitute). This causes real, familiar problems: tests interfere with each other's data, CI runs can't run in parallel safely, and the database's exact version/configuration often drifts from production.
+
+## Testcontainers: a real database, disposable, per test run
+
+Testcontainers starts real Docker containers (an actual PostgreSQL, an actual Kafka broker, an actual Redis) programmatically as part of the test lifecycle, and tears them down afterward. No shared state, no manual setup, and — critically — the *same* database engine and version used in production.
+
+```xml
+<dependency>
+    <groupId>org.testcontainers</groupId>
+    <artifactId>postgresql</artifactId>
+    <scope>test</scope>
+</dependency>
+<dependency>
+    <groupId>org.testcontainers</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+```java
+@SpringBootTest
+@Testcontainers
+class OrderRepositoryIntegrationTest {
+
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
+
+    @DynamicPropertySource
+    static void configureDataSource(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+    }
+
+    @Autowired
+    OrderRepository orderRepository;
+
+    @Test
+    void findsOrdersAboveThreshold() {
+        orderRepository.save(new Order("Jane Doe", new BigDecimal("150.00")));
+        orderRepository.save(new Order("John Smith", new BigDecimal("50.00")));
+
+        List<Order> results = orderRepository.findHighValueOrders(OrderStatus.PENDING, new BigDecimal("100.00"));
+
+        assertThat(results).hasSize(1).extracting(Order::getCustomerName).containsExactly("Jane Doe");
+    }
+}
+```
+
+`@Container` manages the container's lifecycle alongside the test class. `@DynamicPropertySource` injects the container's actual (dynamically assigned) JDBC URL, username, and password into Spring's `Environment` *before* the context starts — this is what lets the real, running container stand in for `spring.datasource.url` exactly as if it were configured in `application.yml` (Chapter 5).
+
+```
+Test starts
+     │
+     ▼
+┌─────────────────────────┐
+│ Testcontainers starts a   │
+│ real PostgreSQL container  │
+└───────────┬─────────────┘
+            │  container's real JDBC URL/credentials
+            ▼
+┌─────────────────────────┐
+│ Spring context starts,     │
+│ using @DynamicPropertySource│
+│ to point at that container │
+└───────────┬─────────────┘
+            │
+            ▼
+      Test runs against
+      a REAL database
+            │
+            ▼
+   Container destroyed after test
+```
+
+## `@DataJpaTest`: the narrower slice for repository-only tests
+
+Running a full `@SpringBootTest` for every repository test is unnecessarily heavy. `@DataJpaTest` loads only JPA-related infrastructure — repositories, the `EntityManager`, and (by default) an in-memory database — and wraps each test in a transaction that's rolled back afterward, so tests never leak data into each other.
+
+```java
+@DataJpaTest
+@Testcontainers
+class OrderRepositoryDataJpaTest {
+
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
+
+    @DynamicPropertySource
+    static void configureDataSource(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+    }
+
+    @Autowired
+    TestEntityManager entityManager;
+
+    @Autowired
+    OrderRepository orderRepository;
+
+    @Test
+    void derivedQueryFindsOrdersByStatus() {
+        Order order = new Order("Jane Doe");
+        entityManager.persist(order);
+        entityManager.flush();
+
+        List<Order> found = orderRepository.findByStatus(OrderStatus.PENDING);
+
+        assertThat(found).contains(order);
+    }
+}
+```
+
+Combining `@DataJpaTest` with Testcontainers (rather than its default embedded H2 database) gets the best of both: a fast, narrow test slice, running against the *real* database engine — closing exactly the "H2 behaves subtly differently from production Postgres" gap flagged back in Chapter 17.
+
+## Testing the whole stack: `@SpringBootTest` with `MockMvc`
+
+For a genuine end-to-end test exercising the real web layer, real security, and a real database together:
+
+```java
+@SpringBootTest(webEnvironment = WebEnvironment.MOCK)
+@AutoConfigureMockMvc
+@Testcontainers
+class OrderApiIntegrationTest {
+
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
+
+    @DynamicPropertySource
+    static void configureDataSource(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+    }
+
+    @Autowired
+    MockMvc mockMvc;
+
+    @Test
+    void createOrderPersistsAndReturns201() throws Exception {
+        mockMvc.perform(post("/api/orders")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"customerName\":\"Jane Doe\",\"productIds\":[1]}"))
+            .andExpect(status().isCreated())
+            .andExpect(header().exists("Location"));
+    }
+}
+```
+
+This genuinely exercises the whole chain from Chapters 6–16 in one test — request binding, validation, the service layer, the real repository against a real database, and (unless excluded) the security filter chain — at the cost of being the slowest, heaviest kind of test in the suite.
+
+## Best practices & gotchas
+
+- **Reuse containers across test classes where possible.** Starting a fresh container per test class adds real overhead; a static container field shared via a base test class, or Testcontainers' "singleton container" pattern, avoids restarting the same container repeatedly within a test run.
+- **Prefer `@DataJpaTest` + Testcontainers over `@SpringBootTest` for repository-focused tests.** You get real-database fidelity without paying for the full application context on every test class.
+- **Don't test the database driver itself.** Integration tests should verify *your* queries and mappings behave correctly — not re-verify that PostgreSQL correctly implements SQL, which is out of scope and just adds noise.
+- **Keep the testing pyramid shape in mind (Chapter 17).** Testcontainers makes integration tests far more pleasant, but they're still slower than unit tests — resist the temptation to convert every unit test into an integration test just because Testcontainers makes it easy.
+- **Match the containerized version to production.** `new PostgreSQLContainer<>("postgres:16")` should track whatever major version actually runs in production — testing against a materially different version undermines the exact fidelity Testcontainers exists to provide.
+
+## Quick reference
+
+| Tool | Scope | Speed | Best for |
+|---|---|---|---|
+| `@DataJpaTest` | Repository/JPA layer only | Fast | Query correctness, mappings |
+| Testcontainers | Real, disposable infrastructure (any DB, broker, cache) | Moderate | Realistic integration testing without shared state |
+| `@SpringBootTest` + `MockMvc` | Full application context, simulated HTTP | Slow | True end-to-end verification across layers |
+| `@DynamicPropertySource` | Injects a container's runtime connection details | — | Wiring Testcontainers into Spring's `Environment` |
+
+## Wrapping up
+
+Between Chapters 17 and 18, you now have the full testing toolkit: fast, mock-based unit tests for the majority of your logic, narrow slice tests (`@WebMvcTest`, `@DataJpaTest`) for layer-specific concerns, and Testcontainers-backed integration tests for genuine end-to-end confidence — all without a shared, flaky test database. This closes Part 5. **Part 6** starts next, with **Chapter 19** covering Actuator, metrics, and observability.
+
+## Interview Questions
+
+**1. What problem does Testcontainers solve that a shared test database doesn't?**
+A shared test database causes tests to interfere with each other's data, prevents safe parallel test execution across CI runs, and often drifts in version/configuration from what's actually used in production. Testcontainers starts a real, disposable instance of the actual database engine per test run (or per test class), giving genuine isolation and production-matching fidelity with no shared state to manage.
+
+*Follow-up: What's the trade-off of using Testcontainers compared to an in-memory database like H2 for the same tests?* Testcontainers is slower to start (spinning up a real Docker container takes longer than an in-memory database) and requires Docker to be available in the test/CI environment, whereas H2 starts almost instantly with no external dependency — the trade-off is realism and production fidelity (Testcontainers) versus raw speed and simplicity (H2), and the two are often combined strategically rather than treating it as an all-or-nothing choice.
+
+**2. What does `@DynamicPropertySource` do, and why is it necessary with Testcontainers?**
+It registers property values into Spring's `Environment` *before* the application context starts, computed dynamically at test runtime — necessary because a Testcontainers-managed container's JDBC URL, port, and credentials aren't known until the container actually starts, so they can't be hardcoded in `application.yml` ahead of time the way a fixed database connection could be.
+
+*Follow-up: Why must `@DynamicPropertySource` methods be `static`?* Because the properties they register need to be available before the Spring context (and therefore any test instance) is created — a `static` method (paired with a `static` container field) can run during the class-level test lifecycle setup, ahead of context initialization, which an instance method tied to a particular test object's lifecycle couldn't guarantee.
+
+**3. What is `@DataJpaTest`, and what does it configure by default?**
+It's a Spring Boot test slice annotation that loads only JPA-related infrastructure — `@Entity` classes, Spring Data repositories, and the `EntityManager` — along with, by default, an embedded in-memory database (like H2) rather than a full application context. Each test method also runs inside a transaction that's automatically rolled back afterward, so test data never leaks between test methods.
+
+*Follow-up: Why might a team override `@DataJpaTest`'s default embedded database and point it at a Testcontainers-provided instance instead?* Because subtle differences between H2's SQL dialect/behavior and the actual production database (PostgreSQL, MySQL) can cause a query to pass against H2 while behaving differently — or failing outright — against the real engine, especially for native queries or database-specific functions; testing against the same engine used in production closes that fidelity gap.
+
+**4. What does the automatic transaction rollback in `@DataJpaTest` provide, and is it something you'd also want in a broader `@SpringBootTest`-based integration test?**
+It ensures each test method's database changes are undone after the test completes, so tests remain isolated from each other without needing manual cleanup code. Whether the same rollback behavior is desirable in a broader `@SpringBootTest` depends on the test's intent — `@Transactional` can be added to such a test class for the same automatic-rollback convenience, but a genuinely end-to-end test verifying real commit behavior (e.g., across multiple requests) might deliberately want changes to actually persist, in which case relying on automatic rollback would hide real bugs.
+
+*Follow-up: Could relying on automatic rollback ever hide a real bug related to transaction boundaries?* Yes — if the code under test spans multiple independent transactions (e.g., using `REQUIRES_NEW` from Chapter 11), the test's own outer rollback might undo changes that, in production, would have already been independently committed by an inner transaction — masking a scenario where partial data genuinely does persist in production even though the test appears clean because everything got rolled back together.
+
+**5. What is `TestEntityManager`, and how does it differ from the regular `EntityManager`?**
+`TestEntityManager` is a Spring Boot testing utility, available within `@DataJpaTest`, that wraps the standard JPA `EntityManager` with convenience methods better suited for test setup — like `persist()` combined with `flush()` in a single readable step, and helpers for detaching entities to force a fresh database read. It's specifically meant for arranging test data, not for use in application code.
+
+*Follow-up: Why is `entityManager.flush()` often necessary after `persist()` in a test, when application code doesn't usually call it explicitly?* Because Hibernate normally batches and defers actual SQL execution until it's needed (at transaction commit, or when a query would otherwise see stale data) — `flush()` forces those pending changes to be sent to the database immediately, which a test often needs so a subsequent repository query in the same test can actually see the just-persisted data before the test's transaction naturally commits or rolls back.
+
+**6. Why is `@SpringBootTest` combined with `MockMvc` (rather than a full running server) still a reasonable way to write end-to-end tests?**
+It exercises the real, complete application context — real controllers, real security filters, real service and repository beans, real (or Testcontainers-backed) database interactions — while `MockMvc` still simulates the HTTP layer in-process rather than requiring an actual network round trip, keeping the test meaningfully faster and simpler to set up than one requiring a genuinely running server and separate HTTP client.
+
+*Follow-up: In what scenario would `MockMvc` not be sufficient, and a real running server (`WebEnvironment.RANDOM_PORT`) actually be necessary?* When the test needs to exercise something that depends on an actual network connection or a real HTTP client's behavior — testing with a non-Spring HTTP client library, verifying WebSocket behavior, or testing interactions that specifically depend on real serialized bytes going over an actual socket rather than an in-process simulated request.
+
+**7. What is the "singleton container" pattern in Testcontainers, and why would a team use it?**
+It's a pattern where a single container instance is started once (often via a static field in a shared base test class or a JVM shutdown hook) and reused across multiple test classes within the same test run, rather than starting and stopping a fresh container for every test class. This significantly reduces total test suite runtime, since spinning up a real container repeatedly is one of the more expensive parts of Testcontainers-based testing.
+
+*Follow-up: What's a risk of sharing a single container instance across many test classes, and how would you mitigate it?* Test data from one test class could leak into and affect another test class running against the same shared container/database, since there's no automatic rollback boundary spanning across separate test classes the way `@DataJpaTest`'s per-method transaction does. Mitigation typically involves each test class cleaning up its own data explicitly (e.g., in an `@AfterEach`), or using distinct schemas/table prefixes per test class within the shared container.
+
+**8. Why should the containerized database version used in Testcontainers match the version actually used in production?**
+Because the whole value of Testcontainers is production-fidelity — if the tested version diverges materially from production (a different major version with different SQL dialect nuances, different default behaviors, or different available features), tests could pass against the test container while the same code fails against the actual production database, defeating the purpose of testing against a "real" database engine in the first place.
+
+*Follow-up: How would you keep the containerized version and the production version from silently drifting apart over time as the team upgrades the production database?* Pin the Testcontainers image version explicitly (e.g., `postgres:16.4` rather than a floating `latest` or unpinned major-version tag) and treat updating that version as an explicit, reviewed step whenever the production database is upgraded — ideally tracked in the same place (like a shared version property) so the two can't easily go out of sync unnoticed.
+
+**9. What's the practical difference between a unit test with a mocked repository and an integration test using `@DataJpaTest` against a real query?**
+A unit test with a mocked repository never actually executes any SQL/JPQL at all — it only verifies how the service layer *reacts* to a given (fabricated) repository response, and can't catch a bug in the query itself. A `@DataJpaTest` genuinely executes the real derived query or `@Query` annotation against an actual database, catching bugs like an incorrect JPQL expression, a wrong join, or a query that technically compiles but returns the wrong rows.
+
+*Follow-up: Give a concrete example of a bug in a `@Query` annotation that a unit test would never catch, but a `@DataJpaTest` would.* A JPQL query with a subtly wrong condition — say, `WHERE o.total > :minTotal` mistakenly written as `WHERE o.total < :minTotal` — would compile fine and never be exercised by a mocked-repository unit test at all (since the mock's stubbed return value is entirely independent of the real query text), but a `@DataJpaTest` actually running that query against real, known test data would return the wrong result set and fail the test's assertions.
+
+**10. Why does `@SpringBootTest(webEnvironment = WebEnvironment.MOCK)` combined with `@AutoConfigureMockMvc` still count as a legitimate integration test rather than a unit test?**
+Even though it doesn't start a real embedded server, it loads the full, real Spring application context — actual controllers, actual service and repository beans, actual security configuration, and (with Testcontainers) an actual database — meaning the test genuinely exercises the real wiring and behavior across every layer, which is precisely the definition of an integration test, distinct from a unit test's deliberate isolation of a single component with mocked collaborators.
+
+*Follow-up: What would you need to change about this same test setup to also verify the application's behavior under real network conditions (e.g., actual HTTP timeouts or connection handling)?* Switch from `WebEnvironment.MOCK` (with `MockMvc`, which never touches a real network) to `WebEnvironment.RANDOM_PORT`, which starts a real embedded server on an actual (dynamically assigned) port, and use a real HTTP client (`TestRestTemplate` or `WebTestClient`) to make genuine network calls against it — only then would timeout, connection-handling, and other real-network behaviors actually be exercised.
+
+**11. What is the main reason to keep the majority of a test suite as unit tests rather than integration tests, even with Testcontainers making integration tests much more pleasant?**
+Integration tests, even with Testcontainers, remain meaningfully slower than plain Mockito-based unit tests, since they involve starting real infrastructure (or at minimum a partial Spring context) — a test suite dominated by integration tests takes noticeably longer to run, which slows down the tight feedback loop developers rely on during active development. The testing pyramid shape (Chapter 17) exists specifically to balance thorough coverage against a fast, frequently-run suite.
+
+*Follow-up: How would a team decide which specific behaviors deserve an integration test versus being adequately covered by a unit test?* Behaviors that genuinely depend on real infrastructure interaction — the correctness of an actual query, real transaction/rollback behavior, real serialization over the wire, actual security filter behavior — are strong candidates for integration tests, since a mock can't meaningfully verify them. Pure business logic, branching, and calculations that don't depend on any external system are better covered by fast unit tests, reserving the smaller number of integration tests for the parts a mock genuinely can't validate.
+
+**12. What does it mean that Testcontainers requires Docker to be available in the environment running the tests?**
+The library works by programmatically starting and stopping real Docker containers as part of the test lifecycle, so any environment running these tests — a developer's laptop, a CI runner — needs a working Docker (or Docker-compatible) runtime installed and accessible; without it, Testcontainers-based tests simply can't start their required containers and will fail at setup.
+
+*Follow-up: What's a practical implication of this requirement for a team's CI pipeline configuration?* The CI runner or build agent image must have Docker installed and be configured to allow container creation (sometimes requiring "Docker-in-Docker" or a mounted Docker socket, depending on the CI platform), which is an infrastructure/configuration requirement teams need to explicitly account for when first adopting Testcontainers, rather than something that works automatically on every CI provider out of the box.
+
+**13. If a repository method is annotated `@Modifying` (from Chapter 10), how would you test it with `@DataJpaTest`?**
+Call the repository method within the test as usual, then use `TestEntityManager` (or a fresh repository query) to independently verify the expected change actually occurred in the database — since `@Modifying` queries bypass the persistence context (as noted in Chapter 10), it's worth explicitly re-querying rather than assuming an already-loaded entity in memory reflects the change.
+
+*Follow-up: Why might you need to call `entityManager.clear()` before re-querying to verify a `@Modifying` update took effect?* Because the persistence context may still hold a cached, pre-update version of the entity in its first-level cache — a subsequent `findById()` call could return that stale cached instance rather than reflecting the database's actual current state, unless the persistence context is explicitly cleared first to force a fresh read from the database.
+
+**14. What's a good example of something that should be tested with `@WebMvcTest` (Chapter 17) rather than a full Testcontainers-backed integration test?**
+Validation behavior — confirming that a malformed request body correctly triggers a `400 Bad Request` with the expected error shape (Chapter 7) — is purely a web-layer concern that has nothing to do with the database at all; testing it with a full integration test would add real infrastructure overhead for a scenario a `@WebMvcTest` with a mocked service dependency can verify just as correctly, and much faster.
+
+*Follow-up: Conversely, what's a validation-adjacent scenario that genuinely does need a broader integration test instead?* A uniqueness constraint enforced at the database level (e.g., a unique index on an email column) rather than purely via Bean Validation annotations — confirming that attempting to insert a duplicate correctly surfaces as an appropriate application-level error requires actually hitting a real database that enforces that constraint, which a `@WebMvcTest` with a mocked service layer would never exercise at all.
+
+**15. How would you decide, for a new piece of functionality, exactly which combination of tests from Chapters 17 and 18 to write?**
+Start with fast, mocked unit tests covering the business logic's branches and edge cases in isolation. Add a `@WebMvcTest` if the functionality is exposed via a new or changed endpoint, to verify request binding, validation, and status codes. Add a `@DataJpaTest` (ideally with Testcontainers) if new or changed queries need verifying against a real database engine. Reserve a broader `@SpringBootTest`/Testcontainers-based test for confirming the pieces genuinely work together end-to-end, rather than duplicating what the narrower, faster tests already cover.
+
+*Follow-up: If time or resources were constrained and only one of these could be written for a given feature, which would you prioritize, and why?* The fast, mocked unit tests covering the business logic — they run in milliseconds, can be written and iterated on quickly, and typically catch the largest number of real logic bugs per unit of effort; a broader integration test adds valuable end-to-end confidence but at a much higher cost per test, making it the right thing to add once time allows rather than the first line of defense.

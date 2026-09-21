@@ -1,0 +1,154 @@
+---
+title: "Map Implementations: HashMap Internals, LinkedHashMap, TreeMap, Hashtable"
+description: "How HashMap resolves collisions with buckets and (since Java 8) balanced trees, LinkedHashMap's LRU-cache use case, TreeMap's sorted keys, and why Hashtable is legacy."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Strings, Generics & Collections"
+chapter: 21
+totalChapters: 65
+slug: "map-implementations"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "collections", "map", "hashmap-internals"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 14
+---
+
+## `HashMap` Internals — How It Actually Works
+
+A `HashMap` stores entries in an array of **buckets**. For each `put(key, value)`:
+
+1. `key.hashCode()` is computed, then run through an internal "spreading" function to reduce collision clustering.
+2. That spread hash is reduced modulo the array length to pick a bucket index.
+3. If the bucket is empty, a new entry is placed there directly.
+4. If the bucket already has entries (a **collision**), the new entry is added to that bucket's internal structure, after checking each existing entry's key with `equals()` to see if it's actually an update to an existing key rather than a new one.
+
+```java
+Map<String, Integer> ages = new HashMap<>();
+ages.put("Rahul", 30);   // hashCode("Rahul") -> spread -> bucket index -> stored there
+ages.put("Priya", 28);
+System.out.println(ages.get("Rahul"));   // 30 — same hashCode -> same bucket -> equals() confirms match
+```
+
+![Diagram: HashMap bucket array with two keys hashing to the same bucket, shown chained together as a linked list of entries within that bucket](/diagrams/ch21-hashmap-buckets-collision.svg)
+
+### Collision Resolution: Linked List → Red-Black Tree (Java 8+)
+
+Historically, each bucket was a simple linked list of colliding entries — fine when collisions are rare, but a degenerate case (many keys colliding, whether from bad hash codes or a deliberate hash-flooding attack) turns lookups within that bucket into O(n). **Since Java 8**, if a single bucket's chain grows beyond a threshold (8 entries, with the table also being at least 64 buckets total), that bucket's linked list is converted into a **Red-Black tree**, capping worst-case lookup within a bucket at O(log n) instead of O(n).
+
+### Resizing and Load Factor
+
+A `HashMap` starts with a default capacity of 16 buckets and a default **load factor** of 0.75 — once the number of entries exceeds 75% of the current capacity, the table doubles in size and every entry is rehashed into the new, larger bucket array. This resize is an O(n) operation, but it's infrequent enough that `put()`/`get()` remain O(1) *amortized*.
+
+```java
+Map<String, Integer> map = new HashMap<>(64);   // pre-size to reduce resize operations if the final size is roughly known
+```
+
+## `LinkedHashMap` — Predictable Order, Built-In LRU Support
+
+Like `LinkedHashSet` relative to `HashSet`, `LinkedHashMap` extends `HashMap` while threading a linked list through entries to preserve iteration order — by default, insertion order.
+
+```java
+Map<String, Integer> map = new LinkedHashMap<>();
+map.put("b", 2);
+map.put("a", 1);
+map.put("c", 3);
+System.out.println(map);   // {b=2, a=1, c=3} — insertion order preserved
+```
+
+`LinkedHashMap` also supports **access order** and overriding `removeEldestEntry()`, making it the standard building block for a simple **LRU (Least Recently Used) cache**:
+
+```java
+Map<String, Integer> lruCache = new LinkedHashMap<>(16, 0.75f, true) {   // true = access order
+    @Override
+    protected boolean removeEldestEntry(Map.Entry<String, Integer> eldest) {
+        return size() > 3;   // evict the least-recently-used entry once capacity is exceeded
+    }
+};
+```
+
+## `TreeMap` — Sorted Keys via Red-Black Tree
+
+`TreeMap` keeps keys in sorted order at all times (natural order or a supplied `Comparator`), backed by the same kind of Red-Black tree structure as `TreeSet` (in fact, `TreeSet` is internally implemented as a thin wrapper around a `TreeMap`).
+
+```java
+Map<String, Integer> sorted = new TreeMap<>();
+sorted.put("banana", 2);
+sorted.put("apple", 1);
+sorted.put("cherry", 3);
+System.out.println(sorted);   // {apple=1, banana=2, cherry=3} — always sorted by key
+
+TreeMap<String, Integer> treeMap = (TreeMap<String, Integer>) sorted;
+System.out.println(treeMap.firstKey());          // apple
+System.out.println(treeMap.ceilingKey("b"));     // banana
+```
+
+## `Hashtable` — Legacy and Effectively Obsolete
+
+`Hashtable` predates the Collections Framework (Java 1.0), synchronizes every method (like `Vector`), and disallows both `null` keys and `null` values (unlike `HashMap`, which allows one `null` key and any number of `null` values). In modern code, prefer `HashMap` for single-threaded use and `ConcurrentHashMap` (Chapter 41) for genuine concurrent use — `Hashtable` offers no real advantage over either.
+
+## Comparison Table
+
+| | Order | Null keys/values | Thread-safe | Backing structure |
+|---|---|---|---|---|
+| `HashMap` | None | 1 null key, many null values | No | Buckets (+ tree for large collisions) |
+| `LinkedHashMap` | Insertion or access order | 1 null key, many null values | No | Buckets + linked list |
+| `TreeMap` | Sorted by key | No null keys (values OK*) | No | Red-Black tree |
+| `Hashtable` | None | No nulls at all | Yes (synchronized) | Buckets (legacy) |
+
+*`TreeMap` allows null *values* but not null *keys* by default, since keys must be comparable.
+
+## Key Takeaways
+
+- `HashMap` resolves collisions with per-bucket linked lists, upgraded to Red-Black trees for heavily-collided buckets since Java 8.
+- The default load factor (0.75) balances memory usage against collision frequency; resizing is O(n) but infrequent, keeping average operations O(1).
+- `LinkedHashMap` with access-order mode plus `removeEldestEntry()` is the standard way to build a simple LRU cache.
+- `Hashtable` is legacy and synchronized; prefer `HashMap` or `ConcurrentHashMap` in all new code.
+
+---
+
+## Interview Questions
+
+**1. Walk through exactly what happens internally when you call `hashMap.put(key, value)`.**
+The key's `hashCode()` is computed and passed through an internal spreading function (XOR-ing high and low bits) to reduce clustering, then reduced modulo the bucket array length to select a bucket index. If that bucket is empty, the entry is inserted directly. If not (a collision), the map walks the bucket's existing entries, calling `equals()` on each key to check whether this is an update to an existing key (in which case the value is replaced) or a genuinely new colliding key (in which case it's added to the bucket's structure). If the total entry count then exceeds the load-factor threshold, the whole table is resized and rehashed.
+
+**2. What is a hash collision, and how does `HashMap` handle it?**
+A collision occurs when two different keys produce the same bucket index (either from having the same hash code, or from unrelated hash codes happening to reduce to the same index modulo the table size). `HashMap` handles this by storing all colliding entries together within that single bucket — historically as a simple linked list, and since Java 8, automatically converted into a Red-Black tree if that bucket's chain grows past a threshold (8 entries, with the table at least 64 buckets total), bounding worst-case lookup at O(log n) instead of degrading to O(n).
+
+**3. What is the default initial capacity and load factor of a `HashMap`, and what does the load factor actually control?**
+Default initial capacity is 16 buckets; default load factor is 0.75. The load factor is the threshold, expressed as a fraction of capacity, at which the map resizes — once `size() > capacity * loadFactor` (i.e., past 12 entries in a fresh 16-bucket map), the map doubles its bucket array and rehashes every existing entry into the new array.
+
+**4. Why does a `HashMap` resize by doubling its capacity rather than growing by some fixed increment?**
+Doubling keeps the *amortized* cost of insertions constant (O(1)) over the map's whole lifetime — this is the same amortized-growth reasoning used for `ArrayList`'s resizing (Chapter 19). A fixed increment would mean resizing (an O(n) operation) happens proportionally more often as the map grows, degrading average insertion performance as the map gets larger.
+
+**5. What changed about `HashMap`'s internal bucket structure in Java 8, and why?**
+Before Java 8, every bucket was a simple singly-linked list of colliding entries, giving O(n) worst-case lookup within a heavily-collided bucket. Java 8 introduced automatic treeification: once a single bucket's chain length exceeds 8 entries (and the overall table has at least 64 buckets), that bucket's list is converted into a Red-Black tree, capping worst-case lookup within that bucket at O(log n) — this specifically defends against pathological cases like many keys with identical or maliciously-crafted colliding hash codes.
+
+**6. Can a `HashMap` have a `null` key? Can it have `null` values? What about `Hashtable`?**
+`HashMap` permits exactly one `null` key (stored conventionally in bucket 0, since `null.hashCode()` isn't callable) and any number of `null` values. `Hashtable` permits neither — attempting `put(null, value)` or `put(key, null)` throws `NullPointerException` immediately, a stricter, older design choice from before `HashMap` existed.
+
+**7. Why is `Hashtable` considered obsolete for new code, given that it's thread-safe?**
+Its synchronization locks the entire map for every operation (much like `Vector`'s per-method synchronization), which is both slower than necessary for single-threaded use and still doesn't provide safe compound operations (like "check then put") without additional external locking, since each individual method call is atomic but sequences of calls aren't. `ConcurrentHashMap` (Chapter 41) offers genuinely better-designed concurrency (fine-grained locking, atomic compound operations like `computeIfAbsent`) for actual multi-threaded use, while plain `HashMap` is the right choice for single-threaded code.
+
+**8. How does `LinkedHashMap` differ structurally from `HashMap`, and what's the extra memory cost?**
+It extends `HashMap` and additionally maintains a doubly-linked list threading through every entry (in insertion or access order, depending on configuration), meaning each entry carries two extra pointer references (`before`/`after`) beyond what a plain `HashMap` entry needs. This modest overhead buys predictable, stable iteration order that plain `HashMap` cannot offer at all.
+
+**9. How would you implement a simple LRU cache using `LinkedHashMap`?**
+Construct it with the access-order constructor flag set to `true` (`new LinkedHashMap<>(capacity, 0.75f, true)`), which reorders entries so that every `get()` moves the accessed entry to the end (most-recently-used position). Then override `removeEldestEntry(Map.Entry eldest)` to return `true` once `size()` exceeds your desired maximum capacity — the map automatically evicts the eldest (least-recently-used) entry on the next `put()` whenever that condition is met.
+
+**10. Why does `TreeMap` require keys to be mutually comparable, and what happens if they aren't?**
+Because `TreeMap` continuously maintains sorted order internally via a Red-Black tree, every key insertion must be compared against existing keys to determine its correct position. If keys don't implement `Comparable` (and no `Comparator` was supplied at construction), or if a supplied `Comparator`/`Comparable` implementation throws when comparing two specific keys (e.g., mixing genuinely incompatible types), a `ClassCastException` is thrown at the point of insertion.
+
+**11. What is the relationship between `TreeSet` and `TreeMap` internally?**
+`TreeSet` is implemented internally as a thin wrapper around a `TreeMap`, where each element added to the set becomes a key in the backing map, paired with a shared dummy constant value — essentially the same relationship `HashSet` has with `HashMap`.
+
+**12. What does `HashMap.get()` do differently in Java 8+ if it lands on a treeified bucket versus a linked-list bucket?**
+For a linked-list bucket, `get()` walks the chain sequentially, comparing each entry's key with `equals()` until a match is found — O(n) worst case for that bucket. For a treeified bucket, `get()` uses the Red-Black tree's comparison-based navigation (using either the keys' natural ordering if `Comparable`, or their hash codes as a tie-breaking comparison) to locate the entry in O(log n) worst case for that bucket, regardless of how many entries have collided there.
+
+**13. Why might you pre-size a `HashMap` (e.g., `new HashMap<>(200)`) when you already know roughly how many entries it will hold?**
+Pre-sizing avoids the repeated O(n) resize-and-rehash operations that would otherwise occur as the map grows incrementally past each successive load-factor threshold, since the map can allocate an appropriately large bucket array upfront. This is a meaningful optimization when populating a large map in a tight loop or from a known-size data source, at essentially no downside if the estimate is reasonably accurate.
+
+**14. Is `HashMap` iteration order the same as insertion order? Why do people sometimes mistakenly believe it is?**
+No — `HashMap` gives no ordering guarantee at all, and its actual iteration order depends on bucket placement (a function of each key's hash code and the table's current capacity), which frequently happens to *resemble* insertion order for small maps with certain small-integer or short-string keys under the current default capacity, purely by coincidence of how those particular hash codes distribute into buckets. This apparent (but unreliable) pattern breaks as soon as the map resizes, uses different key types, or runs under a different JVM version, which is exactly why `LinkedHashMap` exists for anyone who genuinely needs guaranteed order.

@@ -1,0 +1,150 @@
+---
+title: "String, StringBuilder & StringBuffer Deep Dive"
+description: "String immutability and the string constant pool, why heavy concatenation is expensive, StringBuilder vs StringBuffer, and common String API pitfalls."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Strings, Generics & Collections"
+chapter: 16
+totalChapters: 65
+slug: "string-stringbuilder-stringbuffer"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "strings", "performance"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## Strings Are Immutable
+
+Once created, a `String` object's character content can never change. Every operation that appears to "modify" a string actually returns a brand-new `String` object.
+
+```java
+String s = "hello";
+s.concat(" world");        // creates a NEW string, doesn't touch "hello"
+System.out.println(s);     // still just "hello"
+
+s = s.concat(" world");    // must reassign to capture the new string
+System.out.println(s);     // "hello world"
+```
+
+Immutability gives strings three big practical benefits: they're safe to share freely across threads without synchronization, safe to use as `HashMap` keys (their hash code can be cached once and never becomes stale), and safe to cache/intern for reuse.
+
+## The String Constant Pool
+
+String literals are stored in a special memory region called the **string constant pool**, and the JVM automatically reuses an existing pooled string rather than creating a duplicate for identical literals.
+
+```java
+String a = "hello";
+String b = "hello";
+System.out.println(a == b);   // true — both point to the SAME pooled object
+
+String c = new String("hello");
+System.out.println(a == c);   // false — new String() forces a new heap object, bypassing the pool
+
+System.out.println(a.equals(c));   // true — content is equal, even though references differ
+```
+
+![Diagram: string constant pool holding one "hello" object referenced by both variables a and b, versus a separate heap object created by new String("hello") referenced by c](/diagrams/ch16-string-pool.svg)
+
+`c.intern()` would return the pooled reference, making `a == c.intern()` true — but relying on `==` for string comparison is fragile regardless; **always use `.equals()`** for content comparison.
+
+## Why Heavy Concatenation with `+` Is Expensive
+
+```java
+String result = "";
+for (int i = 0; i < 10000; i++) {
+    result += i;   // creates a NEW String object on every single iteration!
+}
+```
+
+Because strings are immutable, each `+=` in this loop discards the previous string and allocates an entirely new one containing the combined characters — for 10,000 iterations, that's roughly 10,000 intermediate, mostly-garbage `String` objects. (The compiler *does* optimize a single-statement chain of `+` operations like `"a" + "b" + "c"` into one efficient `StringBuilder` call internally — the real cost is concatenation *inside a loop*, across separate statements, which the compiler cannot see as one combinable operation.)
+
+## `StringBuilder` — Mutable, Fast, Single-Threaded
+
+```java
+StringBuilder sb = new StringBuilder();
+for (int i = 0; i < 10000; i++) {
+    sb.append(i);   // mutates the SAME internal buffer — no new object per iteration
+}
+String result = sb.toString();
+```
+
+`StringBuilder` maintains a resizable internal `char[]` buffer and mutates it in place, making loop-based string building dramatically faster than repeated `+=` concatenation.
+
+## `StringBuffer` — The Thread-Safe (and Mostly Obsolete) Predecessor
+
+`StringBuffer` has an identical API to `StringBuilder` but synchronizes every method internally, making it safe to share across threads at the cost of synchronization overhead on every call — even in the overwhelmingly common case where only one thread ever touches it.
+
+| | Mutable | Thread-safe | Typical use |
+|---|---|---|---|
+| `String` | ❌ | ✅ (immutable = inherently safe) | General text, map keys, constants |
+| `StringBuilder` | ✅ | ❌ | Building strings in a single thread (the default choice) |
+| `StringBuffer` | ✅ | ✅ (synchronized) | Legacy code; rarely chosen in new code — prefer `StringBuilder` plus explicit synchronization if truly needed |
+
+In practice, `StringBuilder` is the correct default for almost all string-building code today; `StringBuffer` mostly persists for backward compatibility with pre-Java-5 code.
+
+## Common `String` API Pitfalls
+
+```java
+"Hello".equals("hello");        // false — case-sensitive
+"Hello".equalsIgnoreCase("hello"); // true
+
+String s = null;
+// s.equals("test");   // NullPointerException — s is null, can't call a method on it
+"test".equals(s);       // false — safe direction, never throws (Yoda-style comparison)
+
+"  hello  ".trim();     // "hello" — removes leading/trailing whitespace (ASCII-only definition)
+"  hello  ".strip();    // "hello" — Unicode-aware whitespace trimming (Java 11+, prefer this)
+```
+
+## Key Takeaways
+
+- `String` is immutable — every "modifying" method returns a new object.
+- Literal strings are pooled and reused automatically; `new String(...)` deliberately bypasses the pool.
+- Use `StringBuilder` for loop-based or heavy string construction; avoid `+=` concatenation in loops.
+- `StringBuffer` is thread-safe but rarely needed today — `StringBuilder` is the standard default choice.
+
+---
+
+## Interview Questions
+
+**1. Why is `String` immutable in Java, and what are the practical benefits of that design choice?**
+Once created, a `String`'s internal character data can never be changed — any apparent modification produces a new object. This makes strings inherently thread-safe to share without synchronization, safe to use as `HashMap`/`HashSet` keys since their hash code never changes after creation and can be cached, and safe to pool/reuse identical literals, since no code holding a reference to a pooled string can ever corrupt it for other holders of that same reference.
+
+**2. What is the string constant pool, and how does it relate to string literals vs. `new String(...)`?**
+It's a special memory area (part of the heap since Java 7) where string literals are stored and automatically deduplicated — identical literal strings across your program share the exact same object. `new String("hello")` deliberately bypasses this pool and always allocates a fresh, separate object on the heap, even if an identical literal already exists in the pool.
+
+**3. What does `String.intern()` do?**
+It returns the canonical pooled reference for a given string's content — if an equal string already exists in the pool, that pooled reference is returned; otherwise, the string is added to the pool and that reference is returned. This lets you force a heap-allocated string (from `new String(...)` or concatenation) to be `==`-comparable with pool literals, though relying on `intern()` plus `==` for correctness is uncommon and `.equals()` remains the right default for content comparison.
+
+**4. Why is using `+=` for string concatenation inside a loop considered a performance problem?**
+Because strings are immutable, each `+=` discards the previous string object and allocates an entirely new one containing the combined characters, copying all prior content each time. Across many loop iterations, this produces a large number of short-lived intermediate objects and repeated copying, which is significantly slower and more garbage-collector-intensive than mutating a single resizable buffer.
+
+**5. Does the compiler always convert `+` concatenation into inefficient repeated allocation?**
+No — for a single expression like `"a" + b + "c"` written as one statement, the compiler (via `invokedynamic` and `StringConcatFactory` in modern Java) generates efficient combined concatenation code, roughly equivalent to using a single `StringBuilder` internally. The real inefficiency arises specifically when concatenation happens across multiple separate statements inside a loop, which the compiler cannot collapse into a single operation since it doesn't know the loop's full extent at compile time in the same way.
+
+**6. What is the core difference between `StringBuilder` and `StringBuffer`?**
+Functionally, their APIs are essentially identical — both provide a mutable, resizable character buffer with `append`, `insert`, `delete`, etc. The difference is that every method on `StringBuffer` is `synchronized`, making it safe for concurrent access from multiple threads at the cost of locking overhead on every call, while `StringBuilder` has no such synchronization and is faster for the overwhelmingly common single-threaded use case.
+
+**7. In modern Java code, when (if ever) would you choose `StringBuffer` over `StringBuilder`?**
+Almost never for new code — even in a genuinely multi-threaded context, it's usually better to confine a `StringBuilder` to a single thread's local scope (e.g., building a string entirely within one method call) rather than sharing a mutable string buffer across threads at all. `StringBuffer` mainly persists today for legacy compatibility with code written before `StringBuilder` was introduced in Java 5.
+
+**8. What's the difference between `String.trim()` and `String.strip()`?**
+`trim()` removes leading and trailing characters with a code point value `<= U+0020` (essentially ASCII whitespace, plus some control characters), using a definition that predates full Unicode awareness. `strip()` (Java 11+) uses `Character.isWhitespace()`, which correctly recognizes the broader set of Unicode whitespace characters — `strip()` is the more correct, and now generally preferred, choice.
+
+**9. Why does calling `.equals()` on a potentially-null string variable risk a `NullPointerException`, and how do you avoid it defensively?**
+If the variable itself is `null`, calling any method on it (including `.equals()`) throws immediately, since there's no object to invoke the method on. The common defensive pattern flips the comparison order — calling `.equals()` on a known non-null literal or constant instead, e.g., `"expected".equals(possiblyNullVariable)` — which safely returns `false` if the variable is `null`, rather than throwing.
+
+**10. What is the difference between `String.equals()` and `==` when comparing two `String` variables?**
+`==` compares whether both references point to the exact same object in memory — which may or may not be true even for strings with identical content, depending on whether they came from the pool or from `new String(...)`. `.equals()` compares the actual character content, returning true whenever two strings hold the same sequence of characters, regardless of whether they're the same object.
+
+**11. How does `String`'s immutability enable it to be used safely as a `HashMap` key?**
+Because a `String`'s content (and therefore its `hashCode()`) can never change after construction, the JVM/`String` class can safely compute and cache the hash code once. If strings were mutable, modifying a string after using it as a `HashMap` key could change its hash code, causing the entry to become permanently unreachable in its original bucket — a serious and hard-to-detect data-integrity bug that immutability entirely prevents by design.
+
+**12. What is `String.format()` used for, and how does it compare to concatenation for building formatted output?**
+It builds a string using a C-style format template with placeholders (`%s`, `%d`, `%.2f`, etc.), similar to `printf`, which is often more readable than assembling the same output through a long chain of concatenated pieces and type conversions — especially when embedding multiple typed values into a fixed message structure, such as log messages or user-facing text.
+
+**13. Given a loop that builds a large string from many pieces, walk through why `StringBuilder` is the correct tool and roughly how it achieves better performance internally.**
+`StringBuilder` maintains one resizable internal `char[]` array. Each `append()` call writes directly into that existing buffer (growing and copying to a larger backing array only occasionally, when capacity is exceeded, using amortized doubling), rather than allocating and copying an entirely new string object on every single append the way repeated `+=` on an immutable `String` would. This reduces both the total number of allocations and the total amount of character-copying work across the whole loop from roughly quadratic (with naive `+=`) to near-linear.

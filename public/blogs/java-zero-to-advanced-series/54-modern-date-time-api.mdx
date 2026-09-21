@@ -1,0 +1,154 @@
+---
+title: "The Modern Date-Time API (java.time)"
+description: "Why java.util.Date/Calendar were replaced, the immutable java.time types (LocalDate, LocalDateTime, ZonedDateTime, Instant), Duration/Period, and formatting."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Modern Java (9-21)"
+chapter: 54
+totalChapters: 65
+slug: "modern-date-time-api"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "date-time", "java-time", "java8"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## Why `java.util.Date`/`Calendar` Were Replaced
+
+The original `java.util.Date` and `java.util.Calendar` (pre-Java 8) had well-documented, serious design problems: `Date` is **mutable** (dangerous for a value meant to represent a fixed point in time — any code holding a reference can silently change it out from under you), month values were confusingly **zero-indexed** (January is `0`), year values were offset from 1900, and the API generally lacked clarity around time zones. `java.time` (Java 8+, based on the well-regarded Joda-Time library) replaced all of it with a coherent, fully **immutable**, clearly-named set of types.
+
+## The Core Types
+
+```java
+LocalDate date = LocalDate.of(2026, 9, 15);         // date only, no time, no time zone — "September 15, 2026"
+LocalTime time = LocalTime.of(14, 30);               // time only, no date — "2:30 PM"
+LocalDateTime dateTime = LocalDateTime.of(date, time); // date + time, still NO time zone
+
+ZonedDateTime zoned = ZonedDateTime.of(dateTime, ZoneId.of("Asia/Kolkata"));   // date + time + time zone
+Instant instant = Instant.now();   // a single, unambiguous point on the UTC timeline (like a Unix timestamp)
+```
+
+![Diagram: hierarchy of java.time types showing LocalDate/LocalTime combining into LocalDateTime, which combines with a ZoneId to form ZonedDateTime, alongside Instant as a separate UTC-timeline point](/diagrams/ch54-java-time-type-relationships.svg)
+
+**Choosing the right type matters:**
+- **`LocalDate`/`LocalTime`/`LocalDateTime`** — for representing a date/time as understood by a specific person or context, deliberately with **no time zone attached** (a birthday, a meeting scheduled "at 2pm" in whatever zone the reader is in).
+- **`ZonedDateTime`** — when the time zone itself is a meaningful, necessary part of the value (a flight departure time, a scheduled event across time zones).
+- **`Instant`** — a single, unambiguous point on the UTC timeline, ideal for timestamps (logging, "this event occurred at exactly...") where a specific human-readable zone/calendar representation isn't the point.
+
+## Everything Is Immutable — Operations Return New Instances
+
+```java
+LocalDate today = LocalDate.now();
+LocalDate nextWeek = today.plusWeeks(1);   // returns a NEW LocalDate — "today" itself is unchanged
+
+System.out.println(today);      // still the original date
+System.out.println(nextWeek);   // one week later
+```
+
+This mirrors `String`'s immutability (Chapter 16) — a very common bug when first learning `java.time` is forgetting to capture the returned value, exactly as with `String.concat()`.
+
+## `Duration` vs. `Period` — Time-Based vs. Date-Based Amounts
+
+```java
+Duration duration = Duration.ofHours(3).plusMinutes(30);   // a precise amount of TIME: "3 hours 30 minutes"
+Period period = Period.of(1, 2, 15);                          // a calendar-based amount: "1 year, 2 months, 15 days"
+
+LocalDateTime later = LocalDateTime.now().plus(duration);
+LocalDate futureDate = LocalDate.now().plus(period);
+```
+
+`Duration` measures time in exact seconds/nanoseconds — appropriate for `Instant`/`LocalTime`/`LocalDateTime` where a fixed, precise elapsed time makes sense. `Period` measures in years/months/days — appropriate for `LocalDate`, where "one month later" should sensibly land on the same day-of-month next month (accounting for varying month lengths), rather than representing a fixed number of elapsed seconds.
+
+## Formatting and Parsing with `DateTimeFormatter`
+
+```java
+DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm");
+
+LocalDateTime dateTime = LocalDateTime.of(2026, 9, 15, 14, 30);
+String formatted = dateTime.format(formatter);       // "15-09-2026 14:30"
+
+LocalDateTime parsed = LocalDateTime.parse("15-09-2026 14:30", formatter);
+```
+
+`DateTimeFormatter` instances are immutable and **thread-safe** — unlike the old `java.text.SimpleDateFormat`, which was notoriously **not** thread-safe (a shared `SimpleDateFormat` instance used concurrently from multiple threads could produce silently corrupted results) and required careful per-thread instantiation or explicit synchronization to use safely in concurrent code.
+
+## Converting Between Legacy `Date` and `java.time` (For Interop)
+
+```java
+// Legacy Date -> Instant -> modern type
+Date legacyDate = new Date();
+Instant instant = legacyDate.toInstant();
+LocalDateTime modern = LocalDateTime.ofInstant(instant, ZoneId.systemDefault());
+
+// Modern type -> Instant -> legacy Date
+Date backToLegacy = Date.from(instant);
+```
+
+This conversion path is commonly needed when integrating with older libraries or database drivers that still expose `java.util.Date`-based APIs.
+
+## Common Pitfalls
+
+```java
+// WRONG — forgetting immutability means operations don't happen "in place"
+LocalDate date = LocalDate.now();
+date.plusDays(5);              // return value is DISCARDED — date is unchanged!
+System.out.println(date);      // still today's date, not 5 days from now
+
+// CORRECT
+date = date.plusDays(5);
+```
+
+```java
+// Month is 1-indexed in java.time (unlike the old Calendar's confusing 0-indexed months)
+LocalDate date = LocalDate.of(2026, 9, 15);   // September, correctly, as 9
+```
+
+## Key Takeaways
+
+- `java.time` (Java 8+) replaced the mutable, confusingly-indexed `Date`/`Calendar` with immutable, clearly-named, thread-safe types.
+- Choose `LocalDate`/`LocalDateTime` for zone-less human-context values, `ZonedDateTime` when the zone matters, and `Instant` for unambiguous UTC timestamps.
+- `Duration` measures precise elapsed time; `Period` measures calendar-based amounts (years/months/days) — use the one matching your value's semantics.
+- Every `java.time` operation returns a new instance rather than mutating in place — always capture the returned value.
+
+---
+
+## Interview Questions
+
+**1. What were the main problems with `java.util.Date` and `java.util.Calendar` that motivated `java.time`'s introduction?**
+`Date` was mutable, which is dangerous for a type meant to represent a fixed point in time — any code holding a reference could silently alter it. Months were confusingly zero-indexed (January was `0`), years were offset from 1900 in some constructors, the API's handling of time zones was unclear and error-prone, and much of the API (like most of `Date`'s own methods) had been deprecated for years without a coherent, fully-supported replacement until `java.time` arrived in Java 8.
+
+**2. What's the difference between `LocalDate`, `LocalDateTime`, and `ZonedDateTime`?**
+`LocalDate` represents a date only (year, month, day) with no time component and no time zone. `LocalDateTime` adds a time-of-day component but still has no time zone attached — both represent values "as understood in some unspecified context," not tied to any specific zone. `ZonedDateTime` adds an explicit `ZoneId`, representing a specific, unambiguous moment as understood in a particular time zone, appropriate when the zone itself carries real meaning for the value.
+
+**3. When would you choose `Instant` over `ZonedDateTime`?**
+`Instant` represents a single, unambiguous point on the UTC timeline with no calendar or human-readable representation at all — ideal for timestamps like "this log entry was recorded at exactly this instant" or for storing/comparing moments in time where a specific zone's calendar representation isn't relevant. `ZonedDateTime` is more appropriate when you specifically need to represent or display that moment in the context of a particular time zone, such as showing a user their local time for an event.
+
+**4. Why is it important that all `java.time` types are immutable, and what's a common bug that arises from forgetting this?**
+Immutability makes these types inherently thread-safe and eliminates a class of bugs where a shared date/time value is accidentally modified by one part of a program, silently affecting other code holding the same reference — directly analogous to `String`'s immutability rationale (Chapter 16). A common bug is calling a method like `date.plusDays(5);` and discarding the returned value, mistakenly expecting `date` itself to have been modified in place, when in fact a *new* `LocalDate` instance was returned and the original `date` remains completely unchanged.
+
+**5. What's the difference between `Duration` and `Period`, and when would you use each?**
+`Duration` represents a precise, time-based amount measured in seconds and nanoseconds, appropriate for time-of-day or instant-based values (`LocalTime`, `LocalDateTime`, `Instant`) where exact elapsed time is the relevant concept. `Period` represents a calendar-based amount measured in years, months, and days, appropriate for `LocalDate` values, where "one month later" should sensibly land on the corresponding day of the following month (correctly handling varying month lengths, like January 31st plus one month correctly becoming the end of February) rather than representing some fixed number of elapsed seconds.
+
+**6. Why is `DateTimeFormatter` preferred over the legacy `SimpleDateFormat` for formatting and parsing dates?**
+`DateTimeFormatter` instances are immutable and fully thread-safe, so a single shared instance can be safely reused and called concurrently from multiple threads without any risk of corrupted results. `SimpleDateFormat` is explicitly **not** thread-safe — sharing a single instance across threads without external synchronization can produce silently incorrect, corrupted parsing or formatting results, a well-known and easy-to-hit pitfall in older Java codebases.
+
+**7. How would you convert a legacy `java.util.Date` object into a modern `LocalDateTime`?**
+Call `.toInstant()` on the legacy `Date` to get an `Instant` (an unambiguous UTC point in time), then use `LocalDateTime.ofInstant(instant, zoneId)` with an appropriate `ZoneId` (such as `ZoneId.systemDefault()`) to interpret that instant in a specific time zone and produce the corresponding `LocalDateTime`.
+
+**8. Is a month value in `java.time`'s `LocalDate` zero-indexed or one-indexed?**
+One-indexed — `LocalDate.of(2026, 9, 15)` represents September (month `9`) the 15th, 2026, directly matching the intuitive, everyday numbering of months. This is a deliberate improvement over the old `java.util.Calendar`, where month values were confusingly zero-indexed (`Calendar.SEPTEMBER` was actually `8`), a very common source of off-by-one bugs in legacy code.
+
+**9. What would happen if you wrote `LocalDate date = LocalDate.now(); date.plusMonths(1);` and expected `date` to now represent next month?**
+Nothing would change — `plusMonths()` (like every `java.time` mutating-looking method) returns a *new* `LocalDate` instance representing the calculated result, without modifying the original `date` object at all, since `LocalDate` is immutable. The original `date` variable still refers to today's date; the calculated next-month value is simply discarded unless it's captured, e.g., `date = date.plusMonths(1);`.
+
+**10. Why might representing a scheduled meeting time as a `ZonedDateTime` rather than a `LocalDateTime` matter for an application with users across different time zones?**
+A `LocalDateTime` alone ("2pm on September 15th") is ambiguous without additional context about which time zone that "2pm" refers to — the same `LocalDateTime` value could represent genuinely different actual moments for users in different zones. A `ZonedDateTime` explicitly captures the intended zone as part of the value itself, allowing the application to correctly and unambiguously convert and display that scheduled moment correctly for users viewing it from different time zones, rather than requiring separate, error-prone tracking of "which zone was this actually meant in."
+
+**11. Can you directly compare a `LocalDateTime` and a `ZonedDateTime` for equality or ordering?**
+Not directly and meaningfully in most cases — they represent fundamentally different kinds of values (one zone-less, one zone-aware), and comparing them requires an explicit, deliberate conversion first (e.g., attaching a specific zone to the `LocalDateTime` via `atZone(zoneId)` to produce a comparable `ZonedDateTime`, or extracting just the `LocalDateTime` portion from the `ZonedDateTime` if the zone genuinely doesn't matter for that specific comparison) — `java.time`'s type system deliberately keeps these distinct to avoid the kind of ambiguous, silently-incorrect comparisons that plagued the old `Date`/`Calendar` API.
+
+**12. Why does `java.time` provide both `Period.between(date1, date2)` and `Duration.between(instant1, instant2)` rather than a single universal "difference" method?**
+Because the *meaning* of "difference" depends fundamentally on the types involved — a calendar-based difference between two dates (years/months/days, correctly accounting for varying month lengths and leap years) is a conceptually different kind of measurement than a precise, exact time-based difference between two instants (measured in seconds/nanoseconds, with no calendar irregularities to account for at all). Providing two distinct methods, each returning the semantically appropriate result type (`Period` or `Duration`), keeps that important distinction explicit rather than trying to force both concepts through one ambiguous, one-size-fits-all API.

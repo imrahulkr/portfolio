@@ -1,0 +1,233 @@
+---
+title: "Service Discovery with Eureka"
+description: "Once a system has more than one service, hardcoding IP addresses and ports breaks the moment anything scales or restarts. Eureka solves the first real infrastructure problem microservices create."
+date: "2026-09-14"
+readTime: "11 min read"
+series: "spring-boot"
+part: 24
+tags: ["Spring Boot", "Microservices", "Eureka", "Service Discovery"]
+---
+
+Chapter 23 made the case for splitting into services deliberately. The moment you do, a basic question appears that a monolith never had to answer: if `order-service` needs to call `inventory-service`, how does it know *where* `inventory-service` currently is?
+
+## Why hardcoded addresses don't work
+
+```yaml
+# The naive, broken approach
+inventory:
+  url: http://10.0.1.15:8081
+```
+
+This breaks the moment `inventory-service` is redeployed to a new instance (a new IP), scaled to multiple instances (which one?), or an instance crashes and is replaced. In a containerized, auto-scaled environment (Chapter 35), instances come and go constantly — a hardcoded address is stale almost immediately.
+
+## Service discovery, conceptually
+
+A **service registry** is a database of currently-running service instances, updated in near real time as instances start, stop, and report their health. Instead of a service hardcoding another service's address, it asks the registry: "where is `inventory-service` right now?"
+
+```
+                    ┌───────────────────┐
+                    │   Eureka Server     │
+                    │  (service registry)  │
+                    └──────────┬──────────┘
+             register/heartbeat │  ▲ query "where is inventory-service?"
+            ┌────────────────────┘  │
+            ▼                        │
+   ┌─────────────────┐      ┌─────────────────┐
+   │ inventory-service │      │  order-service   │
+   │  (instance 1)     │      │                  │
+   └─────────────────┘      └─────────────────┘
+   ┌─────────────────┐
+   │ inventory-service │
+   │  (instance 2)     │
+   └─────────────────┘
+```
+
+## Setting up a Eureka server
+
+```java
+@SpringBootApplication
+@EnableEurekaServer
+public class DiscoveryServerApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(DiscoveryServerApplication.class, args);
+    }
+}
+```
+
+```yaml
+server:
+  port: 8761
+eureka:
+  client:
+    register-with-eureka: false   # the registry itself doesn't need to register with itself
+    fetch-registry: false
+```
+
+This is a standalone Spring Boot application whose entire job is running the registry — it exposes a dashboard at `http://localhost:8761` showing every currently registered service and instance.
+
+## Registering a service as a Eureka client
+
+```xml
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+</dependency>
+```
+
+```yaml
+spring:
+  application:
+    name: inventory-service   # this becomes the service's registered name
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka
+```
+
+With this on the classpath and configured, `inventory-service` automatically registers itself with the Eureka server on startup, and sends a periodic **heartbeat** to confirm it's still alive. If a heartbeat stops arriving (the instance crashed, or was terminated ungracefully), Eureka eventually removes it from the registry — other services stop being routed to an instance that's no longer actually there.
+
+## Calling another service by name, not address
+
+```java
+@Configuration
+class WebClientConfig {
+
+    @Bean
+    @LoadBalanced
+    WebClient.Builder loadBalancedWebClientBuilder() {
+        return WebClient.builder();
+    }
+}
+```
+
+```java
+@Service
+class OrderService {
+
+    private final WebClient.Builder webClientBuilder;
+
+    Mono<InventoryResponse> checkStock(Long productId) {
+        return webClientBuilder.build()
+            .get()
+            .uri("http://inventory-service/api/inventory/{id}", productId)   // logical name, not an IP
+            .retrieve()
+            .bodyToMono(InventoryResponse.class);
+    }
+}
+```
+
+`@LoadBalanced` is the key detail: it makes this `WebClient` instance Eureka-aware — `inventory-service` in the URI is resolved via the registry to an actual, currently-healthy instance's address at call time, and if multiple instances are registered, requests are load-balanced across them automatically. The calling code never hardcodes an address, and never needs to change when instances scale up, scale down, or move.
+
+```
+order-service calls "http://inventory-service/..."
+             │
+             ▼
+   @LoadBalanced WebClient asks Eureka:
+   "which healthy instances of inventory-service exist right now?"
+             │
+             ▼
+   Eureka returns: [10.0.1.15:8081, 10.0.1.22:8081]
+             │
+             ▼
+   one instance chosen (round-robin by default), request sent there
+```
+
+## Best practices & gotchas
+
+- **Eureka's registry is eventually consistent, not instantaneous.** A newly started instance may take a short time to appear in other services' local registry caches, and a crashed instance may briefly still appear as available before its heartbeat timeout expires — design for this reality (via the resilience patterns in Chapter 27) rather than assuming the registry is always perfectly up to date.
+- **`spring.application.name` is the identity other services discover you by** — get it right and keep it stable; renaming a service's registered name is effectively introducing a new service as far as every caller is concerned.
+- **Run the Eureka server itself as more than one instance in production.** It's a single point of failure otherwise — Eureka supports peer-to-peer replication between multiple registry instances specifically for this reason.
+- **Service discovery answers "where is this service," not "should I even call it right now."** A registered, healthy-per-Eureka instance can still be slow or failing at the application level — that's what the circuit breakers and retries in Chapter 27 are for, layered on top of discovery, not a replacement for it.
+- **In modern cloud-native deployments, a platform-level service mesh or Kubernetes' own built-in service discovery sometimes replaces Eureka entirely** — Eureka remains valuable and widely used, but it's worth knowing it's one implementation of this concept, not the only one, particularly relevant if the deployment target (Chapter 35) already provides equivalent discovery.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| Service registry | Database of currently-running service instances, kept near-real-time |
+| Eureka Server | Netflix/Spring Cloud's implementation of a service registry |
+| `@EnableEurekaServer` | Marks an application as the registry itself |
+| Eureka Client | A service that registers itself and queries the registry |
+| Heartbeat | Periodic signal confirming an instance is still alive |
+| `@LoadBalanced` | Makes a `WebClient`/`RestTemplate` resolve logical service names via the registry |
+
+## Wrapping up
+
+Eureka solves exactly one problem — knowing where a service currently is — which is the prerequisite for everything else in Part 7 that involves one service calling another. **Chapter 25** covers the next infrastructure piece: centralizing configuration across many services with Spring Cloud Config Server, rather than managing `application.yml` independently per service.
+
+## Interview Questions
+
+**1. What problem does service discovery solve that doesn't exist in a monolith?**
+In a monolith, all functionality runs within one process, so there's no need to locate another "service" over a network at all — a method call is resolved directly by the JVM. Once functionality is split into separately deployed services (Chapter 23), one service calling another needs to know that other service's current network address — which changes constantly as instances scale, restart, or move — and service discovery solves exactly that "where is this service right now" problem.
+
+*Follow-up: Why can't this problem simply be solved with a static configuration file listing each service's address, updated manually whenever something changes?* Because instance addresses in a real, scaled, auto-recovering deployment change far too frequently and unpredictably for manual updates to keep up — a crashed instance being replaced, an auto-scaling event adding or removing instances, or a redeployment moving a service to a new host all happen automatically and often, so a static file would be stale almost immediately and require constant, error-prone manual synchronization that defeats the automation benefits the rest of the infrastructure is providing.
+
+**2. What is a service registry, and what two main operations does it support?**
+A service registry is a continuously updated database of currently-running service instances. It supports registration (a service instance announces itself and its address to the registry on startup, and periodically confirms it's still alive via a heartbeat) and lookup/discovery (another service queries the registry to find the current address(es) of a specific service by its logical name).
+
+*Follow-up: What happens in the registry if a registered instance's heartbeat suddenly stops arriving, without that instance explicitly deregistering first?* The registry detects the missing heartbeats after a configured timeout period and removes (or marks unavailable) that instance, since a stopped heartbeat with no explicit deregistration typically indicates an ungraceful failure (a crash, a killed process) rather than a clean shutdown — this automatic timeout-based removal is what keeps the registry from indefinitely listing an instance that's actually no longer there.
+
+**3. What does `@EnableEurekaServer` do, and why does the Eureka server application itself typically set `register-with-eureka: false` and `fetch-registry: false`?**
+`@EnableEurekaServer` turns a Spring Boot application into the registry itself, exposing the endpoints other services use to register and query. `register-with-eureka: false` and `fetch-registry: false` prevent the registry server from treating itself as just another client service that needs to register with (and fetch the registry from) itself — since it *is* the registry, those client-side behaviors are unnecessary and would be circular.
+
+*Follow-up: In a production deployment with multiple Eureka server instances for high availability, would these same settings still apply?* No — in a multi-instance Eureka server setup, each Eureka server instance is typically configured to register with and be aware of its peer server instances specifically to replicate registry data between them, so those particular flags would be adjusted (or peer-awareness configuration added) to support that replication, rather than the fully isolated, self-contained single-server setup shown in this chapter's simplified example.
+
+**4. What does `spring.application.name` control in the context of Eureka?**
+It's the logical name a service registers itself under in the Eureka registry — this is the name other services use (in a `@LoadBalanced` client call, for example) to look up and discover this service's current instances, rather than referring to it by any physical address.
+
+*Follow-up: What would happen if two entirely different services in the same system were accidentally configured with the same `spring.application.name`?* Eureka would treat them as multiple instances of the *same* logical service, since that's exactly the identifier it uses to group instances together — a caller looking up that service name could be routed to either "service," even though they're actually different applications with potentially completely different functionality, which would produce confusing, incorrect routing and is why this name needs to be chosen carefully and kept unique per actual logical service.
+
+**5. What does `@LoadBalanced` do on a `WebClient.Builder` or `RestTemplate` bean?**
+It integrates that HTTP client with the service discovery/load-balancing infrastructure, so a URI referencing a logical service name (e.g., `http://inventory-service/...`) is resolved at call time to an actual instance address by querying the registry, rather than the literal string being treated as a real hostname to resolve via normal DNS — and if multiple instances are registered under that name, requests are automatically distributed across them.
+
+*Follow-up: What load-balancing strategy is used by default when multiple instances are available, and can it be changed?* Round-robin is the typical default strategy, cycling through the available healthy instances in turn for successive requests. It can be customized — Spring Cloud LoadBalancer (the modern replacement for the older Netflix Ribbon) supports pluggable load-balancing strategies, allowing a different algorithm (such as weighted or response-time-based selection) to be configured if round-robin isn't the right fit for a specific service's traffic characteristics.
+
+**6. Why is Eureka's registry described as "eventually consistent" rather than instantly accurate?**
+Registered clients typically cache a local copy of the registry (refreshed periodically, not on every single call) for performance reasons, and heartbeat-based instance removal has an inherent timeout delay before a genuinely failed instance is actually removed — both of these mean there's a real, non-zero window where a caller's view of "which instances exist" can lag slightly behind the actual current state.
+
+*Follow-up: What's a practical consequence of this eventual consistency that application code needs to be resilient to?* A load-balanced call might occasionally be routed to an instance that has actually just crashed or shut down (but hasn't yet been removed from the registry, or hasn't yet been purged from a caller's local cache) — resulting in a connection failure or timeout for that specific call, which is exactly the kind of transient failure the resilience patterns in Chapter 27 (retries, circuit breakers) are designed to handle gracefully rather than assuming service discovery alone guarantees every resolved address is currently reachable.
+
+**7. Why should the Eureka server itself run as more than one instance in a production system?**
+If only one Eureka server instance exists and it goes down, no service could register or look up any other service's address — a single point of failure that could effectively bring down inter-service communication across the entire system, even if every individual business service itself is healthy and running fine.
+
+*Follow-up: How does Eureka support running multiple server instances without them becoming inconsistent with each other?* Through peer-to-peer replication — multiple Eureka server instances can be configured to be aware of each other as peers, propagating registration and heartbeat information between themselves so that each server instance maintains a converged, consistent view of the overall registry, and a client can register with or query any one of the peer instances and still get a reasonably up-to-date picture of the whole system.
+
+**8. Does successful service discovery (finding an instance's address) guarantee that a subsequent call to that instance will succeed?**
+No — discovery only confirms that an instance was registered and (as of its last heartbeat) considered alive; it says nothing about whether that specific instance is currently healthy enough at the application level to handle a request correctly, or whether the network path to it is currently working, at the precise moment of the call. Discovery and actual call reliability are separate concerns.
+
+*Follow-up: What's the relationship between service discovery (this chapter) and the resilience patterns covered in Chapter 27?* Service discovery answers "where should this request be sent," while resilience patterns (circuit breakers, retries, timeouts) handle what happens when a specific call to a discovered instance actually fails or is too slow — the two work together in sequence: discovery resolves an address, and resilience patterns govern how the call to that address is actually made and how failures in that call are handled, rather than either one alone providing complete reliability.
+
+**9. Why might a team choose to rely on a platform-level service discovery mechanism (like Kubernetes' built-in service discovery) instead of adding Eureka to their Spring Boot application?**
+If the deployment platform already provides equivalent service discovery capability as a built-in infrastructure feature (Kubernetes Services provide stable DNS names that resolve to healthy pod instances automatically), adding a separate application-level discovery mechanism like Eureka introduces redundant complexity — running and maintaining an additional Eureka server, plus each service depending on the Eureka client library — for a capability the platform is already providing for free at the infrastructure layer.
+
+*Follow-up: What's a reason a team might still choose Eureka even when deploying to Kubernetes?* If the system needs to run across a mixed environment (some services on Kubernetes, others on traditional VMs or a different platform, or the same codebase needing to support multiple deployment targets), an application-level discovery mechanism like Eureka provides a consistent discovery experience independent of the underlying infrastructure, whereas relying purely on Kubernetes' built-in discovery would tie the discovery mechanism specifically to running on Kubernetes.
+
+**10. What's the difference between a service's "registered name" and its actual network address, in the context of Eureka?**
+The registered name (from `spring.application.name`) is a stable, logical identifier that never changes regardless of how many instances exist or where they're deployed — the actual network address (IP and port) is the physical, frequently-changing detail that the registered name abstracts away, resolved dynamically at call time via the registry lookup rather than being hardcoded anywhere in calling code.
+
+*Follow-up: Why is this separation valuable even beyond just handling instances that come and go?* It also cleanly supports horizontal scaling and rolling deployments — multiple instances can register under the exact same logical name simultaneously (Eureka simply tracks them as a list of addresses for that name), and old instances can be gracefully drained and removed while new ones register, all without any calling code needing to be aware that the underlying set of addresses is changing at all, since it only ever refers to the stable logical name.
+
+**11. In the load-balanced `WebClient` example, why is the URI written as `http://inventory-service/api/inventory/{id}` rather than a real hostname?**
+Because `inventory-service` here isn't meant to be resolved as a literal DNS hostname at all — it's the logical service name that the `@LoadBalanced`-aware `WebClient` intercepts and resolves through the service discovery client instead of a normal DNS lookup, substituting in an actual instance's real host and port before the request is actually sent over the network.
+
+*Follow-up: What would happen if you used this same URI with a plain, non-`@LoadBalanced` `WebClient` instance?* It would attempt a normal DNS resolution of the literal string `inventory-service` as a hostname, which would fail (there's no real DNS entry for that name) unless something else coincidentally provided one — the `@LoadBalanced` annotation is specifically what activates the interception and substitution behavior that makes this logical-name-based addressing work at all.
+
+**12. What's a realistic reason a caller might need to know more than just "does a healthy instance of this service exist," such as its version or specific metadata?**
+During a gradual rollout or canary deployment, a caller (or an intelligent load balancer/gateway) might need to route only a small percentage of traffic to a new version of a service while the majority continues going to the stable version — this requires instance metadata beyond just "is it alive," such as a version tag, which Eureka supports via custom metadata attached to each registered instance.
+
+*Follow-up: Is implementing this kind of version-aware, weighted routing logic something Eureka handles natively, or does it typically require additional infrastructure?* Eureka's core registry can store and expose arbitrary instance metadata, but the actual intelligent routing logic based on that metadata (routing X% of traffic to version A and the rest to version B) typically requires additional infrastructure layered on top — commonly an API Gateway (Chapter 26) or a service mesh with more sophisticated traffic-management capabilities, since Eureka itself is primarily focused on the simpler "which healthy instances exist" registry function rather than fine-grained traffic-shaping decisions.
+
+**13. If `inventory-service` is scaled from 2 instances to 5 instances to handle increased load, does `order-service` need to be redeployed or reconfigured to take advantage of the additional capacity?**
+No — this is precisely the benefit service discovery provides. `order-service` continues calling the same logical name (`inventory-service`); the `@LoadBalanced` client resolves that name against the registry at call time and will automatically see and distribute requests across all 5 currently registered instances once they've registered, with zero changes needed to `order-service`'s code or configuration.
+
+*Follow-up: How quickly would `order-service` actually start routing some of its traffic to the 3 newly added instances, given the earlier point about eventual consistency?* Not instantaneously — there's a small delay determined by how frequently `order-service`'s local registry cache refreshes from the Eureka server (a configurable interval, commonly around 30 seconds by default), so newly registered instances become visible to callers within roughly that refresh window rather than the very next request after they start, which is a practical, usually acceptable consequence of the eventually-consistent nature of the registry discussed earlier in this chapter.
+
+**14. Why is it important that a service instance send heartbeats *periodically*, rather than just registering once at startup?**
+A one-time registration at startup would tell the registry an instance existed at that moment, but wouldn't confirm it's still alive and healthy at any later point — periodic heartbeats are what let the registry distinguish between an instance that's still genuinely running versus one that has since crashed or become unreachable without explicitly deregistering, enabling the automatic timeout-based removal described earlier.
+
+*Follow-up: What would likely happen to the accuracy of the registry over time if heartbeats were disabled entirely, relying only on explicit deregistration on graceful shutdown?* The registry would gradually accumulate "phantom" entries for instances that crashed or were forcibly terminated without going through a graceful shutdown sequence (and therefore never explicitly deregistered) — over time, an increasing fraction of the registry's listed instances for a given service could actually be dead, silently degrading the reliability of discovery-based routing as more calls get misdirected to instances that no longer exist.
+
+**15. How would you explain the overall value of service discovery to someone skeptical that it's worth the added infrastructure (running a Eureka server, adding a client dependency to every service) compared to just using fixed, well-known ports and hostnames for each service?**
+Fixed, well-known addresses only work in a relatively static deployment where services rarely move, scale, or restart — which describes almost no realistic production environment, especially one using auto-scaling, containers, or frequent rolling deployments (all covered starting in Chapter 35). Service discovery's actual value is decoupling calling code from ever needing to know or care about the current physical location of a dependency, which is precisely the flexibility a genuinely elastic, resilient, independently-deployable microservices architecture (the whole premise established in Chapter 23) depends on to function at all.
+
+*Follow-up: Is there a deployment scenario simple enough that this infrastructure genuinely isn't worth the overhead?* A very small system with just one or two services, each running as a single, rarely-changing instance (no auto-scaling, infrequent deployments), could reasonably get away with simpler static configuration or basic DNS — the value of service discovery infrastructure scales with the number of services, how frequently instances change, and how dynamic the deployment environment is, so a genuinely small and stable setup might reasonably defer adopting it until those conditions actually change, echoing this part's broader theme from Chapter 23 of not adding infrastructure before a concrete need justifies it.

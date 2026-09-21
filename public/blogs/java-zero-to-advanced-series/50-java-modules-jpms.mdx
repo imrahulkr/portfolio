@@ -1,0 +1,125 @@
+---
+title: "Java Modules (JPMS)"
+description: "The Java Platform Module System introduced in Java 9: module-info.java, requires/exports, strong encapsulation, and why most application code barely interacts with it directly."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Modern Java (9-21)"
+chapter: 50
+totalChapters: 65
+slug: "java-modules-jpms"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "modules", "jpms", "java9"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 10
+---
+
+## The Problem JPMS Solves
+
+Before Java 9, the JDK itself shipped as one monolithic `rt.jar` containing every standard library class, and any public class in any JAR on the classpath was accessible from anywhere else on the classpath — there was no way to say "this package is internal implementation detail, don't depend on it," beyond documentation conventions that tools couldn't enforce. The Java Platform Module System (JPMS, Project Jigsaw) introduced **modules**: a stronger, JVM-enforced unit of encapsulation above the level of individual packages.
+
+## `module-info.java` — Declaring a Module
+
+```java
+// module-info.java, at the root of the module's source
+module com.example.orders {
+    requires java.sql;                    // this module depends on the java.sql module
+    requires transitive com.example.core;  // "transitive" — consumers of THIS module also get com.example.core
+
+    exports com.example.orders.api;        // only this package is accessible to OTHER modules
+    // com.example.orders.internal is NOT exported — genuinely inaccessible from outside, even via reflection by default
+}
+```
+
+- **`requires`** — declares a dependency on another module.
+- **`exports`** — makes a specific package's public types accessible to other modules; any package *not* exported is invisible outside the module, even if its classes are `public`.
+- **`requires transitive`** — passes the dependency along: if module A requires module B transitively, and module C requires A, then C automatically also has access to B without declaring it explicitly.
+
+![Diagram: module com.example.orders exporting only its api package while keeping its internal package fully encapsulated, invisible to a consuming module even though internal's classes are declared public](/diagrams/ch50-module-strong-encapsulation.svg)
+
+## Strong Encapsulation — Beyond `public`/`private`
+
+This is JPMS's headline feature: a `public` class in a package that isn't `exported` is **genuinely inaccessible** from outside the module — not just by convention, but enforced by the JVM itself, including blocking illegal reflective access by default (`setAccessible(true)` on a non-exported/non-opened package's private members now fails, where it previously succeeded freely).
+
+```java
+// com.example.orders.internal.OrderProcessor — public class, but package NOT exported
+public class OrderProcessor { ... }
+
+// From a DIFFERENT module trying to use it directly:
+// import com.example.orders.internal.OrderProcessor;   // COMPILE ERROR — package is not exported
+```
+
+This closes a long-standing gap where "internal use only" packages (often literally named `internal` or `impl` by convention) were previously just as accessible as any other public API, relying entirely on developer discipline rather than any actual enforcement.
+
+## The Named Module vs. the Unnamed Module (Classpath)
+
+```bash
+# Traditional classpath — the "unnamed module" — everything is mutually visible, no module boundaries enforced
+java -cp app.jar:lib/*.jar com.example.Main
+
+# Module path — genuine module boundaries enforced
+java --module-path mods -m com.example.orders/com.example.orders.Main
+```
+
+Code on the traditional classpath runs in the **unnamed module**, which can read every other module and every other classpath JAR, but exports nothing in a controlled way — this is exactly why JPMS adoption has been gradual: existing classpath-based applications and libraries continue working essentially unchanged, and migrating to genuine module boundaries is opt-in, not forced.
+
+## Why Most Application Code (Including Typical Spring Boot Apps) Doesn't Use Modules Directly
+
+Despite being available since Java 9, JPMS adoption in typical application code (as opposed to JDK-internal use, where it's used extensively) has remained limited, for a few concrete reasons:
+
+- Many popular libraries and frameworks (including much of the Spring ecosystem) still primarily target the traditional classpath model for broad compatibility, rather than requiring consumers to fully modularize.
+- Fully modularizing a real application (correctly declaring every `requires`/`exports` across every dependency) is a genuinely significant migration effort for existing large codebases.
+- Most of JPMS's core *runtime* benefits (a smaller, custom JVM runtime image via `jlink`, strong internal encapsulation of the *JDK itself*) are already realized just by running on a modular JDK (Java 9+), even without your own application code being modularized at all.
+
+**What's genuinely useful to know, even without writing your own `module-info.java`:** why certain reflection-based libraries (particularly older ones doing deep reflective access into JDK internals) began failing or requiring extra JVM flags (`--add-opens`) starting with Java 9+ — this is JPMS's strong encapsulation being enforced against the JDK's own now-modularized internal packages.
+
+## `jlink` — Custom, Minimal Runtime Images
+
+```bash
+jlink --module-path mods --add-modules com.example.orders --output custom-runtime
+```
+
+`jlink` assembles a custom, minimal Java runtime containing only the modules an application actually needs (plus their dependencies), rather than shipping a full JDK/JRE — useful for significantly reducing container image size in containerized deployments, though this benefit requires the application (and, ideally, its dependencies) to actually be modularized to take full advantage.
+
+## Key Takeaways
+
+- JPMS introduces modules as a JVM-enforced encapsulation boundary above packages — `exports` controls what's visible outside a module, with genuinely enforced (not just conventional) encapsulation for everything else.
+- Traditional classpath-based code runs in the "unnamed module," preserving backward compatibility — module adoption is opt-in, not mandatory.
+- Most real-world application code, including typical Spring Boot applications, doesn't define its own modules directly, largely due to ecosystem compatibility and migration cost.
+- Understanding JPMS mainly helps explain why some reflection-heavy libraries needed adjustment starting with Java 9+, and enables tools like `jlink` for minimal custom runtime images.
+
+---
+
+## Interview Questions
+
+**1. What problem was the Java Platform Module System (JPMS) introduced to solve?**
+Before Java 9, there was no JVM-enforced way to mark a package as "internal, not part of the public API" — any `public` class anywhere on the classpath was accessible from anywhere else, relying purely on documentation and developer discipline rather than actual enforcement. JPMS introduces modules as a stronger encapsulation boundary above packages, letting a module explicitly declare which packages it exports, with everything else genuinely inaccessible from outside, enforced directly by the JVM.
+
+**2. What do the `requires` and `exports` directives in a `module-info.java` file do?**
+`requires` declares that this module depends on another named module, making that dependency's exported packages available to this module's code. `exports` declares that a specific package within this module is accessible to other modules that require this one — any package not explicitly exported remains fully encapsulated and inaccessible from outside the module, regardless of the visibility modifiers on its individual classes.
+
+**3. What's the practical difference between a `public` class in an exported package versus a `public` class in a non-exported package?**
+A `public` class in an *exported* package is accessible to any other module that requires this module, exactly like traditional Java visibility rules would suggest. A `public` class in a *non-exported* package is not accessible from outside the module at all — attempting to import or directly reference it from another module fails to compile, and even reflective access (`setAccessible(true)`) is blocked by default, unless the module explicitly `opens` that package for reflection.
+
+**4. What does `requires transitive` mean, as opposed to a plain `requires`?**
+A plain `requires` means this module depends on another module internally, but that dependency is not automatically passed along to anything that depends on this module. `requires transitive` additionally exposes that dependency to any module that requires *this* module — so if module C requires module A, and A has `requires transitive B`, then C automatically gains access to B's exported packages too, without needing to declare `requires B` itself.
+
+**5. What is the "unnamed module," and why does it exist?**
+It's the module that all traditional classpath-based code (JARs and classes loaded the old way, not via the module path) is implicitly placed into. It exists specifically to preserve backward compatibility — it can read every other module in the application and every other classpath entry with no module-boundary restrictions, allowing existing pre-JPMS applications and libraries to keep working essentially unchanged on a modern, modular JDK without requiring immediate migration.
+
+**6. Why did some existing libraries (particularly those doing deep reflective access into JDK internals) start failing, or require extra flags, after upgrading to Java 9 or later?**
+Because the JDK itself became fully modularized starting in Java 9, and its own genuinely internal packages (like `sun.misc` internals many older libraries reflectively accessed) are not exported by their respective JDK modules — JPMS's strong encapsulation is enforced against the JDK's own internals just as it would be against any other module, causing previously-working illegal reflective access to now be blocked by default, sometimes requiring explicit `--add-opens` JVM flags as a documented (if discouraged) workaround.
+
+**7. Why haven't most real-world application codebases, including typical Spring Boot applications, widely adopted writing their own `module-info.java` files?**
+Significant parts of the broader Java ecosystem, including much of the Spring framework and many popular libraries, still primarily target the traditional classpath model for maximum compatibility, so fully modularizing an application (correctly declaring `requires`/`exports` across an entire, often large, dependency graph) is a substantial migration effort for uncertain practical benefit in many typical application contexts — especially since key runtime benefits are already available just by running on a modular JDK, without the application's own code needing to be modularized.
+
+**8. What does `jlink` do, and what's a practical benefit of using it?**
+`jlink` assembles a custom, minimal Java runtime image containing only the specific modules an application actually requires (plus their transitive dependencies), rather than needing a full, general-purpose JDK/JRE installation. A practical benefit is significantly reduced runtime footprint and container image size for containerized deployments, since the shipped runtime only includes what's actually needed rather than the entire JDK's standard library surface.
+
+**9. Can a module have a package that's split across two different JARs?**
+No — JPMS explicitly disallows "split packages," where the same package name appears in more than one module on the module path; this was a real problem in the pre-module classpath world (multiple JARs occasionally shipping overlapping package names) that JPMS deliberately prevents to maintain a clean, unambiguous mapping between packages and the single module that owns them.
+
+**10. What's the difference between `exports` and `opens` in a module declaration?**
+`exports` makes a package's public types accessible to other modules at both compile time and runtime for normal code access. `opens` specifically grants *reflective* access (including deep reflection into non-public members) to a package at runtime without necessarily making it available for normal compile-time `import` usage — commonly needed for frameworks (like many dependency-injection or serialization libraries) that rely on reflection to inspect and manipulate classes they don't have compile-time knowledge of.

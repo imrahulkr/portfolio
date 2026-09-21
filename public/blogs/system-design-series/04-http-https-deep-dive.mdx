@@ -1,0 +1,188 @@
+---
+title: "HTTP/HTTPS Deep Dive"
+description: "Methods, status codes, headers, cookies, and the TLS handshake that secures HTTPS — the protocol underlying nearly every system you'll design."
+series: "system-design"
+seriesOrder: 4
+part: "Foundations"
+partOrder: 1
+slug: "http-https-deep-dive"
+tags: ["system-design", "fundamentals", "http", "security"]
+readingTime: "11 min"
+publishedAt: "2026-09-15"
+updatedAt: "2026-09-15"
+---
+
+## Introduction
+
+HTTP is the protocol nearly every system in this series will communicate over, whether directly (REST APIs) or as the transport for something else (gRPC runs over HTTP/2). Understanding it well — not just "GET fetches, POST creates" — pays off constantly in system design discussions around caching, idempotency, and security.
+
+## HTTP Methods and Idempotency
+
+| Method | Purpose | Idempotent? | Safe (no side effects)? |
+|---|---|---|---|
+| GET | Retrieve a resource | Yes | Yes |
+| POST | Create a resource / trigger an action | No | No |
+| PUT | Replace a resource entirely | Yes | No |
+| PATCH | Partially update a resource | No (generally) | No |
+| DELETE | Remove a resource | Yes | No |
+| HEAD | Like GET, but headers only | Yes | Yes |
+| OPTIONS | Discover allowed methods (used in CORS preflight) | Yes | Yes |
+
+**Idempotency** — a request can be repeated any number of times with the same effect as making it once — is a recurring system design theme (see Chapter 28). It matters because networks are unreliable: a client may not know if a request succeeded and may retry it. Designing APIs (and the systems behind them) to tolerate safe retries prevents duplicate side effects, like double-charging a customer.
+
+## Status Codes That Matter for System Design
+
+| Range | Meaning | Notably relevant codes |
+|---|---|---|
+| 2xx | Success | `200 OK`, `201 Created`, `202 Accepted` (async processing), `204 No Content` |
+| 3xx | Redirection | `301 Moved Permanently`, `304 Not Modified` (caching!) |
+| 4xx | Client error | `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `429 Too Many Requests` (rate limiting!) |
+| 5xx | Server error | `500 Internal Server Error`, `502 Bad Gateway`, `503 Service Unavailable`, `504 Gateway Timeout` |
+
+`304 Not Modified` and `429 Too Many Requests` are worth flagging specially: the former underlies HTTP caching validation (Chapter 9), and the latter is the standard response for rate-limited clients (Chapter 26).
+
+## Headers Worth Knowing
+
+- `Content-Type` — tells the recipient how to parse the body (`application/json`, `multipart/form-data`, etc.)
+- `Cache-Control` — directives for caching behavior (`no-cache`, `max-age=3600`, `private`/`public`)
+- `ETag` / `If-None-Match` — enables conditional requests for cache validation
+- `Authorization` — carries credentials (e.g., `Bearer <JWT>`)
+- `X-Forwarded-For` — set by proxies/load balancers to preserve the original client IP
+- `Idempotency-Key` — a common (non-standard but widely adopted, e.g., by Stripe) header for making POST requests safely retryable
+
+## Cookies and Sessions
+
+Cookies are small pieces of data a server asks the client to store and resend on subsequent requests, commonly used for session identification. A typical flow:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: POST /login (credentials)
+    S-->>C: Set-Cookie: session_id=abc123; HttpOnly; Secure
+    C->>S: GET /dashboard (Cookie: session_id=abc123)
+    S->>S: Look up session_id in session store
+    S-->>C: 200 OK (personalized dashboard)
+```
+
+Important cookie attributes for security:
+- `HttpOnly` — prevents JavaScript from accessing the cookie (mitigates XSS-based theft)
+- `Secure` — cookie is only sent over HTTPS
+- `SameSite` — restricts cross-site sending of cookies (mitigates CSRF)
+
+## TLS and HTTPS
+
+HTTPS is HTTP layered over **TLS (Transport Layer Security)**, which provides encryption, integrity, and server authentication. The TLS handshake happens once per connection (mitigated further by session resumption):
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: ClientHello (supported cipher suites, TLS version)
+    S-->>C: ServerHello + Certificate + Server key exchange
+    C->>C: Verify certificate against trusted CAs
+    C->>S: Client key exchange, Finished
+    S-->>C: Finished
+    Note over C,S: Symmetric session key established; encrypted data flows
+```
+
+Key ideas:
+- The server's certificate (issued by a trusted Certificate Authority) proves its identity, preventing man-in-the-middle attacks.
+- After the handshake, both sides use a fast **symmetric** encryption key for the actual data (asymmetric crypto during the handshake is too slow for bulk data).
+- **TLS termination** is an important architectural decision: does encryption end at the load balancer (which then talks plaintext internally, simpler but requires trust in the internal network), or is it re-established end-to-end to each backend service (more secure, more overhead)?
+
+## HTTP/1.1 vs HTTP/2 vs HTTP/3 (Brief)
+
+| | HTTP/1.1 | HTTP/2 | HTTP/3 |
+|---|---|---|---|
+| Connections | Often multiple per host (limited multiplexing) | Single connection, multiplexed streams | Single connection over QUIC (UDP-based) |
+| Head-of-line blocking | Yes (within a connection) | Reduced (but still exists at TCP level) | Eliminated (QUIC handles streams independently) |
+| Transport | TCP | TCP | QUIC over UDP |
+
+This matters in system design when discussing why a system might adopt gRPC (built on HTTP/2) for internal service-to-service calls, or why a CDN vendor advertises HTTP/3 support for reduced latency on lossy mobile networks.
+
+## Summary
+
+- HTTP methods carry semantic meaning (especially idempotency and safety) that well-designed APIs and clients rely on for safe retries.
+- Status codes like `304` and `429` connect directly to caching and rate-limiting system design patterns covered later.
+- Cookie attributes (`HttpOnly`, `Secure`, `SameSite`) are a first line of defense against common web attacks (XSS, CSRF).
+- HTTPS/TLS provides encryption and authentication; where you terminate TLS in your architecture is a real design decision with security/performance trade-offs.
+
+---
+
+## Interview Questions
+
+### 1. What does it mean for an HTTP method to be idempotent, and why does this matter in distributed systems?
+**Answer:** An idempotent operation produces the same result (and has the same effect on server state) no matter how many times it's executed with the same input — `GET`, `PUT`, and `DELETE` are idempotent by specification; `POST` generally is not. This matters in distributed systems because networks are unreliable: a client might time out waiting for a response even though the server successfully processed the request, and safely retrying requires idempotency to avoid unintended side effects like creating duplicate resources or double-charging a payment.
+
+**Follow-up:** *`POST` is not idempotent by default — how do systems like Stripe make POST-based payment requests safely retryable?* — By supporting a client-generated `Idempotency-Key` header: the server stores the result of the first request with that key and returns the same result for any retry carrying the same key, effectively making an otherwise non-idempotent operation safe to retry.
+
+### 2. Explain the difference between `401 Unauthorized` and `403 Forbidden`.
+**Answer:** `401 Unauthorized` means the request lacks valid authentication credentials — the client needs to authenticate (or re-authenticate) to proceed. `403 Forbidden` means the client *is* authenticated, but does not have permission to access the requested resource — re-authenticating won't help. This distinction matters for both API design clarity and client behavior — a client should typically prompt for login on a 401, but show a permissions error (not a login prompt) on a 403.
+
+**Follow-up:** *Some APIs deliberately return 404 instead of 403 for unauthorized access to a specific resource — why?* — To avoid leaking the existence of a resource to unauthorized users (information disclosure) — returning 404 makes it indistinguishable whether the resource doesn't exist or the user simply lacks permission to see it.
+
+### 3. How does the `ETag` header enable efficient caching, and what's the request/response flow involved?
+**Answer:** A server includes an `ETag` (a version identifier/hash of the resource) in its response. On subsequent requests, the client sends that value back via `If-None-Match`. If the resource hasn't changed, the server responds with `304 Not Modified` and an empty body, letting the client reuse its cached copy — saving bandwidth and server processing compared to re-sending the full resource every time.
+
+**Follow-up:** *How does this differ from using `Cache-Control: max-age` alone?* — `max-age` avoids even *asking* the server during the specified freshness window (fully skipping a network round trip), while `ETag`/`If-None-Match` still makes a round trip but avoids re-transferring the body if unchanged — the two are often combined: rely on `max-age` while fresh, fall back to conditional validation via `ETag` once stale.
+
+### 4. Walk through the TLS handshake at a high level, and explain why symmetric encryption is used for the actual data transfer instead of the asymmetric encryption used during the handshake.
+**Answer:** During the handshake, the client and server use asymmetric cryptography (public/private key pairs, validated via the server's certificate) to securely agree on a shared symmetric session key, without ever transmitting that key in a way an eavesdropper could intercept. Once established, all further data is encrypted with that symmetric key. Symmetric encryption is used for bulk data because it's computationally far cheaper than asymmetric encryption, which would be prohibitively slow for encrypting large volumes of data on every request.
+
+**Follow-up:** *What is TLS session resumption, and why does it matter for performance?* — It allows a client and server that have previously completed a full handshake to reuse previously negotiated parameters (via a session ticket or ID) to skip much of the handshake on reconnection, reducing the latency and CPU cost of repeated TLS negotiations — especially valuable for clients that reconnect frequently, like mobile apps.
+
+### 5. What is TLS termination, and what's the trade-off between terminating TLS at the load balancer versus at each backend service?
+**Answer:** TLS termination is the point in the architecture where encrypted traffic is decrypted back into plaintext. Terminating at the load balancer means the load balancer handles the (computationally expensive) decryption once, then forwards plaintext requests internally — simpler and often faster, but requires that the internal network between the load balancer and backend services be trusted/secured by other means (e.g., a private VPC). Terminating TLS end-to-end at each backend service (sometimes called "TLS passthrough" or re-encryption) is more secure (no plaintext anywhere on the wire) but adds CPU overhead and certificate management complexity at every service.
+
+**Follow-up:** *In a zero-trust security model, which approach would you lean toward, and why?* — End-to-end TLS to each backend service, since zero-trust architectures assume the internal network cannot be implicitly trusted, requiring encryption (and often mutual TLS authentication) even between internal services.
+
+### 6. Why does `SameSite=Strict` on a cookie help prevent CSRF (Cross-Site Request Forgery) attacks?
+**Answer:** CSRF attacks trick a logged-in user's browser into making an unwanted request to a target site (e.g., a bank) by embedding that request in a malicious third-party page, relying on the browser automatically attaching the user's session cookie. `SameSite=Strict` instructs the browser not to send the cookie at all on cross-site requests (i.e., requests originating from a different site than the cookie's own domain), so the forged request arrives without the necessary session cookie and is rejected by the server as unauthenticated.
+
+**Follow-up:** *Why might a site use `SameSite=Lax` instead of `Strict`, despite the reduced protection?* — `Lax` still sends cookies on top-level navigations (like clicking a link from an external site), which is important for use cases like a user clicking an email link that should land them logged in — `Strict` would break that flow by omitting the cookie even for legitimate top-level navigation.
+
+### 7. What is HTTP head-of-line blocking, and how does HTTP/2 partially address it while HTTP/3 addresses it more fully?
+**Answer:** Head-of-line blocking occurs when one slow or stalled request/response blocks subsequent ones from being processed, even though they're logically independent. In HTTP/1.1, this happens because each TCP connection processes requests largely sequentially (with limited pipelining support in practice), often mitigated only by opening multiple parallel connections. HTTP/2 introduces multiplexed streams over a single TCP connection, allowing multiple requests/responses to be interleaved — but a single lost TCP packet still stalls *all* streams on that connection, since TCP itself guarantees strict ordering. HTTP/3, built on QUIC (over UDP), handles each stream's reliability independently, so a lost packet only affects the specific stream it belongs to, not the entire connection.
+
+**Follow-up:** *Why is this especially relevant for mobile clients on lossy networks?* — Mobile networks have higher packet loss rates than wired connections; HTTP/3's per-stream independence means a single lost packet doesn't stall unrelated in-flight requests, which meaningfully improves perceived performance compared to HTTP/2 on such networks.
+
+### 8. Explain why `PUT` is idempotent but `PATCH` generally is not.
+**Answer:** `PUT` replaces a resource entirely with the exact representation sent in the request — sending the same `PUT` request multiple times results in the same final state every time. `PATCH` typically applies a partial modification (e.g., "increment counter by 1" or "append to a list"), where repeating the same request multiple times can produce a different result each time (e.g., incrementing the counter multiple times) — making it non-idempotent in the general case, though a specific PATCH payload *can* be designed to be idempotent (e.g., "set field X to value Y" rather than "increment X").
+
+**Follow-up:** *If an API needs partial updates but also needs safe retries, what design choice would you make?* — Design the PATCH semantics to express idempotent operations where possible (e.g., "set" rather than "increment"), or use an idempotency key mechanism similar to the POST case, so retries of the same request don't compound unintended effects.
+
+### 9. What's the purpose of the HTTP `OPTIONS` method in the context of CORS?
+**Answer:** For cross-origin requests that aren't "simple" (e.g., using custom headers, or methods like `PUT`/`DELETE`, or `Content-Type: application/json`), browsers first send an automatic `OPTIONS` "preflight" request to check whether the actual request is permitted by the server's CORS policy (via response headers like `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`). Only if the server responds permissively does the browser proceed to send the actual request.
+
+**Follow-up:** *Does the preflight OPTIONS request add real latency to cross-origin API calls, and how do systems mitigate this?* — Yes, it adds an extra round trip; browsers mitigate this by caching the preflight response (via `Access-Control-Max-Age`) for a period, so repeated requests to the same endpoint with the same method/headers don't require a new preflight each time.
+
+### 10. Why is `502 Bad Gateway` different from `504 Gateway Timeout`, and what does each typically indicate in a production system with a load balancer or reverse proxy?
+**Answer:** `502 Bad Gateway` indicates the proxy/load balancer received an invalid or malformed response from the upstream backend server (e.g., the backend crashed mid-response, or returned garbage). `504 Gateway Timeout` indicates the proxy/load balancer didn't receive *any* response from the backend within its configured timeout window (the backend is likely overloaded, stuck, or network-partitioned). Distinguishing these helps diagnose whether the issue is a backend application bug/crash (502) versus a performance/capacity/connectivity issue (504).
+
+**Follow-up:** *If you started seeing a spike in 504s but not 502s, what would you investigate first?* — Backend response time and load — check for signs of the backend being overwhelmed (CPU/memory saturation, thread pool exhaustion, slow database queries) or network issues between the proxy and backend, rather than looking for application crashes, which would more likely manifest as 502s.
+
+### 11. What is the difference between `Cache-Control: private` and `Cache-Control: public`, and why does this distinction matter when CDNs are involved?
+**Answer:** `public` indicates the response can be cached by any cache, including shared caches like CDNs and intermediate proxies. `private` indicates the response is specific to a single user and should only be cached by that user's own browser, not by shared/intermediate caches. This matters critically with CDNs: caching a `private` response (e.g., containing personalized or sensitive data) at a shared CDN edge node by mistake could leak one user's data to another user requesting the same URL.
+
+**Follow-up:** *If an API response contains a mix of shared and user-specific data, what's a common architectural approach to still benefit from CDN caching?* — Split the response: serve the shared/cacheable portion (e.g., a product's general details) from a CDN-cached endpoint, and fetch user-specific portions (e.g., cart contents, personalized pricing) via a separate, non-cached (or user-scoped cache key) API call, often assembled client-side.
+
+### 12. Why does an `Authorization: Bearer <token>` header get preferred over cookies for many modern API-based (non-browser) clients?
+**Answer:** Bearer tokens (e.g., JWTs) are explicitly attached by the client to each request and work uniformly across any client type (mobile apps, server-to-server calls, browsers), without relying on browser-specific cookie handling, domain/path scoping rules, or CSRF-related complications tied to cookies. This makes Bearer tokens a more portable and explicit authentication mechanism for APIs consumed by diverse client types beyond just browsers.
+
+**Follow-up:** *What's a security trade-off of Bearer tokens compared to `HttpOnly` cookies?* — Bearer tokens are typically stored and attached by client-side application code (e.g., in local storage or memory), making them potentially more exposed to XSS attacks than an `HttpOnly` cookie, which JavaScript cannot access at all — this is a real trade-off system designers must weigh when choosing an auth mechanism for browser-based clients specifically.
+
+### 13. How would you design an API endpoint to be safely retryable by a client, given that `POST` isn't idempotent by default?
+**Answer:** Require the client to generate and send a unique `Idempotency-Key` (e.g., a UUID) with the request. The server checks whether it has already processed a request with that key: if so, it returns the previously computed result without re-executing the operation; if not, it processes the request normally and stores the result keyed by that idempotency key (typically with an expiration window) for future retries to reference.
+
+**Follow-up:** *Where would you store this idempotency-key-to-result mapping, and what consideration would guide your choice?* — Typically a fast key-value store like Redis, chosen for low-latency lookups on every request and built-in TTL support to automatically expire old idempotency records after a reasonable retry window, balancing correctness against unbounded storage growth.
+
+### 14. What does the phrase "HTTP is stateless, but sessions add state on top of it" mean in practice, and what are two different architectural approaches to implementing sessions?
+**Answer:** HTTP itself carries no memory between requests — each request is processed independently by the protocol's design. Applications add "session" state on top of this by having the server remember something about a specific client between requests, correlated via a token (like a cookie). Two common approaches: (1) **server-side sessions**, where the server stores session data (e.g., in Redis) keyed by a session ID sent via cookie — the client only holds an opaque identifier; (2) **stateless tokens** (like JWTs), where the session data itself (claims, expiry, roles) is encoded directly into a signed token held by the client, requiring no server-side storage lookup to validate.
+
+**Follow-up:** *What's the main trade-off between these two approaches regarding revocation?* — Server-side sessions can be instantly revoked by simply deleting the session record server-side; stateless JWTs, once issued, remain valid until they naturally expire unless the system adds extra infrastructure (like a token blocklist) — meaning immediate revocation is harder to achieve with pure stateless tokens.
+
+### 15. Why might a system choose gRPC (built on HTTP/2) for internal service-to-service communication instead of traditional REST over HTTP/1.1?
+**Answer:** gRPC leverages HTTP/2's multiplexing to send many concurrent requests over a single connection efficiently, uses a compact binary serialization format (Protocol Buffers) instead of verbose JSON, and supports streaming (client, server, or bidirectional) natively — all of which reduce latency and bandwidth overhead for high-volume internal service-to-service calls compared to REST/JSON over HTTP/1.1, where each service typically maintains simpler, more human-readable, but less efficient communication.
+
+**Follow-up:** *Why might a system still choose REST over HTTP/1.1 for its public-facing API despite gRPC's efficiency advantages?* — REST/JSON over HTTP is broadly supported by every client platform (browsers, third-party integrators) without special tooling, is human-readable for easier debugging, and has a much lower barrier to adoption for external developers — gRPC requires generated client stubs and isn't natively supported in browsers without a proxy layer (like gRPC-Web), making REST the more practical choice for public APIs.

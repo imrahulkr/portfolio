@@ -1,0 +1,109 @@
+---
+title: "Chapter 90: Case Study — AI Coding Copilot"
+description: "A production code-generation assistant: repository-aware context retrieval, sandboxed code execution as a tool, correctness evaluation beyond text quality, and the specific safety considerations of an agent that writes and runs code."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 14
+partTitle: "Applied Case Studies"
+chapter: 90
+totalChapters: 96
+tags: ["ai-system-design", "coding-copilot", "code-generation", "sandboxing", "case-study", "interview-prep"]
+---
+
+## Introduction
+
+This chapter examines a code-generation assistant — an application where the "content" being generated is itself executable, introducing a genuinely distinct safety consideration this series hasn't directly addressed: the model's own output, if executed, becomes an action with real consequences, blurring Chapter 67's distinction between "generating text" and "taking action."
+
+## Repository-Aware Retrieval: RAG Over Code, Not Documents
+
+Directly extending Chapter 61's chunking discipline to source code specifically: a coding copilot needs context from the surrounding codebase (related functions, existing conventions, imported dependencies) — chunked along code-specific boundaries (function or class definitions) rather than the prose-oriented semantic sections Chapter 61's original examples used.
+
+```python
+def chunk_source_code(file_content: str, language: str) -> list[dict]:
+    """
+    Directly extends Ch. 61's "chunk boundary should match natural
+    content structure" principle to code — a function or class
+    definition is the natural chunking unit, analogous to how
+    Ch. 88 established a presentation slide as ITS format's
+    natural boundary.
+    """
+    return parse_into_functions_and_classes(file_content, language)  # AST-based
+                                                                          # parsing,
+                                                                          # not
+                                                                          # arbitrary
+                                                                          # line counts
+```
+
+## Code Execution as a Tool: The Sandboxing Requirement
+
+Directly extending Chapter 68's tool-execution architecture with a domain-specific, non-negotiable requirement: a "run this code" tool must execute in an isolated sandbox with no access to the host system, network, or sensitive credentials — directly the same structural, not instructional, safety principle Chapter 68 established for its SQL-tool example, now essential rather than merely a good practice, since code execution's potential consequence space is unbounded.
+
+```python
+def execute_code_tool(code: str, sandbox_executor) -> str:
+    """
+    Directly extends Ch. 68's structural-constraint principle —
+    the sandbox's ISOLATION (no filesystem, network, or credential
+    access) is a STRUCTURAL guarantee, not a prompt asking the
+    model to "please write safe code."
+    """
+    return sandbox_executor.run(
+        code, timeout_seconds=10, network_access=False, filesystem_access="read_only_tmp"
+    )
+```
+
+**Why this specific tool cannot rely on any instructional safeguard at all**: unlike Chapter 68's SQL-tool example, where the model's INTENT still matters somewhat (a schema restriction limits what kind of query can be proposed), arbitrary code execution has a genuinely unbounded space of possible harmful actions — a sandbox's structural isolation is the only mechanism that can provide a real guarantee here, since no combination of prompting or instruction could enumerate and prevent every possible harmful code pattern in advance.
+
+## Correctness Evaluation: Beyond Text Quality to Execution-Based Testing
+
+Directly extending Chapter 75's evaluation discipline with a domain-specific advantage most LLM applications don't have: generated code's correctness can often be *directly, objectively verified* by actually running it against test cases, rather than relying solely on LLM-as-judge or human evaluation.
+
+```python
+def evaluate_generated_code(generated_code: str, test_cases: list, sandbox_executor) -> float:
+    """
+    Directly extends Ch. 75's evaluation portfolio with a
+    DOMAIN-SPECIFIC advantage — code correctness is often
+    OBJECTIVELY, PROGRAMMATICALLY verifiable, unlike most of
+    this Part's LLM-as-judge-dependent evaluation dimensions.
+    """
+    passed = sum(1 for tc in test_cases if sandbox_executor.run(generated_code, tc.input) == tc.expected)
+    return passed / len(test_cases)  # a genuinely objective, ground-truth
+                                        # metric most LLM applications lack
+```
+
+**Why this doesn't eliminate the need for Chapter 75's other evaluation dimensions**: execution-based correctness measures whether the code *works* for the specific test cases provided, but says nothing about faithfulness to the user's actual broader intent, code quality, security vulnerabilities the tests don't happen to exercise, or whether the code introduces a maintainability problem — Chapter 75's full evaluation portfolio (faithfulness, red-teaming for insecure code patterns) remains necessary alongside this objective correctness signal, not replaced by it.
+
+## Key Takeaways
+
+- Repository-aware retrieval requires code-specific, AST-based chunking (function and class boundaries) rather than the prose-oriented chunking Chapter 61's original examples addressed, directly extending Chapter 61's discipline to a new content type.
+- Code execution as a tool requires structural sandboxing (no filesystem, network, or credential access) as a non-negotiable requirement, since code execution's unbounded consequence space makes any purely instructional safeguard insufficient, more strongly than even Chapter 68's original SQL-tool example.
+- Generated code correctness can often be objectively, programmatically verified through execution against test cases — a genuine evaluation advantage most LLM applications this series has covered don't have.
+- Execution-based correctness testing doesn't replace Chapter 75's other evaluation dimensions (faithfulness, security red-teaming), since passing provided test cases says nothing about broader code quality, security, or maintainability.
+
+---
+
+## Interview Questions
+
+**1. Why does code chunking require AST-based parsing rather than the semantic-section chunking Chapter 61's original prose-document examples used?**
+Source code has a rigorous, formally-defined structure (functions, classes, modules) that AST parsing directly and reliably extracts, unlike prose's more informal semantic sections that require a model or heuristic to infer boundaries — using code's own formal structure as the chunking boundary produces chunks that correspond to genuinely coherent units of code meaning (a complete function, not an arbitrary line-count slice that might cut a function in half), directly extending Chapter 61's "match the chunk boundary to the content's natural structure" principle with a domain where that natural structure is formally, unambiguously defined.
+*Follow-up: What would go wrong if a coding copilot used simple, arbitrary line-count chunking instead of AST-based parsing?*
+A fixed line-count chunk could split a function definition across two separate chunks, meaning neither chunk alone contains the complete, coherent unit of code logic — severely degrading the retrieval system's ability to surface a genuinely useful, complete code reference when a related function is needed, directly the same chunking-quality degradation Chapter 61 warned against generally, now concretely illustrated for code.
+
+**2. Why does this chapter argue that code execution as a tool "cannot rely on any instructional safeguard at all," more strongly than Chapter 68's original SQL-tool example?**
+Chapter 68's SQL-tool restriction (limiting to SELECT-only queries) still constrains the model to a BOUNDED, ENUMERABLE space of possible queries a schema-level restriction can meaningfully limit; arbitrary code execution has a genuinely UNBOUNDED space of possible actions (any conceivable program logic), meaning no schema-level or instructional restriction could enumerate and prevent every possible harmful pattern in advance — only a sandbox's STRUCTURAL isolation (no matter what code executes, it CANNOT access the filesystem, network, or credentials) provides a real guarantee here, since the guarantee comes from the EXECUTION ENVIRONMENT's isolation, not from restricting what the code itself can express.
+*Follow-up: Would a code-review step before execution (having the model review its own code for safety before running it) provide a meaningful additional safeguard here?*
+This would be a purely instructional safeguard (asking the model to correctly identify its own code as safe or unsafe) subject to the exact same reliability limitations Chapter 68 and Chapter 74 have established throughout this series for any instruction-following behavior — it could provide SOME additional value as one layer within Chapter 73's defense-in-depth architecture, but should never be relied upon as a SUBSTITUTE for the sandbox's structural isolation, which remains the only mechanism providing an actual guarantee regardless of whether this additional review step succeeds or fails.
+
+**3. Why is execution-based correctness testing described as a "genuine evaluation advantage" this domain has that most other LLM applications this series has covered lack?**
+Most of this series' evaluation methodology (Chapter 75's LLM-as-judge, human relevance judgments) relies on a JUDGE's assessment of quality, itself subject to the shared-bias and reliability concerns this series has raised repeatedly; code correctness against a well-defined test case is OBJECTIVELY, PROGRAMMATICALLY verifiable — running the code and checking its output against an expected value requires no judge model's subjective assessment at all, providing a genuinely more reliable, ground-truth signal than most other LLM application domains can access for their core quality dimension.
+*Follow-up: What kind of LLM application from earlier in this Part could potentially access a SIMILAR objective, execution-based evaluation advantage, and why?*
+Chapter 89's customer-support agent, when it invokes a WELL-DEFINED tool with a verifiable outcome (did the order lookup return the actual, correct order status, checkable against the underlying database's ground truth) has a similarly objective evaluation opportunity FOR THAT SPECIFIC TOOL-CALL COMPONENT — though this doesn't extend to the agent's broader conversational and reasoning quality the way code execution's advantage extends more comprehensively to code generation's PRIMARY quality dimension (does the code work).
+
+**4. Why doesn't passing all provided test cases guarantee the generated code is genuinely high-quality or safe, connecting to a broader theme this series has established about evaluation completeness?**
+Test cases exercise specific, anticipated input-output pairs but cannot exhaustively cover every possible input, edge case, or security vulnerability the code might contain — directly the same "average-case, organic validation doesn't guarantee worst-case robustness" gap Chapter 74 established for adversarial testing, now applied to code correctness: passing organic test cases doesn't guarantee the code is robust against adversarial or unusual inputs, or that it doesn't contain a security vulnerability the test suite simply never happened to exercise.
+*Follow-up: How would you extend this chapter's evaluation approach to specifically catch security vulnerabilities that functional test cases might miss?*
+I'd apply a security-focused static analysis tool or a dedicated security-vulnerability classifier as an ADDITIONAL, SEPARATE evaluation layer (directly extending Chapter 73's layered-defense principle to code-quality evaluation) — checking for known vulnerability patterns (SQL injection, unsafe deserialization) independent of whether the code happens to pass its functional correctness tests, since functional correctness and security are genuinely distinct dimensions this chapter's test-case-based evaluation alone doesn't address.
+
+**5. How would you diagnose whether a coding copilot's poor suggestion quality stems from insufficient repository context retrieval versus a genuine model capability limitation, extending this Part's diagnostic discipline?**
+Directly extending this series' consistent stage-by-stage diagnostic approach — check whether the retrieval stage is actually surfacing the genuinely relevant, related code context (Chapter 66's context-precision-and-recall framing, applied to code) — if relevant context is being retrieved but the model still produces poor suggestions, this points toward a model-capability or prompt-construction issue; if the relevant context is NOT being retrieved at all, this points toward the chunking or retrieval mechanism (this chapter's AST-based chunking discussion) as the responsible component instead.
+*Follow-up: What remediation would each of these two diagnoses point toward?*
+Insufficient retrieval points toward improving the chunking strategy or retrieval mechanism (perhaps expanding the retrieved context window or improving the embedding model for code specifically); a genuine model-capability limitation points toward using a more capable underlying model or providing more explicit, structured prompting guidance — two genuinely different remediation paths this diagnostic separation is necessary to correctly distinguish.

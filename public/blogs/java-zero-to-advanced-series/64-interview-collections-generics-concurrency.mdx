@@ -1,0 +1,99 @@
+---
+title: "Collections, Generics & Concurrency — Interview Deep Dive"
+description: "A comprehensive, standalone interview-prep chapter covering the Collections Framework, generics, and multithreading — scenario questions, internals-level detail, and cross-topic comparisons drawn from Chapters 16-24 and 38-44."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Dedicated Interview Prep"
+chapter: 64
+totalChapters: 65
+slug: "interview-collections-generics-concurrency"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "interview-prep", "collections", "generics", "concurrency"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 24
+---
+
+This chapter is a standalone interview-prep resource covering the Collections Framework, generics, and concurrency (Chapters 16–24 and 38–44) — the two topic areas most likely to carry significant weight in a mid-to-senior Java interview, since they're where subtle correctness bugs and performance issues most commonly hide in real production code. As with Chapter 63, this focuses on scenario synthesis and tricky edge cases rather than re-explaining fundamentals covered in depth earlier.
+
+## Collections Internals Under Pressure
+
+**1. Walk through exactly what happens, step by step, when a `HashMap` resize is triggered mid-insertion.**
+When adding an entry pushes the map's size past `capacity * loadFactor` (default 0.75), the map allocates a new bucket array at double the previous capacity, then rehashes and reinserts every single existing entry into the new array based on each key's hash modulo the new capacity — an O(n) operation. Since Java 8, if any bucket during this process has accumulated 8+ colliding entries and the table has at least 64 buckets, that bucket is treeified into a Red-Black tree rather than remaining a linked list, bounding that bucket's worst-case lookup at O(log n).
+
+**2. You need a `Map` that's fast, preserves insertion order, and will be used as an LRU cache. Design the solution and explain the key configuration.**
+`LinkedHashMap` constructed with `new LinkedHashMap<>(initialCapacity, 0.75f, true)` — the third argument enables access-order mode, meaning every `get()` moves that entry to the most-recently-used end of the internal linked list. Override `removeEldestEntry(Map.Entry eldest)` to return `true` once `size()` exceeds the desired capacity, and the map automatically evicts the least-recently-used entry on the next `put()` — a complete, correct LRU cache in a handful of lines, no manual eviction logic needed.
+
+**3. Explain precisely why `ConcurrentModificationException` can occur even in genuinely single-threaded code, and why the name is slightly misleading in that context.**
+It's thrown by fail-fast iterators whenever the collection's `modCount` changes unexpectedly between iterator operations — this can happen in single-threaded code simply by calling the collection's own `remove()` directly inside a for-each loop instead of using the iterator's `remove()`. The exception's name suggests concurrent (multi-threaded) modification, but the actual detection mechanism (`modCount` mismatch) fires for *any* unexpected structural change bypassing the iterator, regardless of whether multiple threads were actually involved.
+
+**4. A `List<Employee>` needs to support fast lookup by employee ID as well as ordered iteration by hire date. What data structure(s) would you actually use, and why not just one collection?**
+No single standard collection optimizes for both simultaneously — the practical solution is maintaining two collections referencing the same `Employee` objects: a `HashMap<String, Employee>` keyed by ID for O(1) lookup, and a `TreeSet<Employee>` (or a sorted `List`) ordered by hire date for ordered iteration, using a `Comparator`. Since both structures hold references to the *same* underlying objects, this costs extra memory for the second structure's bookkeeping but no duplication of the actual employee data itself.
+
+**5. Why does `PriorityQueue.iterator()` not return elements in priority order, and what's a common mistake this leads to?**
+The internal array only guarantees the heap property (each parent `<=` its children for a min-heap) — a valid heap layout does not imply the underlying array is fully sorted. A common mistake is looping over a `PriorityQueue` with a for-each expecting sorted output; the correct approach for sorted extraction is repeated `poll()` calls, each of which correctly re-settles the heap and returns the true next-smallest element.
+
+## Generics Gotchas
+
+**6. Explain why you can't write `public <T> T[] createArray(int size) { return new T[size]; }`, and what the standard workaround looks like.**
+Due to type erasure, there's no runtime representation of `T` available at the point `new T[size]` would need to create an array with a specific component type — arrays inherently carry runtime type information for their element type (used for `ArrayStoreException` checks), which generics erasure can't supply. The standard workaround uses `java.lang.reflect.Array.newInstance(Class<T> clazz, int size)`, explicitly passing a `Class<T>` token the caller supplies, then casting the result.
+
+**7. A method signature is `void addAll(List<? extends Number> source, List<? super Number> destination)`. Explain exactly why this specific combination of wildcards is chosen, using PECS.**
+`source` is a producer — the method only reads `Number`s out of it, so `? extends Number` allows any list of `Number` or its subtypes (`List<Integer>`, `List<Double>`) to be passed, maximizing caller flexibility for the read side. `destination` is a consumer — the method only writes `Number`s into it, so `? super Number` allows any list typed for `Number` or an ancestor of it (`List<Object>`), since inserting a `Number` is always safe into a list expecting something at least as general.
+
+**8. Why does attempting `List<String> strings = new ArrayList<Object>();` fail to compile, even though a `String` genuinely "is-a" `Object`?**
+Generics are invariant by default in Java — `List<String>` and `List<Object>` are entirely unrelated types from the compiler's perspective, despite the underlying element-type relationship, specifically because allowing this assignment would let code add an arbitrary `Object` (not necessarily a `String`) into what's declared as a `List<String>`, silently violating type safety at a later, unrelated point in the code where a `String` is expected but something else was actually inserted.
+
+**9. Can two overloaded methods, `void process(List<String> list)` and `void process(List<Integer> list)`, coexist in the same class? Explain precisely why or why not.**
+No — after type erasure, both methods have the identical erased signature `void process(List list)`, since the generic type argument is stripped from the compiled bytecode entirely. The compiler rejects this at compile time as a duplicate method definition, since overload resolution and method signatures in the JVM operate on erased types, not the pre-erasure generic parameterization.
+
+## Concurrency: Correctness Under Load
+
+**10. Explain, with the exact interleaving, how two threads calling `counter++` concurrently on a shared, non-volatile, non-synchronized `int count` field can result in a final value lower than the expected total.**
+`count++` decomposes into three steps: read `count`, compute `count + 1`, write the result back. If Thread A reads `count = 5`, then Thread B also reads `count = 5` before A writes back, both threads compute `6` and both write `6` — one of the two increments is completely lost, and the final value is one less than it should be. This can repeat across many interleavings under sustained concurrent access, producing progressively larger discrepancies from the "correct" total.
+
+**11. Why does making the `count` field `volatile` NOT fix the race condition in the previous question?**
+`volatile` guarantees *visibility* — that a write by one thread is immediately visible to a read by another — but provides no *atomicity* guarantee for compound operations. `count++` is still three separate steps even with `volatile`; two threads can still interleave those three steps in the exact same problematic way, losing an update, since `volatile` never makes the whole three-step sequence execute as a single, uninterruptible unit.
+
+**12. What's the minimal correct fix for the `count++` race condition, and what are two different valid approaches?**
+Either wrap the increment in a `synchronized` block/method (Chapter 39), ensuring only one thread executes the full read-increment-write sequence at a time, or replace the plain `int` field with an `AtomicInteger` and call `incrementAndGet()` (Chapter 42), which performs the equivalent operation atomically via a CAS-based, lock-free mechanism — both are valid, with `AtomicInteger` typically being simpler and often faster specifically for this single-value-increment case.
+
+**13. Explain the exact deadlock scenario that arises from two threads locking two shared resources in opposite order, and the standard fix.**
+If Thread A locks Resource 1 then attempts to lock Resource 2 (already held by Thread B), while Thread B simultaneously locks Resource 2 then attempts to lock Resource 1 (already held by Thread A), both threads block forever waiting for a lock the other will never release, since neither can proceed to release what it holds. The standard fix is establishing and consistently enforcing a fixed global lock-acquisition order across the entire codebase (e.g., always lock the resource with the lower ID/hashcode first), which makes the circular-wait condition required for deadlock structurally impossible.
+
+**14. Why must `wait()` always be called inside a `while` loop, and name both distinct reasons this matters.**
+First, spurious wakeups: the JVM specification explicitly permits a thread to wake from `wait()` with no corresponding `notify()` at all, so the awaited condition might not actually be true yet. Second, when `notifyAll()` wakes multiple waiting threads simultaneously but only one can actually proceed to consume/act on the shared condition at a time, every other woken thread must re-check the condition (which may now be false again) rather than assuming its wakeup necessarily means the condition it originally waited for still holds.
+
+**15. Why is `ConcurrentHashMap`'s `computeIfAbsent()` genuinely necessary, rather than just convenient, compared to `if (!map.containsKey(k)) map.put(k, v);`?**
+The `containsKey`-then-`put` sequence is not atomic as a combined operation, even though `ConcurrentHashMap` makes each individual method thread-safe on its own — two threads can both observe `containsKey(k) == false` before either calls `put`, resulting in one thread's intended "insert only if absent" being silently overwritten by the other's unconditional insert. `computeIfAbsent()` performs the entire check-then-act sequence as a single atomic unit from other threads' perspective, closing that race window completely.
+
+**16. Explain precisely why virtual threads help I/O-bound workloads but provide no benefit for CPU-bound computation.**
+Virtual threads gain their scalability advantage specifically from being *unmounted* from their carrier (platform) thread whenever they block on I/O or another blocking operation — freeing that carrier thread to run a different virtual thread in the meantime. A CPU-bound task never blocks at all; it holds its carrier thread continuously for its entire execution regardless of whether it's running on a virtual or platform thread, so there's no unmounting opportunity and therefore no scalability benefit gained from using a virtual thread for that specific workload.
+
+**17. Why can a `synchronized` block "pin" a virtual thread, and what's the practical mitigation?**
+On JVM versions where this limitation applies, a virtual thread executing inside a `synchronized` block cannot be unmounted from its carrier thread while blocked within that block, defeating the scalability benefit for that specific blocking operation. The practical mitigation is preferring `java.util.concurrent.locks.ReentrantLock` over `synchronized` in code paths that will run on virtual threads and perform blocking operations while holding a lock, since `ReentrantLock`'s implementation allows proper unmounting.
+
+**18. A `CompletableFuture` chain `future.thenApply(f1).thenApply(f2)` has `f1` throw an exception. Trace exactly what happens to `f2`, and how you'd add recovery.**
+The exception causes `f1`'s resulting future to complete exceptionally, and that exceptional state propagates directly through `f2`'s stage without ever actually invoking `f2` — it's skipped entirely, continuing to propagate until a stage specifically designed for exception handling (`exceptionally`, `handle`) or a blocking `get()`/`join()` surfaces it. Adding `.exceptionally(ex -> fallbackValue)` between `f1` and `f2` (or after both) would supply a recovery value at that point, allowing subsequent stages to proceed normally with the fallback rather than continuing to propagate the failure.
+
+## Cross-Cutting Synthesis Questions
+
+**19. You're designing a thread-safe cache with a bounded size and LRU eviction, accessed concurrently by many threads. What are the key design decisions, and what would you actually reach for?**
+Key decisions: whether reads dominate writes (favoring an approach that minimizes read contention), whether strict LRU ordering must be maintained under concurrent access (which is genuinely difficult to do both correctly and with low contention using only `LinkedHashMap`, since it's not thread-safe on its own), and whether eviction needs to happen synchronously or can be approximate/eventual. In practice, wrapping `LinkedHashMap` with external synchronization works for moderate concurrency; for higher-throughput needs, a dedicated caching library (like Caffeine) implementing more sophisticated, lock-striped concurrent LRU/LFU algorithms is the standard real-world choice over hand-rolling one from JDK primitives.
+
+**20. Compare and contrast how `CopyOnWriteArrayList` and `ConcurrentHashMap` each achieve thread safety, and why one approach wouldn't work well for the other's typical use case.**
+`CopyOnWriteArrayList` achieves safety by copying the entire backing array on every write, making reads (including iteration) require no locking at all and immune to `ConcurrentModificationException` — ideal for read-heavy, write-rare data. `ConcurrentHashMap` achieves safety via fine-grained per-bin locking/CAS, allowing many concurrent writers to different parts of the map simultaneously — ideal for general-purpose, potentially write-heavy concurrent access. Applying `CopyOnWriteArrayList`'s full-copy-per-write strategy to a frequently-written map-like structure would be prohibitively expensive (O(n) per write regardless of change size), which is exactly why `ConcurrentHashMap` uses a fundamentally different, more granular locking strategy suited to its different expected access pattern.
+
+**21. Explain how generics' type erasure and the Collections Framework's fail-fast iterators are unrelated mechanisms that developers sometimes conflate in interviews.**
+Type erasure (Chapter 17) concerns how generic type parameters are handled by the compiler and JVM — it's entirely about the type system and has nothing to do with concurrent or sequential modification safety. Fail-fast iteration (Chapter 24) concerns detecting structural modification during iteration via `modCount` tracking — a runtime behavioral safety net, unrelated to generics at all (fail-fast behavior would exist identically even in a hypothetical non-generic `ArrayList`). Conflating them (a real pattern in weaker interview answers) suggests a shallow, memorized rather than genuinely internalized understanding of both topics.
+
+**22. Design a producer-consumer system using at least three concepts from this series, and justify each choice.**
+Use a `BlockingQueue` (Chapter 22/40) as the shared buffer, since it correctly handles all internal wait/notify-equivalent coordination without hand-rolled `wait()`/`notify()` code. Use an `ExecutorService` with a bounded `ThreadPoolExecutor` (Chapter 41) to manage a pool of consumer worker threads rather than spawning raw threads per task. Wrap the overall producer-consumer lifecycle's graceful shutdown using `shutdown()` plus `awaitTermination()` to ensure in-flight work completes before the application exits — each choice specifically avoids a documented pitfall (manual wait/notify bugs, unbounded thread creation, and abrupt shutdown data loss, respectively) covered in its originating chapter.
+
+**23. Why might a senior interviewer consider "just use `synchronized` everywhere" a red flag answer to a concurrency design question?**
+Blanket, indiscriminate synchronization increases contention unnecessarily (holding locks longer or more broadly than the actual shared mutable state requires, per Chapter 39's critical-section-scoping guidance), doesn't compose well across multiple independently-synchronized objects (risking deadlock from inconsistent lock ordering, per question 13 above), and often signals the candidate hasn't considered whether a purpose-built concurrent collection, an atomic class, or an immutable-by-design approach would solve the actual problem more precisely, efficiently, and with fewer correctness risks than coarse, one-size-fits-all locking.
+
+**24. A candidate claims "immutable objects don't need synchronization." Is this always true? What's the precise, defensible version of this claim?**
+The precise, defensible claim is: a *genuinely* immutable object (every field `final`, fully initialized before the constructor completes, no reference to `this` escaping during construction, and no mutable objects referenced by its fields that could themselves be changed externally) is inherently thread-safe for reading with no synchronization needed, since there's no mutable shared state to race over. The claim breaks down if the object merely *appears* immutable (no public setters) but internally holds a mutable field a caller can obtain a reference to and modify — genuine immutability requires the stronger, complete guarantee, not just the superficial absence of setters.

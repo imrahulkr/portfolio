@@ -1,0 +1,124 @@
+---
+title: "Interview Questions Part 3: Microservices & Distributed Systems"
+description: "Consolidated rapid-review question bank covering microservices architecture, service discovery, config, gateways, resilience, communication, messaging, tracing, sagas, and security (Chapters 23–34, with Part 6 connections)."
+date: "2026-09-14"
+readTime: "18 min read"
+series: "spring-boot"
+part: 42
+tags: ["Spring Boot", "Interview Questions", "Microservices", "Distributed Systems"]
+---
+
+Third of four dedicated interview-prep chapters. This is the densest part of the series to be quizzed on — most system-design-adjacent interviews live here. Grouped by topic, concise, cross-referenced.
+
+## Microservices Fundamentals
+
+**1. What's the actual, honest justification for splitting into microservices — and what's a weak one?**
+Strong: a genuine, *present* need for independent scaling, real team-autonomy requirements, or a clear, stable bounded context. Weak: "we might need to scale independently someday," or following industry trends. *(Chapter 23)*
+
+**2. What is a "distributed monolith"?**
+Services split physically but still so tightly coupled (shared database, lockstep deployment) that they gain none of microservices' actual benefits while paying all the operational cost. *(Chapter 23)*
+
+**3. Why does the database-per-service rule matter so much?**
+A shared database means a schema change in one service can silently break another — independent deployability is only real if each service's data is exclusively its own. *(Chapter 23)*
+
+## Service Discovery
+
+**4. What problem does Eureka solve?**
+Hardcoded service addresses break the moment anything scales, restarts, or moves — Eureka lets services resolve each other by logical name instead. *(Chapter 24)*
+
+**5. What does `@LoadBalanced` actually do?**
+Makes a `WebClient`/`RestTemplate` resolve a logical service name (`http://inventory-service/...`) through the registry at call time, instead of treating it as a literal hostname. *(Chapter 24)*
+
+**6. Why is Eureka's registry "eventually consistent," and what's the practical consequence?**
+Clients cache the registry locally and heartbeat timeouts have a delay — a call can occasionally hit a recently-crashed instance. Design for this with resilience patterns, not by assuming perfect registry accuracy. *(Chapters 24, 27)*
+
+## Centralized Configuration
+
+**7. What specific problem does Config Server solve that per-service `application.yml` doesn't?**
+A shared value duplicated across many services' individual files requires manually updating every copy — Config Server centralizes it in one place (typically Git). *(Chapter 25)*
+
+**8. What does `@RefreshScope` + `/actuator/refresh` let you do?**
+Update certain configuration (like a feature flag) at runtime without a full redeploy — only beans marked `@RefreshScope` are re-initialized. *(Chapter 25)*
+
+## API Gateway
+
+**9. What's the core value of an API Gateway?**
+A single entry point for external clients, and the natural home for cross-cutting concerns (auth, rate limiting, CORS) that would otherwise be duplicated across every service. *(Chapter 26)*
+
+**10. Why should business logic never live in the gateway?**
+It reintroduces the tight coupling and centralized bottleneck microservices were meant to avoid — a "second monolith." *(Chapter 26)*
+
+**11. How does the gateway's rate limiter typically work?**
+A token-bucket algorithm, commonly backed by Redis (shared state across multiple gateway instances) — tokens replenish at a steady rate, bursts consume up to a capacity. *(Chapter 26)*
+
+## Resilience4j
+
+**12. Name the three circuit breaker states and what triggers each transition.**
+CLOSED (normal, tracking failures) → OPEN (failure rate exceeds threshold; calls fail immediately) → HALF-OPEN (after a wait, limited trial calls test recovery) → back to CLOSED or OPEN based on trial results. *(Chapter 27)*
+
+**13. Retry vs. Circuit Breaker — why combine them?**
+Retry handles brief, transient failures. Circuit Breaker handles sustained failures by stopping all further attempts. Retry alone risks hammering a genuinely down dependency; circuit breaker alone gives up too fast on a blip. *(Chapter 27)*
+
+**14. What does a Bulkhead protect against that a Circuit Breaker doesn't?**
+One failing dependency exhausting a *shared* resource pool (threads) needed for calls to other, unrelated, healthy dependencies. *(Chapter 27)*
+
+**15. Why is retrying a payment charge dangerous without extra care?**
+Non-idempotent operations can be double-executed if the original call actually succeeded but the response was lost — solved with an idempotency key. *(Chapter 27)*
+
+## Inter-Service Communication
+
+**16. `RestClient` vs `WebClient` vs OpenFeign — the deciding factor for each?**
+`RestClient`: synchronous, modern default. `WebClient`: needed specifically for non-blocking/reactive composition. OpenFeign: declarative, less boilerplate across many similar calls, tight discovery integration. *(Chapter 28)*
+
+**17. Why is gRPC not a default choice despite its performance advantages?**
+Loses "just curl it" debuggability and universal tooling; only justified for high-volume, latency-sensitive, fully internally-controlled service pairs. *(Chapter 28)*
+
+## Event-Driven Messaging
+
+**18. Kafka vs. RabbitMQ — the one-sentence decision rule?**
+Kafka: replay/audit history, very high throughput, multiple independent consumer groups each needing a full copy. RabbitMQ: complex content-based routing, traditional task-queue semantics, moderate throughput. *(Chapters 29, 30)*
+
+**19. Why must every event consumer be idempotent?**
+At-least-once delivery is the normal operating behavior, not an edge case — a message *will* be redelivered eventually. *(Chapters 29, 30)*
+
+**20. Event vs. command — why does the distinction matter architecturally?**
+An event ("OrderCreated") implies no expectation about the reaction, preserving decoupling. A command ("CreateOrder") implies a specific expected action from a specific receiver, reintroducing coupling. *(Chapter 29)*
+
+**21. What determines which partition a Kafka message lands in, and why does that matter?**
+Its key — same key, same partition, guaranteeing order for related events (e.g., all events for one order ID). *(Chapter 29)*
+
+## Distributed Tracing
+
+**22. Trace vs. span?**
+Trace: the complete record of one request's journey across every service. Span: one timed unit of work within that trace, hierarchically nested. *(Chapter 31)*
+
+**23. How does trace context survive crossing from a synchronous HTTP call into an asynchronous Kafka event?**
+Micrometer Tracing's Kafka instrumentation injects trace context into the message's own headers at publish time, and extracts it on consumption — a distinct mechanism from HTTP header propagation. *(Chapter 31)*
+
+## Sagas & Distributed Transactions
+
+**24. Why can't `@Transactional` span multiple services?**
+No single database transaction manager can coordinate atomic commit/rollback across separate databases — the database-per-service rule (Chapter 23) makes this structurally impossible. *(Chapter 32)*
+
+**25. What is a compensating action, and why isn't it "just a rollback"?**
+An explicit, separate business operation (e.g., "restore stock") that undoes a previous step's effect — there's no shared transaction log to roll back once a local transaction has already committed. *(Chapter 32)*
+
+**26. Choreography vs. orchestration — the deciding factor?**
+Choreography: simple, few-step flows, keeps services decoupled. Orchestration: complex, branching flows where centralized visibility into the whole flow outweighs the added coordinator coupling. *(Chapter 32)*
+
+## Microservices Security
+
+**27. When do you propagate a user's JWT vs. use OAuth2 Client Credentials for an internal call?**
+Propagate the JWT when acting on behalf of a specific user (preserves their authorization context). Use Client Credentials when there's no user context at all — a scheduled job, background processing. *(Chapter 33)*
+
+**28. Why is "it's internal traffic, so it's safe" a dangerous assumption?**
+Defense in depth — if any component or the network perimeter is ever compromised, unsecured internal traffic gives free lateral movement across the whole system. *(Chapter 33)*
+
+## Cross-topic synthesis question
+
+**29. A checkout flow spans `order-service` → `inventory-service` → `payment-service`. Under load, you observe: `inventory-service` calls are timing out intermittently, the circuit breaker for it is flapping between OPEN and HALF-OPEN, and a handful of orders are stuck in PENDING with inventory already decremented but no payment charged. Walk through every relevant chapter's concept involved and how you'd address each symptom.**
+The flapping circuit breaker (Chapter 27) indicates `inventory-service` has a sustained, not transient, problem — check its own health/metrics (Chapter 19) and distributed trace (Chapter 31) to find the actual root cause rather than just tuning the breaker's thresholds. The timeouts specifically suggest a missing or too-long Time Limiter (Chapter 27) — a hung call should fail fast, not hang until some other timeout kicks in. The stuck PENDING orders reveal a saga compensation gap (Chapter 32): the failure between the inventory and payment steps didn't correctly trigger the compensating "restore stock" and "cancel order" actions — audit the orchestrator's failure-handling path specifically for this transition. Longer-term, verify `inventory-service`'s own resource limits (Chapter 35/36) aren't the underlying cause of its degraded performance in the first place.
+
+## Wrapping up
+
+**Chapter 43**, the final dedicated interview chapter, moves from topic-based recall to full system-design and scenario-based questions — the kind asked as open-ended whiteboard exercises rather than "define X."

@@ -1,0 +1,148 @@
+---
+title: "JDBC & Networking Overview"
+description: "A brief tour of raw JDBC (Connection/Statement/ResultSet), the modern java.net.http.HttpClient, and basic socket programming — enough context before Spring Data takes over persistence."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Exception Handling & I/O"
+chapter: 30
+totalChapters: 65
+slug: "jdbc-and-networking-overview"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "jdbc", "networking", "http-client"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 10
+---
+
+## Why This Chapter Is Brief
+
+This series intentionally keeps database access and networking to a high-level overview here — full production-grade persistence (connection pooling, ORMs, transaction management) is covered in depth in the companion Spring Boot series, where Spring Data JPA and `JdbcTemplate` handle nearly all of the boilerplate shown below automatically. Understanding raw JDBC and sockets, though, is what makes it clear *what* those frameworks are actually doing for you underneath.
+
+## Raw JDBC — The Four Core Objects
+
+```java
+String url = "jdbc:postgresql://localhost:5432/mydb";
+
+try (Connection conn = DriverManager.getConnection(url, "user", "password");
+     PreparedStatement stmt = conn.prepareStatement(
+         "SELECT id, name FROM employees WHERE department = ?")) {
+
+    stmt.setString(1, "Engineering");
+
+    try (ResultSet rs = stmt.executeQuery()) {
+        while (rs.next()) {
+            System.out.println(rs.getInt("id") + ": " + rs.getString("name"));
+        }
+    }
+}
+```
+
+- **`Connection`** — represents a live database session; expensive to create, which is exactly why real applications use a *connection pool* (like HikariCP, Spring Boot's default) rather than opening a fresh one per query.
+- **`PreparedStatement`** — a precompiled SQL statement with `?` placeholders, filled in via `setString()`/`setInt()`/etc. **Always prefer this over plain `Statement`** with string-concatenated SQL — it prevents SQL injection entirely, since parameter values are never interpreted as SQL syntax.
+- **`ResultSet`** — a cursor over the query's result rows; `rs.next()` advances it one row at a time, returning `false` once exhausted.
+- All three implement `AutoCloseable`, which is exactly why try-with-resources (Chapter 27) is the standard pattern for JDBC code.
+
+```java
+// NEVER do this — vulnerable to SQL injection
+String sql = "SELECT * FROM employees WHERE name = '" + userInput + "'";
+```
+
+## Basic Networking with `java.net.http.HttpClient` (Java 11+)
+
+The modern, built-in HTTP client — replacing the older, clunkier `HttpURLConnection` for virtually all new code.
+
+```java
+HttpClient client = HttpClient.newHttpClient();
+
+HttpRequest request = HttpRequest.newBuilder()
+        .uri(URI.create("https://api.example.com/users/1"))
+        .header("Accept", "application/json")
+        .GET()
+        .build();
+
+HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+System.out.println(response.statusCode());   // 200
+System.out.println(response.body());          // response JSON as a String
+```
+
+`HttpClient` also supports a fully asynchronous, non-blocking API via `sendAsync()`, returning a `CompletableFuture<HttpResponse<T>>` (Chapter 42 covers `CompletableFuture` in depth):
+
+```java
+client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+      .thenApply(HttpResponse::body)
+      .thenAccept(System.out::println);
+```
+
+## Basic Socket Programming
+
+At the lowest level, `java.net.Socket` (client) and `java.net.ServerSocket` (server) provide raw TCP communication — this is the foundational layer that HTTP clients, database drivers, and virtually all network protocols are ultimately built on top of.
+
+```java
+// Minimal TCP server
+try (ServerSocket serverSocket = new ServerSocket(8080)) {
+    try (Socket clientSocket = serverSocket.accept();   // blocks until a client connects
+         BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+         PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)) {
+
+        String line = in.readLine();
+        out.println("Echo: " + line);
+    }
+}
+```
+
+```java
+// Minimal TCP client
+try (Socket socket = new Socket("localhost", 8080);
+     PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+     BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+
+    out.println("Hello, server!");
+    System.out.println(in.readLine());   // "Echo: Hello, server!"
+}
+```
+
+In real applications, you'll almost never write raw sockets directly — Spring Boot's embedded Tomcat/Netty handles the server side, and `HttpClient`/`RestTemplate`/`WebClient` handle the client side. Knowing this layer exists clarifies what those tools are abstracting away.
+
+## Key Takeaways
+
+- Always use `PreparedStatement` with parameter placeholders, never string-concatenated SQL, to prevent SQL injection.
+- `Connection`, `PreparedStatement`, and `ResultSet` are all `AutoCloseable` — use try-with-resources.
+- `java.net.http.HttpClient` (Java 11+) is the modern standard for HTTP calls, supporting both synchronous and asynchronous requests.
+- Raw sockets are the foundational layer beneath HTTP, JDBC, and most network protocols, but are rarely hand-written in typical application code.
+
+---
+
+## Interview Questions
+
+**1. Why should `PreparedStatement` always be preferred over `Statement` with manually concatenated SQL strings?**
+`PreparedStatement` treats parameter values strictly as data, never as executable SQL syntax, which completely prevents SQL injection attacks — a malicious string like `' OR '1'='1` passed as a parameter is treated as a literal string value to match, not as SQL logic that alters the query. String concatenation, by contrast, blends untrusted input directly into the SQL text itself, letting crafted input change the query's actual meaning.
+
+**2. What are the three core JDBC objects involved in running a query, and what does each represent?**
+`Connection` represents an active session with the database. `PreparedStatement` (or `Statement`) represents a SQL command to be executed, precompiled with placeholder parameters in the prepared case. `ResultSet` represents a cursor over the rows returned by a query, advanced one row at a time via `next()`.
+
+**3. Why is opening a fresh `Connection` for every single database operation considered bad practice in a real application?**
+Establishing a database connection is a relatively expensive operation (network handshake, authentication, session setup), so doing it repeatedly for every query adds significant, avoidable latency and resource overhead. Real applications use a connection pool (like HikariCP) that maintains a set of already-open, reusable connections, handing one out on request and returning it to the pool when done, which is exactly what Spring Boot configures automatically by default.
+
+**4. What does `java.net.http.HttpClient` (Java 11+) replace, and what's its main advantage?**
+It replaces the older, considerably more cumbersome `HttpURLConnection` API (and the common practice of reaching for third-party libraries like Apache HttpClient just for basic HTTP calls) as the JDK's own modern, built-in HTTP client. Its main advantages are a cleaner, fluent builder-based API, native support for HTTP/2, and first-class support for both synchronous (`send()`) and fully asynchronous, non-blocking (`sendAsync()`, returning a `CompletableFuture`) request execution.
+
+**5. What does `HttpClient.sendAsync()` return, and how does that relate to concepts covered elsewhere in this series?**
+It returns a `CompletableFuture<HttpResponse<T>>`, representing a result that will become available at some future point without blocking the calling thread while waiting. This ties directly into `CompletableFuture` and asynchronous programming patterns covered in depth in Chapter 42, and is the same general async-composition style (`thenApply`, `thenAccept`, etc.) used throughout modern non-blocking Java code.
+
+**6. What's the relationship between `Socket`/`ServerSocket` and higher-level protocols like HTTP?**
+`Socket` and `ServerSocket` provide raw TCP communication — an ordered, reliable byte stream between two endpoints, with no inherent understanding of "requests," "responses," "headers," or any application-level protocol structure. HTTP (and virtually every other application-layer network protocol) is built entirely on top of this raw TCP foundation, defining a specific message format and set of rules for exchanging data over that same underlying byte-stream connection.
+
+**7. Why does `ServerSocket.accept()` block, and what does that imply for handling multiple simultaneous client connections with only the pattern shown in a minimal example?**
+`accept()` blocks the calling thread until a client actually initiates a connection, since the server has no way to know in advance when (or if) a connection attempt will occur. A minimal single-threaded server handling one `accept()` call at a time can only serve one client connection before looping back to accept the next — real concurrent servers either spawn a new thread (or use a thread pool) per accepted connection, or use non-blocking NIO channels with a `Selector` (Chapter 29) to handle many connections on fewer threads.
+
+**8. Why does this series intentionally not go deep into JDBC connection pooling, ORM mapping, or transaction management here?**
+Those topics are covered in much greater depth in the companion Spring Boot series, where Spring Data JPA, `JdbcTemplate`, and declarative `@Transactional` handling abstract away nearly all the boilerplate and manual resource management raw JDBC requires. This chapter's purpose is only to establish enough foundational understanding of what's actually happening underneath those abstractions, not to duplicate that deeper, framework-specific coverage.
+
+**9. What does `ResultSet.next()` do, and what does it return once all rows have been consumed?**
+It advances the cursor to the next row in the result set and returns `true` if a row is available, or `false` once the cursor has moved past the last row — this is why the standard JDBC iteration pattern is a `while (rs.next()) { ... }` loop, since `next()` must be called once before accessing the very first row, and its boolean return value naturally drives loop termination.
+
+**10. Why are `Connection`, `PreparedStatement`, and `ResultSet` all designed to implement `AutoCloseable`?**
+Each represents a resource tied to underlying, limited system or network resources (database connections, server-side cursor state) that must be explicitly released when no longer needed, or they can leak and eventually exhaust available connections/resources on the database server. Implementing `AutoCloseable` lets all three participate directly in try-with-resources (Chapter 27), ensuring they're reliably closed — in the correct nested order — even if an exception occurs partway through a database operation.

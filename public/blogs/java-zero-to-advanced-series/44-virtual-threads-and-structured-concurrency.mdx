@@ -1,0 +1,141 @@
+---
+title: "Virtual Threads & Structured Concurrency"
+description: "Project Loom's virtual threads, how they differ from platform threads, when they help (and when they don't), and the structured concurrency API preview."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Concurrency & Multithreading"
+chapter: 44
+totalChapters: 65
+slug: "virtual-threads-and-structured-concurrency"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "concurrency", "virtual-threads", "project-loom", "java21"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## The Problem: Platform Threads Are Expensive
+
+Every `Thread` covered in Chapter 38 is a **platform thread** — a thin wrapper around a genuine OS thread, each consuming roughly 1MB of stack memory and requiring an OS-level context switch to schedule. This fundamentally limits how many can exist concurrently — typically a few thousand before exhausting memory or scheduling capacity — which is precisely why traditional high-concurrency servers rely on bounded thread pools (Chapter 41) and asynchronous, non-blocking programming (`CompletableFuture`, reactive frameworks) rather than "one thread per request."
+
+## Virtual Threads (Java 21) — Lightweight, JVM-Managed Threads
+
+Virtual threads, finalized as a standard feature in Java 21 (JEP 444, part of Project Loom), are threads managed **entirely by the JVM**, not the OS. They're dramatically cheaper — millions can exist concurrently, each consuming only a small amount of heap memory rather than a dedicated OS thread and its full stack.
+
+```java
+Thread vThread = Thread.ofVirtual().start(() -> {
+    System.out.println("Running in a virtual thread: " + Thread.currentThread());
+});
+
+// Or, via an executor specifically designed for one-virtual-thread-per-task
+try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (int i = 0; i < 100_000; i++) {
+        executor.submit(() -> {
+            Thread.sleep(Duration.ofSeconds(1));   // blocking call — but doesn't block a platform thread!
+            return null;
+        });
+    }
+}   // executor.close() (via try-with-resources) waits for all submitted tasks to finish
+```
+
+Creating 100,000 platform threads would almost certainly exhaust available memory; 100,000 virtual threads is entirely routine.
+
+## How Virtual Threads Actually Work: Mounting and Unmounting
+
+A virtual thread runs on top of a small pool of ordinary **platform threads**, called **carrier threads**. When a virtual thread performs a blocking operation (I/O, `Thread.sleep`, waiting on a lock), the JVM **unmounts** it from its carrier thread — freeing that platform thread to run a *different* virtual thread — and **remounts** the original virtual thread onto some available carrier thread once it's ready to continue.
+
+![Diagram: many virtual threads being unmounted and remounted onto a small pool of carrier (platform) threads, showing a blocked virtual thread freeing its carrier thread to run a different virtual thread in the meantime](/diagrams/ch44-virtual-thread-mounting.svg)
+
+This is the crucial insight: **blocking code, written in the normal, simple, sequential style, becomes cheap** when run on a virtual thread — you get the scalability benefits traditionally associated with asynchronous/reactive programming, while keeping the straightforward, easy-to-debug, easy-to-stack-trace blocking code style.
+
+```java
+// This simple, blocking-style code scales to hundreds of thousands of concurrent invocations
+// when each call runs on its own virtual thread — no reactive operators, no callback chains needed
+public String fetchUserData(String userId) {
+    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+    return response.body();
+}
+```
+
+## Virtual Threads vs. Platform Threads — When to Use Which
+
+| | Platform Thread | Virtual Thread |
+|---|---|---|
+| Backed by | Dedicated OS thread | JVM-managed, runs on a small carrier pool |
+| Typical count | Hundreds to low thousands | Hundreds of thousands to millions |
+| Best for | CPU-bound work | I/O-bound / blocking-heavy work with high concurrency |
+| Thread pooling needed? | Yes — reuse is essential | No — designed to be created freely, one per task |
+
+**Critical distinction: virtual threads help with I/O-bound concurrency, not CPU-bound throughput.** They don't add more CPU cores or make individual computations faster — a CPU-bound task (heavy numerical computation) gains nothing from running on a virtual thread instead of a platform thread, since it never blocks and never frees up its carrier thread anyway. Virtual threads shine specifically when an application has *many concurrent tasks that spend most of their time waiting* (typical of web servers handling many simultaneous requests doing database calls, HTTP calls to other services, etc.).
+
+## A Pitfall: `synchronized` Can "Pin" a Virtual Thread
+
+Historically (and still relevant on some JDK versions), a virtual thread executing inside a `synchronized` block or method **cannot be unmounted** from its carrier thread while blocked — it stays "pinned," defeating the scalability benefit for that specific blocking operation. The general recommendation is to prefer `java.util.concurrent.locks.ReentrantLock` (Chapter 39) over `synchronized` in code that will run on virtual threads and performs blocking operations while holding the lock, since `ReentrantLock` doesn't pin.
+
+## Structured Concurrency (Preview API)
+
+Structured concurrency (introduced as a preview feature alongside virtual threads) treats a group of related concurrent subtasks as a single unit of work — if one subtask fails, the others are automatically cancelled, and the parent task doesn't proceed until all subtasks have either completed or been cancelled, keeping concurrent code's error handling and cancellation as disciplined as ordinary sequential try/catch blocks.
+
+```java
+try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+    Subtask<String> userTask = scope.fork(() -> fetchUser(userId));
+    Subtask<String> orderTask = scope.fork(() -> fetchOrders(userId));
+
+    scope.join();            // waits for both subtasks
+    scope.throwIfFailed();   // propagates an exception if either subtask failed
+
+    String combined = userTask.get() + orderTask.get();
+}
+// leaving the try-with-resources scope guarantees BOTH subtasks are complete or cancelled — no leaked threads
+```
+
+This directly addresses a well-known weakness of unstructured concurrency (including raw `CompletableFuture` composition) — it's easy to accidentally leave "orphaned" background tasks running after a parent operation has already failed or been cancelled, since nothing inherently ties a spawned task's lifetime to its logical parent's lifetime. As of Java 21, structured concurrency remains a **preview API** (requiring `--enable-preview`) and is expected to stabilize in a future release.
+
+## Key Takeaways
+
+- Virtual threads (Java 21+) are JVM-managed, extremely lightweight threads that make blocking, sequential-style code scale to massive concurrency without the memory cost of platform threads.
+- They help specifically for I/O-bound/blocking-heavy concurrent workloads — they provide no benefit for CPU-bound computation.
+- Avoid `synchronized` blocks around blocking operations in virtual-thread code, since they can "pin" the virtual thread to its carrier thread; prefer `ReentrantLock`.
+- Structured concurrency (preview) ties a group of concurrent subtasks' lifetimes together, so failures and cancellation propagate cleanly without leaked background tasks.
+
+---
+
+## Interview Questions
+
+**1. What is a virtual thread, and how does it fundamentally differ from a traditional (platform) thread?**
+A platform thread is a thin wrapper directly around a dedicated OS thread, consuming significant OS resources (roughly 1MB of stack memory per thread) and requiring OS-level scheduling. A virtual thread is managed entirely by the JVM itself, running on top of a small pool of platform threads (carrier threads), and consumes only a small amount of heap memory — enabling hundreds of thousands or millions to exist concurrently, far beyond what's feasible with platform threads.
+
+**2. What are "carrier threads," and what's their relationship to virtual threads?**
+Carrier threads are ordinary platform threads that actually execute virtual threads' code at any given moment — a relatively small, fixed-size pool of them (by default, sized to the number of available processor cores). A virtual thread is "mounted" onto a carrier thread while actively running, and "unmounted" from it whenever the virtual thread blocks, freeing that carrier thread to run a different virtual thread in the meantime.
+
+**3. What happens when a virtual thread performs a blocking operation, like a network call or `Thread.sleep()`?**
+Rather than blocking an entire OS thread (as would happen with a platform thread), the JVM unmounts the virtual thread from its carrier thread and parks it, allowing the now-freed carrier thread to immediately go run a different, ready-to-execute virtual thread. Once the blocking operation completes (data arrives, the sleep duration elapses), the JVM remounts the original virtual thread onto some available carrier thread to continue execution.
+
+**4. Do virtual threads make CPU-bound computations run faster?**
+No — virtual threads address the cost of *blocking and waiting*, not raw computational throughput; a CPU-bound task that never blocks holds onto its carrier thread for its entire execution regardless of whether it's a virtual or platform thread, gaining nothing from being virtual. Virtual threads specifically benefit workloads with high concurrency where individual tasks spend much of their time waiting on I/O or other blocking operations, not workloads that are constantly computing.
+
+**5. Why is a virtual-thread-per-task model (`Executors.newVirtualThreadPerTaskExecutor()`) not typically combined with traditional thread pooling?**
+Virtual threads are cheap enough to create and discard freely — the entire point is that you don't need to reuse them via pooling the way you must with expensive platform threads (Chapter 41's core motivation for thread pools). Creating a fresh virtual thread per task, rather than pooling and reusing a fixed set, is the idiomatic and recommended pattern precisely because virtual thread creation overhead is negligible.
+
+**6. What does it mean for a virtual thread to become "pinned," and what commonly causes it?**
+A pinned virtual thread cannot be unmounted from its carrier thread even while blocked, meaning the carrier thread is unable to run any other virtual thread during that time — defeating the scalability benefit for that specific blocking operation. Executing a blocking operation while inside a `synchronized` block or method is a well-known cause of pinning (on JDK versions where this limitation still applies), which is why `ReentrantLock` is generally recommended over `synchronized` for code paths involving blocking operations that will run on virtual threads.
+
+**7. Why does the general guidance suggest replacing `synchronized` with `ReentrantLock` specifically in virtual-thread-heavy code?**
+`ReentrantLock` (and other `java.util.concurrent.locks` mechanisms) is implemented in a way that allows a virtual thread waiting on it to be properly unmounted from its carrier thread, unlike `synchronized`, which (on JVM versions where this limitation is present) pins the virtual thread to its carrier for the duration of the blocking wait — undermining the scalability benefit virtual threads are meant to provide for exactly the kind of blocking, lock-contended code this matters most for.
+
+**8. What problem does structured concurrency aim to solve compared to unstructured approaches like manually composed `CompletableFuture` chains?**
+Unstructured concurrency makes it easy for a spawned subtask's lifetime to become disconnected from its logical parent task — if the parent operation fails or is cancelled, nothing automatically ensures already-running background subtasks are also cancelled, potentially leaving "orphaned" work running indefinitely and consuming resources. Structured concurrency ties a group of subtasks' lifetimes explicitly to their enclosing scope, so failure or cancellation of the scope automatically propagates to (and cancels) all its subtasks, and the scope cannot be exited until every subtask has definitively finished one way or another.
+
+**9. In the structured concurrency example using `StructuredTaskScope.ShutdownOnFailure()`, what happens if one of the two forked subtasks throws an exception?**
+`ShutdownOnFailure` automatically cancels the sibling subtask(s) still running as soon as any one subtask fails, rather than letting them continue running needlessly toward a result the parent will ultimately discard anyway. Calling `scope.throwIfFailed()` after `scope.join()` then propagates that original failure to the calling code, giving the parent a single, clear point to handle the combined outcome rather than needing to separately inspect each subtask's individual status.
+
+**10. Why might an existing, deeply asynchronous reactive codebase (e.g., built on Project Reactor or RxJava) not need to be rewritten just because virtual threads are now available?**
+Reactive frameworks already solve the same fundamental problem virtual threads address — efficiently handling large numbers of concurrent, mostly-waiting operations without one dedicated OS thread per operation — using a different, non-blocking, callback/operator-based programming model. Virtual threads primarily offer a *simpler alternative path* to that same scalability for teams who prefer writing straightforward, sequential-looking blocking code rather than adopting the reactive style; they're not strictly required to replace an already-working reactive system, though they can simplify new code that would otherwise need to be written reactively purely for scalability reasons.
+
+**11. Is structured concurrency a finalized, stable feature as of Java 21?**
+No — as of Java 21, structured concurrency (the `StructuredTaskScope` API) remains a preview feature, requiring the `--enable-preview` compiler and runtime flag to use, and its exact API details are still subject to change before final standardization in a future JDK release. Virtual threads themselves, by contrast, were finalized as a standard, non-preview feature in Java 21.
+
+**12. Given a Spring Boot application handling thousands of concurrent HTTP requests that each make a blocking database call, how might virtual threads change the application's threading model?**
+Traditionally, such an application would rely on a bounded platform-thread pool (like Tomcat's default worker thread pool) sized carefully to balance concurrency against the memory/resource cost of platform threads — potentially limiting how many requests can be handled truly concurrently under heavy load. Running request-handling on virtual threads (a capability Spring Boot added support for on Java 21+) allows each incoming request's simple, blocking-style handler code to run on its own cheap virtual thread, letting the application handle far more concurrent in-flight requests (each mostly waiting on its database call) without needing a correspondingly large, expensive platform-thread pool.

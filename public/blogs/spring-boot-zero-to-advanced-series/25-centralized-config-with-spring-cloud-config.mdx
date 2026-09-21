@@ -1,0 +1,215 @@
+---
+title: "Centralized Configuration with Spring Cloud Config Server"
+description: "Chapter 5 covered per-service configuration and profiles. Once there are many services, keeping each one's config in sync — and rotating a shared secret across all of them — needs a different approach entirely."
+date: "2026-09-14"
+readTime: "11 min read"
+series: "spring-boot"
+part: 25
+tags: ["Spring Boot", "Microservices", "Spring Cloud Config"]
+---
+
+Chapter 5 covered `application.yml` and profiles for a single service. In a system with a dozen services, each maintaining its own scattered configuration files creates a specific, recurring problem: a shared value (a database connection pool size that should be raised system-wide, a rotated API key several services need) now has to be found and changed in a dozen different places, in a dozen different repositories, with no single source of truth.
+
+## The problem, concretely
+
+```
+order-service/src/main/resources/application.yml       ← has payment.gateway.timeout=5000
+payment-service/src/main/resources/application.yml      ← has payment.gateway.timeout=5000
+notification-service/src/main/resources/application.yml ← has payment.gateway.timeout=5000
+```
+
+Three separate files, three separate deployments, one logical value. Rotating the payment gateway's timeout means finding and updating it in three places and redeploying three services — and it's easy to miss one, leaving services silently running with inconsistent configuration.
+
+## Spring Cloud Config Server
+
+Config Server centralizes configuration in one place — typically a Git repository — and every service fetches its configuration from it at startup, instead of packaging configuration inside its own JAR.
+
+```java
+@SpringBootApplication
+@EnableConfigServer
+public class ConfigServerApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ConfigServerApplication.class, args);
+    }
+}
+```
+
+```yaml
+server:
+  port: 8888
+spring:
+  cloud:
+    config:
+      server:
+        git:
+          uri: https://github.com/your-org/config-repo
+          default-label: main
+```
+
+```
+config-repo/ (a separate Git repository, not part of any service's own codebase)
+├── application.yml               ← shared defaults, applied to every service
+├── order-service.yml             ← specific to order-service
+├── order-service-prod.yml        ← order-service, prod profile only
+├── payment-service.yml
+└── notification-service.yml
+```
+
+## Fetching config from the server
+
+```xml
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-config</artifactId>
+</dependency>
+```
+
+```yaml
+# order-service's own, now much smaller, local application.yml
+spring:
+  application:
+    name: order-service
+  config:
+    import: "configserver:http://localhost:8888"
+```
+
+On startup, `order-service` requests its configuration from the Config Server, which resolves and merges `application.yml` (shared) with `order-service.yml` and `order-service-{profile}.yml` (specific), and returns the combined result — exactly mirroring the precedence and profile logic from Chapter 5, just centrally sourced instead of locally packaged.
+
+```
+                 ┌────────────────────┐
+                 │   Config Server      │
+                 │ (reads from Git repo) │
+                 └──────────┬──────────┘
+        ┌───────────────────┼───────────────────┐
+        │ fetch config       │ fetch config       │ fetch config
+        ▼                    ▼                    ▼
+┌──────────────┐    ┌──────────────┐    ┌──────────────────┐
+│ order-service │    │payment-service│    │notification-service│
+└──────────────┘    └──────────────┘    └──────────────────┘
+```
+
+## Refreshing configuration without a redeploy
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+```
+
+```java
+@RestController
+@RefreshScope
+class FeatureFlagController {
+
+    @Value("${feature.new-checkout.enabled}")
+    private boolean newCheckoutEnabled;
+}
+```
+
+```
+POST /actuator/refresh
+```
+
+`@RefreshScope` marks a bean to be re-created (picking up new property values) when a refresh is triggered, without restarting the whole application. Calling `/actuator/refresh` on a service (commonly automated via a webhook from the Git repository, so a config change triggers refresh automatically) re-fetches configuration from the Config Server and re-initializes any `@RefreshScope` beans with the new values — genuinely valuable for something like a feature flag that needs to change quickly without a full redeploy cycle.
+
+## Best practices & gotchas
+
+- **Never commit real secrets directly into the config repository, even though it's centralized.** The same rule from Chapter 5 applies with added force here — a central config repo is an even higher-value target if compromised, since it holds configuration for every service at once. Integrate with a dedicated secrets manager (Vault, AWS Secrets Manager) for genuinely sensitive values instead.
+- **Version the config repository like any other codebase.** Since configuration is now external to each service's own repository, its change history, review process (pull requests), and rollback capability need to be taken just as seriously as application code changes.
+- **`/actuator/refresh` only re-initializes `@RefreshScope` beans — not everything.** A configuration value read once during a non-refresh-scoped bean's construction (most auto-configured infrastructure beans, for instance) won't pick up a change without a full restart; refresh is deliberately scoped to values genuinely intended to change at runtime.
+- **Config Server itself becomes critical infrastructure — plan for its availability accordingly**, similar to the Eureka high-availability point from Chapter 24: if every service fetches configuration from it at startup, an outage could prevent new instances from starting correctly during a deployment or auto-scaling event.
+- **Don't centralize configuration that's genuinely service-specific and never shared.** Centralization's value is for configuration that either needs to be consistent across services or needs runtime-refreshable central control — a value only one service will ever use doesn't need to leave that service's own repository.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| Config Server | Centralizes configuration in one place (typically Git), served to every service |
+| `@EnableConfigServer` | Marks an application as the config server itself |
+| `spring.config.import: configserver:...` | Points a service at the config server on startup |
+| `application.yml` (in config repo) | Shared defaults applied to every service |
+| `{service-name}.yml` | Configuration specific to one named service |
+| `@RefreshScope` | Marks a bean for re-initialization when configuration is refreshed |
+| `/actuator/refresh` | Triggers a re-fetch of configuration without a full restart |
+
+## Wrapping up
+
+Centralized configuration is what keeps a growing number of services from each drifting independently — the same discipline Chapter 5 established for one service, now applied consistently across many. **Chapter 26** moves to the client-facing side of a microservices system: routing, filtering, and rate-limiting external traffic through an API Gateway.
+
+## Interview Questions
+
+**1. What specific problem does Spring Cloud Config Server solve that per-service `application.yml` files (Chapter 5) don't address once a system has many services?**
+It addresses configuration that's shared or needs to stay consistent across multiple services — without centralization, a shared value duplicated across each service's own `application.yml` requires manually finding and updating every copy whenever it changes, with a real risk of missing one and leaving services running with inconsistent configuration.
+
+*Follow-up: For configuration that's genuinely unique to just one service and never shared, is centralizing it in the Config Server still worthwhile?* Not particularly — the value of centralization comes specifically from shared consistency and runtime-refreshable central control; a value only one service ever uses gets little benefit from living in a separate config repository instead of that service's own `application.yml`, and doing so just adds an unnecessary indirection for no real gain.
+
+**2. Where does Spring Cloud Config Server typically store the actual configuration files, and why is a Git repository a common choice?**
+Most commonly a Git repository (though other backends like a filesystem or Vault are also supported). Git is a natural fit because it provides version history, pull-request-based review workflows, and rollback capability for configuration changes for free — treating configuration with the same rigor and change-tracking as application code, rather than as untracked, ad hoc files.
+
+*Follow-up: What operational benefit does having Git-based version history for configuration provide during an incident caused by a bad configuration change?* It allows a fast, precise rollback — reverting the specific problematic commit in the config repository restores the exact prior known-good configuration, and the commit history shows exactly what changed, when, and (via commit messages/PR context) often why, which is significantly faster and less error-prone than trying to manually reconstruct what the previous configuration values were without any change history at all.
+
+**3. How does a service actually retrieve its configuration from Config Server?**
+Via the `spring.config.import: "configserver:http://..."` property, which causes the service to make a request to the Config Server on startup, providing its own application name (and active profile) — the Config Server resolves the appropriate combination of shared and service-specific configuration files (following the same precedence rules as local profiles from Chapter 5) and returns the merged result as the service's effective configuration.
+
+*Follow-up: What happens if the Config Server is unreachable at the moment a service tries to start up?* By default, the service would fail to start, since it can't retrieve configuration it depends on — this is exactly why Config Server availability matters as much as any other critical piece of shared infrastructure (similar to the Eureka high-availability concern from Chapter 24); some setups configure a "fail-fast" toggle or a local fallback configuration specifically to control this behavior more gracefully depending on the service's tolerance for a temporarily unreachable Config Server.
+
+**4. How does Config Server's file-naming and profile convention relate to the profile mechanism covered in Chapter 5?**
+It directly mirrors it: `application.yml` in the config repository provides shared defaults for every service, `{service-name}.yml` provides configuration specific to one named service, and `{service-name}-{profile}.yml` layers profile-specific overrides on top — the same override precedence Chapter 5 established for local files, just resolved centrally by the Config Server instead of from files packaged inside each service's own JAR.
+
+*Follow-up: If both a shared `application.yml` and a service-specific `order-service-prod.yml` in the config repository define the same property, which value takes precedence for `order-service` running with the `prod` profile active?* The more specific file wins — `order-service-prod.yml`'s value takes precedence over the shared `application.yml`'s value, following the same "more specific overrides more general" precedence principle already established for local profile-specific files in Chapter 5.
+
+**5. What is `@RefreshScope`, and what problem does it solve?**
+It marks a Spring bean to be discarded and re-created (picking up any updated property values) when a configuration refresh is triggered, without requiring the entire application to restart. It solves the problem of needing certain configuration values — like a feature flag — to be updated quickly at runtime, rather than requiring a full redeploy/restart cycle every time that specific value needs to change.
+
+*Follow-up: Why isn't every bean automatically refreshable by default, rather than requiring explicit `@RefreshScope`?* Not every bean can safely be re-created mid-application-lifetime without side effects — beans wrapping expensive-to-recreate or stateful resources (a connection pool, for example) could cause real problems if silently discarded and rebuilt while requests are actively using them. Requiring explicit `@RefreshScope` makes refreshability an intentional, reviewed decision for specifically the beans where re-initializing at runtime is genuinely safe and desired, rather than an implicit, potentially risky default applied everywhere.
+
+**6. What does calling `/actuator/refresh` actually do?**
+It triggers the service to re-fetch its configuration from the Config Server and re-initialize any `@RefreshScope`-annotated beans using the newly retrieved values — beans not marked `@RefreshScope` are left untouched and continue using whatever values they were originally initialized with.
+
+*Follow-up: How might a team automate triggering this refresh across many service instances whenever the config repository changes, rather than manually calling the endpoint on every instance?* A common pattern uses a webhook from the Git repository (triggered on a push/merge) that calls a Spring Cloud Bus-integrated endpoint, which then broadcasts a refresh event across every subscribed service instance via a shared message broker — automatically propagating a configuration change to every relevant, running instance without needing to manually call `/actuator/refresh` on each one individually.
+
+**7. Why is it emphasized that real secrets should never be committed directly into the config repository, even though centralizing configuration is otherwise recommended?**
+A centralized config repository holding configuration for every service at once becomes a higher-value target than any single service's own scattered config files — if compromised, an attacker could potentially gain access to secrets for the entire system's services simultaneously, rather than needing to separately find and compromise each service's individual configuration.
+
+*Follow-up: What's the typical alternative for managing genuinely sensitive values (API keys, database passwords) in a Config Server-based setup?* Integrating with a dedicated secrets management system (like HashiCorp Vault, AWS Secrets Manager, or Azure Key Vault) that Config Server (or the individual services directly) can pull sensitive values from at runtime — keeping the actual secret values themselves out of the Git-based config repository entirely, while still allowing non-sensitive configuration to be centrally managed there in the ordinary way.
+
+**8. Why does Config Server itself need to be treated as critical, highly-available infrastructure?**
+If every service depends on successfully fetching its configuration from Config Server at startup, an outage of Config Server could prevent new service instances from starting correctly — which is especially damaging during an active deployment or an auto-scaling event that's trying to bring up new instances in response to increased load, exactly when the system most needs those new instances to succeed.
+
+*Follow-up: What's a mitigation that reduces a running (already-started) service's dependency on Config Server's continued availability after its initial startup?* Configuring services to cache their fetched configuration locally after the initial successful retrieval means an already-running instance doesn't need Config Server to remain available for its continued operation — only new instance startups (or explicit refresh requests) would be affected by a subsequent Config Server outage, meaningfully reducing (though not eliminating) the blast radius of a Config Server outage compared to every request depending on its live availability.
+
+**9. How does centralizing configuration relate to the "database per service" principle from Chapter 23 — is it a contradiction to centralize configuration while keeping data decentralized?**
+It's not a contradiction — the two principles address different concerns. Database-per-service is about each service's *business data* remaining exclusively owned and controlled by that service, preventing hidden coupling through shared data. Configuration (timeouts, feature flags, shared external service URLs) is operational metadata *about* how services run, not business data itself — centralizing it doesn't create the same kind of hidden coupling risk, since it's explicitly designed and intended to be a shared, cross-cutting concern in the first place.
+
+*Follow-up: Could there be a scenario where over-centralizing configuration recreates a version of the same tight-coupling problem the database-per-service rule is meant to avoid?* Yes — if teams start centralizing configuration values that are genuinely service-specific implementation details (not truly shared or cross-cutting) purely out of convenience, changes to one service's internal configuration could require coordinating through a shared repository other teams also depend on, reintroducing unnecessary coupling and coordination overhead; this is why the earlier best-practice note cautions against centralizing configuration that's genuinely service-specific and never shared.
+
+**10. What's the difference between how Chapter 5's `application-{profile}.yml` files are resolved locally versus how Config Server resolves the equivalent files?**
+Locally (Chapter 5), Spring Boot resolves and merges `application.yml` and `application-{profile}.yml` from files packaged within the same service's own classpath/JAR at startup. With Config Server, the equivalent resolution and merging happens on the Config Server itself, reading from the centralized Git repository, and the *result* of that merge is what's returned to the requesting service over HTTP — the merging logic and precedence rules are conceptually identical, but the files live in, and are resolved by, a completely separate, shared server rather than each service's own local classpath.
+
+*Follow-up: Does a service using Config Server still need any local `application.yml` file at all?* Yes, typically a small local file remains — at minimum containing `spring.application.name` (so the service can identify itself when requesting configuration) and `spring.config.import` (pointing at the Config Server's address) — since the service needs some minimal bootstrap configuration to even know how and where to fetch the rest of its configuration from the Config Server in the first place.
+
+**11. Why might a team choose not to adopt Config Server even in a microservices architecture, and instead manage configuration per-service as covered in Chapter 5?**
+For a small number of services with relatively little genuinely shared configuration, and without a strong need for runtime configuration refresh, the added infrastructure and operational complexity of running and maintaining a Config Server (plus its own availability concerns) might not be justified — similar to the broader "don't add infrastructure before a concrete need justifies it" theme established in Chapter 23 for the decision to adopt microservices at all.
+
+*Follow-up: What's a middle-ground approach a team might use instead of a full Config Server, if they still want to avoid duplicating truly shared values across many services?* Using deployment-platform-native configuration management (like Kubernetes ConfigMaps and Secrets, shared and mounted into multiple services' containers) can address the shared-value duplication problem to a meaningful degree without requiring a separate Spring Cloud Config Server application to build, deploy, and maintain — leveraging infrastructure the deployment platform may already provide, similar to the earlier point in Chapter 24 about platform-level service discovery sometimes substituting for Eureka.
+
+**12. If `order-service-prod.yml` in the config repository is updated with a new value, and `order-service` has several running instances in production, do all of them automatically pick up the new value immediately?**
+No — by default, a running instance only re-reads its configuration from Config Server when explicitly triggered (via `/actuator/refresh`, manually or automated), or the next time it restarts and performs its normal startup configuration fetch. A committed change to the config repository alone doesn't automatically and immediately propagate to already-running instances without one of those triggering mechanisms.
+
+*Follow-up: Given this, why is automating the refresh trigger (e.g., via a Git webhook and Spring Cloud Bus, as mentioned earlier) considered valuable rather than just relying on the next natural restart/redeploy cycle?* Relying purely on the next restart means a configuration change (like an urgently needed feature-flag disable, or an urgent timeout adjustment) could take an unpredictable amount of time to actually take effect across all running instances — potentially not until the next scheduled deployment — whereas an automated refresh trigger lets an intentional configuration change take effect promptly and consistently across the fleet, which is precisely the scenario `@RefreshScope` and `/actuator/refresh` exist to support.
+
+**13. How does Config Server's approach compare to simply storing shared configuration values as environment variables injected identically into every service's deployment?**
+Environment variables injected at deployment time are a valid alternative for many cases, but changing them typically requires redeploying (or at least restarting) every affected service to pick up the new value — Config Server, combined with `@RefreshScope` and the refresh mechanism, allows certain configuration to change at runtime without any restart at all, and also provides a single, reviewable, version-controlled source of truth (the Git repository) rather than configuration values scattered across each service's deployment manifests/environment variable definitions.
+
+*Follow-up: Is there a reason a team might use both approaches together, rather than choosing one exclusively?* Yes — environment variables remain well-suited for genuinely static, infrastructure-level or environment-identifying values (which environment/profile is active, which config server URL to use) that a service needs before it can even begin fetching its broader configuration, while Config Server handles the larger body of application-level configuration that benefits from centralized management and potential runtime refresh — the two aren't mutually exclusive and commonly coexist, with environment variables handling the minimal bootstrap information and Config Server handling everything else.
+
+**14. What's a realistic example of a configuration value well-suited to `@RefreshScope`, versus one that genuinely requires a full restart to change safely?**
+A feature flag boolean (like `feature.new-checkout.enabled` from this chapter's example) is well-suited to `@RefreshScope` — flipping it doesn't require rebuilding any expensive underlying resource, just changing which code path executes on the next request. A `DataSource` connection pool's configuration (pool size, connection URL) is a poor fit for simple runtime refresh — safely changing it typically requires carefully draining and re-establishing the entire pool, which is a much more disruptive operation than most `@RefreshScope` use cases are designed for, and is more commonly and safely handled via a full restart instead.
+
+*Follow-up: Could a `DataSource` bean still technically be marked `@RefreshScope`, and what would the practical risk be if it were?* Technically it's possible to mark almost any bean `@RefreshScope`, but doing so for something like a `DataSource` risks disrupting in-flight database operations at the moment of refresh (as the pool is torn down and rebuilt), potentially causing transient errors or connection failures for any requests actively using the pool at that exact moment — this is precisely why `@RefreshScope` should be applied deliberately and selectively, only to beans where a live, in-place re-initialization is genuinely safe, rather than broadly to any bean whose backing configuration might ever change.
+
+**15. Summarize how Config Server changes the relationship between a service's codebase and its configuration, compared to the single-service model established in Chapter 5.**
+In Chapter 5's single-service model, configuration lives inside the service's own codebase/JAR, versioned and deployed together with the application code itself. With Config Server, configuration becomes an externally managed, centrally versioned resource that services fetch at startup (and optionally refresh at runtime) — decoupling the configuration's lifecycle from the application code's deployment lifecycle, enabling both cross-service consistency for shared values and the ability to change certain values without requiring a full code redeployment.
+
+*Follow-up: What's a trade-off introduced by this decoupling that a team adopting Config Server needs to be prepared to manage?* The configuration repository itself now needs its own governance — access control, review process, change tracking, and its own operational reliability (as discussed regarding Config Server's availability) — essentially becoming a second, parallel "codebase" that a team must manage with similar rigor to the actual application repositories, which is a real additional responsibility beyond what a single-service, locally-configured setup ever required.

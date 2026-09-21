@@ -1,0 +1,229 @@
+---
+title: "Spring Core Concepts You Need First: IoC, DI, Beans & the ApplicationContext"
+description: "Every Spring Boot annotation you'll use is a shortcut on top of four core ideas — IoC, dependency injection, beans, and the ApplicationContext. Get these solid before writing real applications."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 2
+tags: ["Spring Boot", "Spring Core", "IoC", "Dependency Injection"]
+---
+
+Before touching a single `@RestController` or `@Repository`, it's worth being precise about four terms that get used loosely: **Inversion of Control**, **Dependency Injection**, **beans**, and the **ApplicationContext**. They're closely related but not the same thing, and interviewers reliably probe the difference.
+
+## Inversion of Control (IoC)
+
+In plain Java, an object typically creates its own dependencies:
+
+```java
+class OrderService {
+    private final PaymentClient paymentClient = new StripePaymentClient();
+}
+```
+
+`OrderService` controls the creation of `StripePaymentClient` — it decides which implementation to use and when to construct it. **Inversion of Control** means flipping that: the object no longer creates its own dependencies. Instead, something external — the *container* — creates and hands them in.
+
+```java
+class OrderService {
+    private final PaymentClient paymentClient;
+
+    OrderService(PaymentClient paymentClient) {   // handed in, not created
+        this.paymentClient = paymentClient;
+    }
+}
+```
+
+IoC is the *principle*. Dependency Injection is the specific *technique* Spring uses to implement it.
+
+## Dependency Injection (DI)
+
+DI is the pattern of supplying an object's dependencies from outside rather than having it look them up or construct them itself. Spring supports three injection styles:
+
+```java
+// Constructor injection — recommended default
+@Service
+class OrderService {
+    private final PaymentClient paymentClient;
+
+    OrderService(PaymentClient paymentClient) {
+        this.paymentClient = paymentClient;
+    }
+}
+
+// Field injection — convenient, but harder to test and hides required dependencies
+@Service
+class OrderService {
+    @Autowired
+    private PaymentClient paymentClient;
+}
+
+// Setter injection — useful for optional dependencies
+@Service
+class OrderService {
+    private PaymentClient paymentClient;
+
+    @Autowired
+    void setPaymentClient(PaymentClient paymentClient) {
+        this.paymentClient = paymentClient;
+    }
+}
+```
+
+**Constructor injection is the recommended default** for required dependencies: it makes dependencies explicit and final, works well with unit testing (no container needed — just call the constructor), and fails fast at startup if a dependency is missing rather than throwing a `NullPointerException` later at runtime.
+
+## Beans and the ApplicationContext
+
+A **bean** is simply an object that Spring's IoC container creates, configures, and manages the lifecycle of. The container that does this is the `ApplicationContext`.
+
+You tell Spring what should become a bean in one of two ways:
+
+```java
+// Component scanning — Spring finds and registers this automatically
+@Service
+class OrderService { }
+
+// Explicit @Bean method in a @Configuration class
+@Configuration
+class AppConfig {
+    @Bean
+    PaymentClient paymentClient() {
+        return new StripePaymentClient();
+    }
+}
+```
+
+`@Component` (and its specializations `@Service`, `@Repository`, `@Controller`) mark a class for **component scanning** — Spring finds it on the classpath and registers it. `@Bean` methods inside a `@Configuration` class give you explicit, imperative control over how an object is constructed — essential when you're wiring a third-party class you don't own and can't annotate.
+
+```
+┌───────────────────────────────────────────┐
+│             ApplicationContext             │
+│  (the IoC container)                       │
+│                                             │
+│   ┌──────────┐  ┌──────────┐  ┌─────────┐  │
+│   │  Bean A  │→│  Bean B  │→ │ Bean C  │  │
+│   └──────────┘  └──────────┘  └─────────┘  │
+│         creates, wires, and manages        │
+│         the lifecycle of every bean        │
+└───────────────────────────────────────────┘
+```
+
+## Bean scopes
+
+By default, every bean is a **singleton** — one shared instance per `ApplicationContext`. Other scopes exist for specific needs:
+
+| Scope | Lifetime |
+|---|---|
+| `singleton` (default) | One instance per container |
+| `prototype` | New instance every time it's requested |
+| `request` | One instance per HTTP request (web apps only) |
+| `session` | One instance per HTTP session (web apps only) |
+
+```java
+@Service
+@Scope("prototype")
+class ReportGenerator { }
+```
+
+Singleton is right for stateless services (the overwhelming majority of Spring beans). Reach for `prototype` only when a bean genuinely holds per-use mutable state that must not be shared.
+
+## Bean lifecycle
+
+```
+Instantiate → Populate properties (DI) → @PostConstruct → Bean ready for use → @PreDestroy → Destroyed
+```
+
+```java
+@Service
+class CacheWarmer {
+
+    @PostConstruct
+    void warmUp() {
+        // runs once, after dependencies are injected, before the bean is used
+    }
+
+    @PreDestroy
+    void cleanup() {
+        // runs once, as the container shuts down
+    }
+}
+```
+
+`@PostConstruct` is commonly used for one-time initialization that depends on injected fields being set (which isn't guaranteed inside the constructor if field/setter injection is used). `@PreDestroy` is used for cleanup — closing connections, flushing buffers — on graceful shutdown.
+
+## Best practices & gotchas
+
+- **Prefer constructor injection over field injection.** Field injection (`@Autowired` on a field) makes a class impossible to instantiate without Spring, hides required dependencies, and prevents making fields `final`.
+- **Circular dependencies are a design smell, not just a technical error.** If Bean A needs Bean B and Bean B needs Bean A, Spring will throw `BeanCurrentlyInCreationException` (constructor injection can't resolve it at all; field injection can, via a proxy trick — but that's a workaround, not a fix). Usually the right fix is extracting shared logic into a third bean both depend on.
+- **Don't overuse `prototype` scope.** Most bugs from "sharing state accidentally" come from putting mutable instance fields on a `singleton` bean, not from picking the wrong scope — fix the statefulness, not the scope.
+- **`@PostConstruct` beats constructor logic for anything that depends on other injected beans**, since all dependencies are guaranteed to be set by the time `@PostConstruct` runs.
+
+## Quick reference
+
+| Term | Definition |
+|---|---|
+| IoC | The principle: objects don't create their own dependencies |
+| DI | The technique: dependencies are supplied from outside (constructor/setter/field) |
+| Bean | An object managed by Spring's container |
+| ApplicationContext | The IoC container — creates, wires, and manages beans |
+| `@Component`/`@Service`/`@Repository`/`@Controller` | Mark a class for component scanning |
+| `@Bean` | Explicitly declare a bean inside a `@Configuration` class |
+| `@Autowired` | Request dependency injection (optional on constructors since Spring 4.3 if there's only one constructor) |
+
+## Wrapping up
+
+IoC, DI, beans, and the `ApplicationContext` are the four ideas every other Spring Boot feature sits on top of. Auto-configuration (next chapter) is really just Spring conditionally registering more beans into this same container based on your classpath. With this foundation in place, **Chapter 3** gets hands-on: creating your first real Spring Boot application with Spring Initializr.
+
+## Interview Questions
+
+**1. What is Inversion of Control?**
+IoC is the principle that an object should not be responsible for creating or locating its own dependencies — that responsibility is inverted to an external entity (the Spring container), which constructs the object's dependencies and supplies them. This decouples classes from specific implementations and makes them easier to test and reconfigure.
+
+**2. What is Dependency Injection, and how does it relate to IoC?**
+DI is the specific technique Spring uses to implement IoC: dependencies are "injected" into an object via its constructor, a setter, or a field, rather than the object instantiating them itself. IoC is the principle; DI is the mechanism.
+
+**3. What is a Spring bean?**
+A bean is any object whose lifecycle — creation, dependency injection, initialization, and destruction — is managed by the Spring IoC container (the `ApplicationContext`), rather than being created directly with `new` by application code.
+
+**4. What's the difference between `@Component` and `@Bean`?**
+`@Component` (and its specializations) is a class-level annotation that marks a class to be automatically discovered via component scanning. `@Bean` is a method-level annotation inside a `@Configuration` class used to explicitly construct and register a bean — necessary when you need imperative control over construction, or when wiring a third-party class you can't annotate directly.
+
+**5. Why is constructor injection generally preferred over field injection?**
+Constructor injection makes dependencies explicit and allows fields to be `final` (immutable once set), makes the class instantiable and testable without a Spring container (`new OrderService(mockClient)` in a unit test), and fails fast at application startup if a required dependency is missing, rather than causing a `NullPointerException` later at runtime.
+
+**6. What are the default and available bean scopes in Spring?**
+The default scope is `singleton` — one shared instance per `ApplicationContext`. Other built-in scopes are `prototype` (a new instance per request for the bean), and, in web applications, `request` and `session` (scoped to an HTTP request or session respectively).
+
+**7. What happens if two beans depend on each other (a circular dependency)?**
+With constructor injection, Spring cannot resolve it — the container cannot fully construct either bean without the other already existing, so it throws a `BeanCurrentlyInCreationException` at startup. With field or setter injection, Spring can resolve it by injecting a partially-initialized bean via an early reference/proxy, but this is generally a signal of a design problem — the usual fix is to extract the shared responsibility into a separate bean both can depend on.
+
+**8. What is the purpose of `@PostConstruct` and `@PreDestroy`?**
+`@PostConstruct` marks a method to run once, immediately after the bean is constructed and all its dependencies are injected — used for initialization logic that needs those dependencies to already be set. `@PreDestroy` marks a method to run once during graceful container shutdown, typically for cleanup like closing connections or releasing resources.
+
+**9. What is the `ApplicationContext`, and how does it differ from a `BeanFactory`?**
+The `ApplicationContext` is Spring's advanced IoC container — it extends the more basic `BeanFactory` with additional enterprise features: event publishing, internationalization support, AOP integration, and eager singleton initialization at startup (whereas `BeanFactory` lazily initializes beans on first use). In practice, virtually all Spring and Spring Boot applications use `ApplicationContext`.
+
+**10. Can a bean be marked `@Component` and also produced by an explicit `@Bean` method for the same class? What happens?**
+That would attempt to register two separate bean definitions for the same type from two different sources, which Spring would generally treat as a bean-naming conflict or duplicate-definition error depending on configuration (`allow-bean-definition-overriding`). In practice you should choose exactly one mechanism per class: `@Component` for classes you own and want scanned, `@Bean` for classes you construct explicitly.
+
+**11. Why is `singleton` the right default scope for most Spring beans, especially services?**
+Most Spring beans — services, repositories, controllers — are stateless: they hold no per-request mutable data, only injected dependencies and possibly configuration values. A single shared instance is more memory-efficient and avoids unnecessary object churn. Scope should only change to `prototype` when a bean genuinely needs fresh, isolated mutable state per use — which is uncommon.
+
+**12. What's a common bug caused by scope misuse, and how would you fix it?**
+Putting mutable instance state on a `singleton`-scoped bean (e.g., a field that accumulates per-request data) causes that state to be shared and corrupted across concurrent requests, since only one instance exists for the whole application. The fix is almost always to make the bean stateless (pass data through method parameters/return values instead of storing it as a field) rather than switching to `prototype` scope, which introduces its own lifecycle complexity.
+
+**13. Does `@Autowired` need to be present on a constructor?**
+Since Spring 4.3, if a class has exactly one constructor, `@Autowired` is optional on it — Spring will use that constructor for injection automatically. If a class has multiple constructors, `@Autowired` must be explicitly placed on the one Spring should use for injection.
+
+**14. What does "fail fast" mean in the context of dependency injection, and why does it matter?**
+"Fail fast" means the application fails to start at all if a required dependency can't be satisfied — for example, if no bean of the required type exists in the context. Constructor injection achieves this naturally because the constructor simply can't be called without all its arguments. This is preferable to discovering a missing dependency as a `NullPointerException` deep in production traffic, long after the class was instantiated.
+
+**15. How would you unit test a class that uses constructor injection, without starting a Spring context?**
+Because constructor injection just requires calling a normal Java constructor, you can instantiate the class directly with mock or fake dependencies — no Spring context needed at all:
+```java
+@Test
+void placesOrderSuccessfully() {
+    PaymentClient mockClient = mock(PaymentClient.class);
+    OrderService service = new OrderService(mockClient);
+    // exercise and assert
+}
+```
+This is one of the practical reasons constructor injection is preferred — it keeps unit tests fast and container-free (covered further in Chapter 17).

@@ -1,0 +1,187 @@
+---
+title: "Java 21 & Virtual Threads in Spring Boot 3.2+"
+description: "Virtual threads are the biggest concurrency change in Java in years — and one of the rare performance features that requires almost no code change to adopt in a traditional Spring MVC application."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 37
+tags: ["Spring Boot", "Java 21", "Virtual Threads", "Concurrency"]
+---
+
+Every chapter in this series has targeted Java 21. This chapter finally covers the single most significant Java 21 feature for a typical Spring Boot web application: virtual threads, and why enabling them is often a one-line configuration change with a real, measurable effect.
+
+## The platform thread problem, revisited
+
+Recall Chapter 8's request pipeline: each incoming request is handled by one thread from a bounded thread pool for the whole duration of that request, including any time spent blocked waiting — on a database query, an external HTTP call (Chapter 28), anything I/O-bound.
+
+```
+Traditional platform threads:
+Thread pool size: 200
+        │
+Request 1 ──▶ Thread 1 ──▶ [blocked waiting on DB] ──▶ ... ──▶ response
+Request 2 ──▶ Thread 2 ──▶ [blocked waiting on API] ──▶ ... ──▶ response
+...
+Request 201 ──▶ NO THREAD AVAILABLE — queues, or is rejected
+```
+
+Platform threads are a genuinely limited, relatively expensive OS-level resource — a typical application might run with a pool of a few hundred. Once every thread in the pool is blocked waiting on something slow, the 201st concurrent request has nowhere to run, regardless of how much CPU is actually sitting idle (since blocked threads aren't using CPU — they're just occupying a limited pool slot while they wait).
+
+## Virtual threads: the same blocking code, a fundamentally cheaper thread
+
+```java
+@RestController
+class OrderController {
+
+    @GetMapping("/api/orders/{id}")
+    OrderResponse getOrder(@PathVariable Long id) {
+        return orderService.findById(id);   // this code is completely unchanged
+    }
+}
+```
+
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true
+```
+
+That's the entire change. Virtual threads (Project Loom, finalized in Java 21) are managed by the JVM itself rather than the OS, and are dramatically cheaper to create — millions can exist simultaneously where platform threads would be limited to a few thousand at most. When a virtual thread blocks on I/O, the JVM automatically **unmounts** it from the underlying OS thread (a "carrier thread"), freeing that carrier thread to run other virtual threads, and **remounts** the original virtual thread once the blocking operation completes.
+
+```
+Virtual threads:
+Millions of cheap virtual threads, a small pool of carrier (platform) threads underneath
+        │
+Request 1 (virtual thread) ──▶ [blocked on DB] ──▶ UNMOUNTED, carrier thread freed
+Request 2 (virtual thread) ──▶ [blocked on API] ──▶ UNMOUNTED, carrier thread freed
+...
+Request 10,000 (virtual thread) ──▶ still has a virtual thread available — no pool exhaustion
+```
+
+The practical effect: the exact same blocking, synchronous code style this entire series has used (`RestClient`, JDBC via Spring Data JPA, everything in Parts 1–6) can now handle dramatically higher I/O-bound concurrency, without rewriting anything into the reactive style covered in Chapter 39.
+
+## Why this doesn't help CPU-bound work
+
+Virtual threads solve *thread scarcity during blocking I/O* specifically — they don't add more CPU cores, and they don't make computation itself faster. A CPU-bound operation (heavy computation, not waiting on I/O) occupies its carrier thread for the entire duration exactly as a platform thread would, since there's no blocking I/O operation for the JVM to unmount it during.
+
+```
+I/O-bound work (the case virtual threads help enormously):
+[thread mostly WAITING — for a DB, an API, a file] ← virtual threads shine here
+
+CPU-bound work (the case virtual threads don't help):
+[thread mostly COMPUTING — no waiting to unmount during] ← virtual threads add no benefit here
+```
+
+This directly connects back to Chapter 21's thread pool sizing discussion: virtual threads are the modern answer to "how do I handle many concurrent I/O-bound operations without an enormous platform thread pool," but a CPU-bound `@Async` task pool should still be sized close to the actual CPU core count, exactly as Chapter 21 established — virtual threads don't change that guidance at all.
+
+## Pinning — the gotcha worth knowing about
+
+```java
+synchronized void legacyMethod() {
+    // a virtual thread executing inside a synchronized block
+    // CANNOT be unmounted during a blocking call here — it "pins" to its carrier thread
+    externalApiClient.call();
+}
+```
+
+A virtual thread executing inside a `synchronized` block (or during certain native method calls) cannot be unmounted — it stays "pinned" to its carrier thread for the duration, which, if that pinned code also blocks on I/O, defeats the entire benefit for that specific call. This matters for existing codebases with heavy `synchronized` usage; the practical fix is generally replacing `synchronized` blocks with `java.util.concurrent.locks.ReentrantLock` where virtual thread compatibility genuinely matters, since `ReentrantLock` doesn't have this pinning behavior.
+
+## Best practices & gotchas
+
+- **Enabling virtual threads is close to a free upgrade for a typical, I/O-bound Spring MVC application** — most Spring Boot web applications spend the majority of their request time waiting on a database or an external call (Chapter 28), which is exactly the scenario virtual threads are designed for.
+- **Don't expect a benefit for CPU-bound workloads.** A service doing heavy in-memory computation won't see improvement from virtual threads alone — that's a genuinely different problem (more CPU cores, or better algorithms), not a threading-model problem.
+- **Audit for `synchronized` blocks in hot, I/O-adjacent code paths** before assuming virtual threads are delivering their full expected benefit — pinning can silently undermine the improvement in code that hasn't been reviewed for virtual-thread compatibility.
+- **Virtual threads don't replace the resilience patterns from Chapter 27.** Cheaper, more plentiful threads mean a struggling downstream dependency can be called with much higher concurrency before threads become the limiting factor — but a genuinely failing dependency is still failing, and still needs circuit breakers and timeouts regardless of how cheap the calling thread was.
+- **This is specifically a traditional (Spring MVC) concurrency improvement, distinct from reactive programming (Chapter 39).** Virtual threads let synchronous, blocking code scale like reactive code without adopting the reactive programming model at all — a genuinely different trade-off than WebFlux, covered fully in the next chapter.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| Platform thread | OS-managed thread; relatively expensive, limited to a few thousand at most |
+| Virtual thread | JVM-managed thread; extremely cheap, millions can exist simultaneously |
+| Carrier thread | The underlying platform thread a virtual thread runs on when not blocked |
+| Unmounting | Freeing the carrier thread while a virtual thread waits on blocking I/O |
+| Pinning | A virtual thread unable to unmount (e.g., inside `synchronized`), losing the benefit |
+| `spring.threads.virtual.enabled` | The one-line configuration enabling virtual threads for request handling |
+
+## Wrapping up
+
+Virtual threads let the same synchronous, familiar programming model this entire series has used scale to dramatically higher I/O-bound concurrency, for close to zero code change — a rare case of a major performance improvement requiring almost no rewrite. **Chapter 38** covers a different kind of runtime optimization: compiling a Spring Boot application ahead-of-time into a GraalVM native image.
+
+## Interview Questions
+
+**1. What specific problem do virtual threads solve that platform threads don't handle well?**
+Platform threads are a relatively expensive, OS-managed resource typically limited to a pool of a few hundred to a few thousand — when handling many concurrent I/O-bound requests (each spending most of its time blocked waiting on a database or external call), the thread pool can become exhausted purely from threads sitting idle waiting on I/O, even though the actual CPU is barely being used at all; virtual threads solve this by being dramatically cheaper to create (millions can exist) and by automatically freeing the underlying OS thread while a virtual thread is blocked, eliminating this specific scarcity problem.
+
+*Follow-up: Why does the chapter emphasize that this problem specifically affects I/O-bound applications, and not applications doing heavy computation?* Because the underlying mechanism that makes virtual threads beneficial — unmounting from the carrier thread specifically during a *blocking* operation — has nothing to offer a thread that's continuously computing rather than waiting; a CPU-bound thread never blocks in the way that triggers unmounting, so it occupies its carrier thread for its full duration regardless of whether it's a virtual or platform thread, meaning the scarcity problem virtual threads solve simply doesn't manifest the same way for CPU-bound work in the first place.
+
+**2. What does "unmounting" mean in the context of virtual threads, and when does it happen?**
+Unmounting is the JVM automatically detaching a virtual thread from its underlying carrier (platform) thread specifically at the moment that virtual thread performs a blocking operation (like waiting on a database query or network call) — freeing the carrier thread to run a different virtual thread during that waiting period, rather than the carrier thread sitting idle for the duration of the block; once the blocking operation completes, the original virtual thread is "remounted" onto an available carrier thread (not necessarily the same one) to continue execution.
+
+*Follow-up: Why is it significant that the virtual thread might be remounted onto a different carrier thread than the one it started on?* It highlights that the relationship between a virtual thread and any specific underlying carrier thread is transient and managed entirely by the JVM — application code doesn't need to (and generally can't) reason about which specific OS thread is executing its logic at any given moment, since the JVM handles this mounting/unmounting transparently; this is part of what makes virtual threads usable with completely unchanged, existing blocking code, since that code was never written with any assumption about staying pinned to one specific underlying OS thread throughout its execution anyway.
+
+**3. Why does enabling virtual threads require essentially no code changes for a typical Spring MVC application, unlike adopting a genuinely reactive programming model?**
+Virtual threads are designed to be a drop-in replacement for how platform threads execute the exact same, ordinary blocking, synchronous Java code — the code itself (a JDBC call, a `RestClient` call, a plain method call) doesn't need to be restructured into non-blocking, callback-based, or reactive-type-returning form at all; the improvement comes entirely from how the JVM schedules and manages the underlying thread executing that unchanged code, which is fundamentally different from reactive programming (Chapter 39), where the actual code itself must be restructured around non-blocking operators and reactive types to achieve a similar concurrency benefit.
+
+*Follow-up: Does this mean virtual threads make adopting a reactive programming model (WebFlux) entirely unnecessary going forward?* Not entirely — while virtual threads address the specific "thread scarcity during blocking I/O" problem that was one of the strongest motivations for adopting reactive programming, WebFlux's reactive model offers additional capabilities beyond just thread efficiency (built-in backpressure handling, a rich set of composable operators for complex asynchronous data pipelines, and a programming model some teams find better suited to expressing complex, multi-step asynchronous flows) — for teams whose primary motivation for considering reactive programming was purely the thread-scarcity problem, virtual threads may now be a simpler, lower-cost alternative, but this doesn't make every legitimate reason to choose WebFlux disappear entirely, a distinction Chapter 39 explores further.
+
+**4. What is a "carrier thread," and how many are typically needed relative to the number of virtual threads?**
+A carrier thread is an actual underlying platform (OS-managed) thread that virtual threads run on while they're actively executing (as opposed to being unmounted while blocked) — the JVM typically maintains a relatively small pool of carrier threads (often sized close to the number of available CPU cores), since at any given moment, only the virtual threads that are actually actively computing (not blocked waiting on I/O) need a carrier thread at all; a large number of virtual threads can share a much smaller number of carrier threads precisely because most of those virtual threads are unmounted and waiting, not actively needing a carrier thread simultaneously.
+
+*Follow-up: If an application had, say, 10,000 concurrent virtual threads all simultaneously performing heavy CPU-bound computation with no blocking I/O at all, what would you expect regarding carrier thread availability?* In that scenario, since none of those 10,000 virtual threads would ever unmount (there's no blocking I/O operation triggering unmounting), they would all need to actively hold a carrier thread simultaneously — with typically only as many carrier threads as CPU cores available, the vast majority of those 10,000 virtual threads would simply be queued, waiting for a carrier thread to become free, providing no meaningful concurrency benefit over an equivalent number of platform threads in this specific, purely CPU-bound scenario, exactly consistent with the earlier point that virtual threads don't help CPU-bound work.
+
+**5. What is "pinning," and why is it specifically associated with `synchronized` blocks?**
+Pinning occurs when a virtual thread cannot be unmounted from its carrier thread during a blocking operation, remaining attached to that carrier thread for the operation's full duration exactly like a platform thread would — this specifically happens when the blocking operation occurs while the virtual thread is executing within a `synchronized` block (or certain native method calls), because the JVM's virtual thread implementation, for correctness and compatibility reasons, doesn't unmount a thread out from under an active `synchronized` lock in the way it can for ordinary blocking I/O operations outside of one.
+
+*Follow-up: What's the practical performance consequence of pinning occurring frequently in an application that has otherwise enabled virtual threads expecting the full benefit?* If pinning occurs frequently — particularly in code paths that also perform blocking I/O while pinned — the application effectively loses the intended virtual thread benefit for exactly those pinned operations, since the carrier thread remains occupied for the operation's full duration rather than being freed to serve other virtual threads during the block; under high concurrency, this could mean the carrier thread pool becomes a bottleneck again for pinned code paths specifically, even while other, non-pinned code paths in the same application correctly benefit from virtual threads' unmounting behavior.
+
+**6. What's the recommended fix for `synchronized`-block pinning, and why does it work?**
+Replacing `synchronized` blocks with `java.util.concurrent.locks.ReentrantLock` (and its `lock()`/`unlock()` methods) where virtual-thread compatibility genuinely matters — `ReentrantLock` is a regular Java class implemented without the same JVM-level pinning behavior that `synchronized` has, so a virtual thread waiting on a `ReentrantLock`, or blocking on I/O while holding one, can still be unmounted normally, preserving the intended virtual thread benefit that a `synchronized` block would otherwise prevent for that specific code path.
+
+*Follow-up: Does this mean every `synchronized` block in an existing codebase needs to be immediately replaced once virtual threads are enabled?* Not necessarily immediately or universally — pinning only actually matters as a performance concern for `synchronized` blocks that are both frequently executed under high concurrency *and* perform a blocking operation while holding the lock; a rarely-executed `synchronized` block, or one that does only fast, non-blocking work while holding the lock, wouldn't meaningfully suffer from pinning even though it's technically still pinning-capable — following this chapter's broader "measure before tuning" theme from Chapter 36, it's more productive to identify and prioritize specifically the `synchronized` blocks in hot, high-concurrency, I/O-adjacent code paths, rather than reflexively replacing every occurrence throughout an entire codebase without evidence it actually matters for that specific case.
+
+**7. Why does the chapter connect virtual threads back to Chapter 21's thread pool sizing guidance for `@Async` work, rather than treating them as an unrelated topic?**
+Chapter 21 established that thread pool sizing should differ based on whether work is I/O-bound (benefiting from a much larger pool, since threads spend most of their time waiting) or CPU-bound (benefiting from a pool sized close to the CPU core count, since more threads than cores just adds contention with no real parallelism gain) — virtual threads are specifically the modern, more elegant solution to the I/O-bound side of that same distinction (eliminating the need to carefully size a large platform thread pool at all for I/O-bound work), while the CPU-bound guidance from Chapter 21 remains completely unchanged and equally valid regardless of whether virtual threads are enabled, since virtual threads provide no benefit for that case.
+
+*Follow-up: Would it make sense to use virtual threads for a CPU-bound `@Async` executor, given they don't provide a benefit for that workload?* There's little to no benefit in doing so specifically for CPU-bound work, and Chapter 21's original guidance (sizing a CPU-bound executor's pool close to the number of CPU cores) remains the correct approach regardless — using virtual threads there wouldn't cause harm, but it also wouldn't provide the throughput improvement virtual threads are actually known for, since that improvement is specifically tied to the unmounting-during-blocking-I/O mechanism, which simply never triggers for a thread that's continuously computing rather than waiting.
+
+**8. Why is enabling virtual threads described as "close to a free upgrade" specifically for a "typical, I/O-bound Spring MVC application," with those qualifiers doing real work in that sentence?**
+The qualifiers matter because the benefit is conditional on the application's actual workload characteristics matching the scenario virtual threads are designed for — an application spending most of its request-handling time blocked on I/O (database queries, external API calls, exactly the kind of work covered throughout Parts 3 and 7) sees a genuine, often dramatic improvement in how much concurrent load it can handle with the same or fewer platform-level resources; an application that's predominantly CPU-bound, or one riddled with pinning-prone `synchronized` blocks in its hot paths, would see little to no benefit, or could even see subtly different, harder-to-reason-about behavior without the expected improvement, which is precisely why the claim is carefully scoped rather than presented as an unconditional universal improvement.
+
+*Follow-up: For a system built following this entire series' patterns (Spring Data JPA for database access, RestClient/Feign/WebClient for inter-service calls per Chapter 28), would you expect it to fall into the "typical, I/O-bound" category that benefits strongly from virtual threads?* Yes, generally — a system built following this series' patterns spends the overwhelming majority of its request-handling time waiting on exactly the kinds of I/O operations virtual threads are designed to help with (database queries via Spring Data JPA, Chapters 9–13; inter-service calls via Chapter 28's clients; messaging operations from Chapters 29–30) — making it a strong, representative candidate for the kind of near-free concurrency improvement this chapter describes, assuming the pinning gotcha is also kept in mind and audited for in any legacy or third-party code paths involved.
+
+**9. How does enabling virtual threads interact with the resilience patterns from Chapter 27 — does having cheaper, more plentiful threads reduce the need for circuit breakers and timeouts?**
+No — virtual threads solve the *thread scarcity* problem specifically (having enough cheap threads available to handle high concurrent I/O-bound load), but they do nothing to address the underlying reliability of the actual downstream dependencies being called; a genuinely failing or slow downstream service is still failing or slow regardless of how cheap and plentiful the calling threads are, and without circuit breakers and timeouts, an application with virtual threads enabled could actually end up making a *higher volume* of concurrent calls to a struggling dependency (since thread scarcity is no longer the limiting factor), potentially making the impact of that dependency's failure worse rather than better if resilience patterns aren't still properly in place.
+
+*Follow-up: Could you construct a scenario where virtual threads, without resilience patterns also in place, actually make an incident worse rather than better?* Yes — consider a downstream dependency that's begun failing slowly (each call taking a long time before eventually timing out): without virtual threads, the limited platform thread pool would naturally cap how many concurrent calls could pile up waiting on that struggling dependency at once (since the pool would simply be exhausted beyond a certain point); with virtual threads removing that natural cap, a much larger number of concurrent calls could pile up waiting on the same struggling dependency simultaneously, potentially generating significantly more load and connection pressure against that already-struggling dependency than the platform-thread-limited scenario ever could have — precisely the kind of situation Chapter 27's circuit breakers and timeouts are meant to prevent, and which remains just as necessary with virtual threads enabled as without them.
+
+**10. Why does this chapter describe virtual threads and reactive programming (Chapter 39) as solving "a similar problem" but representing "a genuinely different trade-off," rather than treating one as simply an upgrade of the other?**
+Both address the same fundamental underlying issue — efficiently handling high concurrent I/O-bound load without needing an enormous number of expensive OS threads — but they solve it in fundamentally different ways with different resulting trade-offs: virtual threads preserve the familiar, simple, synchronous/blocking programming model entirely unchanged, gaining efficiency purely through a JVM-level scheduling improvement; reactive programming requires restructuring code around non-blocking operators and reactive types (Mono/Flux), gaining efficiency through an entirely different programming model that also happens to provide additional capabilities (like built-in backpressure) virtual threads don't inherently provide, at the cost of a steeper learning curve and different debugging/reasoning patterns.
+
+*Follow-up: Given that virtual threads let synchronous code achieve much of the same concurrency benefit reactive programming was originally adopted for, why might a team still deliberately choose to build a new service using WebFlux and reactive programming rather than simply relying on virtual threads?* If the specific value the team needs goes beyond simple thread-efficiency — for example, needing WebFlux's built-in backpressure handling to gracefully manage a genuinely fast producer overwhelming a slower consumer, or needing to compose complex, multi-step asynchronous data pipelines using reactive operators in a way that's a more natural fit for that specific problem than sequential blocking code would be — those are capabilities virtual threads alone don't provide, and would still be legitimate, specific reasons to choose the reactive model deliberately, rather than assuming virtual threads have made every reason to consider WebFlux entirely obsolete.
+
+**11. Why might an existing, large legacy Spring Boot codebase see less benefit from enabling virtual threads than a newly-built one, even though the configuration change itself is identical?**
+An older, larger codebase is statistically more likely to contain `synchronized` blocks (potentially added incrementally over years by different developers, some possibly wrapping blocking I/O operations) that would trigger the pinning behavior discussed earlier — undermining the expected benefit for exactly those pinned code paths — whereas a newly-built codebase, developed with virtual-thread awareness in mind from the start (following this chapter's guidance to prefer `ReentrantLock` where relevant), is less likely to have accumulated this kind of pinning-prone pattern, making the simple one-line configuration change more likely to deliver its full expected benefit without needing a separate audit-and-fix effort first.
+
+*Follow-up: What would be a reasonable first step for a team maintaining a large legacy codebase who wants to adopt virtual threads but is concerned about undiscovered pinning issues?* Enable virtual threads in a lower-stakes, non-production environment first (staging, or a canary/gradual rollout in production) alongside careful monitoring (Chapter 19's observability tooling) specifically watching for unexpected thread-related metrics or performance characteristics that might indicate widespread pinning, and potentially use JDK tooling/JFR (Java Flight Recorder) events specifically designed to detect pinning occurrences, to identify and prioritize fixing the actual, real pinning hotspots in that specific codebase — following the same "measure before tuning" evidence-based principle established in Chapter 36 — rather than assuming either that pinning definitely is or definitely isn't a significant issue without actually checking.
+
+**12. How does the virtual thread model relate to the concept of a "thread pool" established throughout this series (Chapters 8, 21) — does it eliminate the concept of thread pools entirely?**
+Not entirely — while application code no longer needs to carefully size a large platform thread pool specifically for handling many concurrent I/O-bound requests (since virtual threads themselves are cheap and plentiful, addressing that specific scarcity concern), there's still a pool of carrier threads underneath that virtual threads run on while actively executing, and CPU-bound work (per Chapter 21's unchanged guidance) still benefits from a deliberately sized, bounded pool tuned to actual CPU core availability — the concept of thread pools doesn't disappear, but the specific problem of "how large a platform thread pool do I need to handle many concurrent blocking I/O operations" is substantially resolved by virtual threads, shifting that particular sizing concern away from something application developers need to actively manage.
+
+*Follow-up: Does this mean Chapter 21's `ThreadPoolTaskExecutor` configuration guidance becomes obsolete once virtual threads are enabled?* Not obsolete, but its relevance narrows specifically to CPU-bound `@Async` work, where Chapter 21's original sizing guidance (close to CPU core count) remains fully applicable and unaffected by virtual threads; for I/O-bound `@Async` work specifically, a virtual-thread-based executor (Java 21 provides `Executors.newVirtualThreadPerTaskExecutor()`) can be a simpler, more effective alternative to a carefully-sized bounded `ThreadPoolTaskExecutor`, meaning the specific configuration approach shifts for that I/O-bound case while the underlying principle (match your concurrency model to whether the work is CPU-bound or I/O-bound) established in Chapter 21 remains exactly as valid and relevant as before.
+
+**13. Why is it significant that virtual threads were specifically finalized in Java 21, given this entire series' choice to target that version?**
+This directly connects the series' earlier version choice (established back when the reader selected "Spring Boot 3.x + Java 21" during the initial planning conversation) to a concrete, major practical benefit — Java 21 isn't an arbitrary version choice, it's specifically the first LTS (Long-Term Support) release where virtual threads became a finalized, production-ready feature (having been available as a preview feature in earlier versions), meaning targeting Java 21 throughout this series wasn't just about using "the latest" version for its own sake, but specifically unlocked this meaningful, production-ready capability as a natural, available option.
+
+*Follow-up: Would virtual threads have been available at all if this series had instead targeted Java 17 (also an LTS release, and Spring Boot 3.0's original minimum baseline)?* No — virtual threads were only available as a preview feature (requiring an explicit preview-features flag, and without the same production-readiness guarantee) in Java 19 and 20, and only became a finalized, standard feature in Java 21; targeting Java 17 would mean virtual threads either weren't available at all in a fully supported way, or would require using explicitly experimental preview functionality not recommended for production use, which is precisely why this chapter (and the series' original version choice) specifically calls out Java 21 as the meaningful threshold for this capability rather than treating it as available in any recent Java version indiscriminately.
+
+**14. If a team measured their application's performance before and after enabling virtual threads and saw no meaningful improvement at all, what would this chapter suggest investigating as possible explanations?**
+Following the chapter's own framing, likely explanations include: the application's actual workload might be more CPU-bound than I/O-bound (in which case no improvement would be expected at all, consistent with this chapter's explicit guidance); the application might already not have been thread-pool-limited in the first place (if it was never actually handling enough concurrent load to exhaust its platform thread pool, there'd be no scarcity problem for virtual threads to solve); or the application's hot, high-concurrency code paths might be affected by widespread `synchronized`-block pinning, undermining the expected unmounting behavior for exactly the operations that would otherwise benefit most.
+
+*Follow-up: How would a team distinguish between these different possible explanations, rather than simply concluding "virtual threads don't work for us" and abandoning the change?* Apply the same evidence-based diagnostic approach established in Chapter 36 — checking actual CPU utilization during load testing (high CPU utilization throughout would point toward the workload being genuinely CPU-bound, explaining the lack of improvement as expected rather than surprising), reviewing whether the platform-thread-based version was actually hitting thread pool exhaustion under realistic load in the first place (if it wasn't, there was no scarcity problem to solve), and specifically investigating for `synchronized`-block pinning in hot code paths using JFR pinning-detection events — rather than treating "no improvement observed" as a single, undifferentiated outcome, breaking it down into these specific, individually checkable possible causes lets the team determine the actual, evidence-based explanation rather than guessing.
+
+**15. Summarize how virtual threads fit into the broader performance and concurrency story this series has told, from Chapter 8's request pipeline through Chapter 21's async/scheduling and Chapter 36's performance tuning.**
+Chapter 8 established that each request occupies a platform thread for its full duration, including blocking waits — an inherent limitation this series lived with through every chapter building I/O-heavy functionality (database access in Part 3, inter-service calls throughout Part 7). Chapter 21 taught how to size thread pools deliberately around the CPU-bound versus I/O-bound distinction for `@Async` work specifically. Chapter 36 emphasized diagnosing real performance bottlenecks through measurement rather than guesswork. This chapter introduces virtual threads as a genuinely new, Java-21-specific capability that directly addresses the platform-thread scarcity limitation Chapter 8 first established — letting the same synchronous, blocking programming model used throughout this entire series scale to substantially higher I/O-bound concurrency, essentially for free, without requiring the code restructuring that reactive programming (Chapter 39) demands.
+
+*Follow-up: Given everything covered in this chapter, would you say virtual threads change any of the fundamental architectural guidance from Part 7 (service discovery, resilience patterns, distributed tracing), or do they operate at a level below and independent of those concerns?* They operate at a level below and largely independent of those concerns — service discovery (Chapter 24) still needs to find service instances, resilience patterns (Chapter 27) still need to handle failures and prevent overwhelming struggling dependencies, and distributed tracing (Chapter 31) still needs to track requests across services, regardless of whether the underlying thread executing any given piece of that logic happens to be a virtual thread or a platform thread — virtual threads improve *how efficiently* a single service instance can handle concurrent I/O-bound load internally, but don't change any of the higher-level distributed-systems architectural decisions and patterns Part 7 covered, which remain exactly as necessary and relevant as before.

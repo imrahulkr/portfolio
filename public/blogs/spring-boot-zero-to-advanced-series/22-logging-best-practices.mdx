@@ -1,0 +1,228 @@
+---
+title: "Logging Best Practices: SLF4J, Structured Logs & Correlation IDs"
+description: "Logging looks trivial until an incident forces you to actually search through it. This chapter covers SLF4J's role, structured JSON logging, and tying every log line for one request together — closing out Part 6."
+date: "2026-09-14"
+readTime: "11 min read"
+series: "spring-boot"
+part: 22
+tags: ["Spring Boot", "Logging", "SLF4J", "Observability"]
+---
+
+Chapter 19 covered metrics and tracing; this chapter covers the third pillar of observability — logs — and closes out Part 6. Every other chapter in this series has used logging implicitly; this is where it's covered properly.
+
+## SLF4J: a facade, not a logging implementation
+
+```java
+private static final Logger log = LoggerFactory.getLogger(OrderService.class);
+
+log.info("Order {} created for customer {}", order.getId(), order.getCustomerName());
+```
+
+SLF4J (Simple Logging Facade for Java) is — like Micrometer for metrics (Chapter 19) — an abstraction. Application code (and most libraries) log against SLF4J's API; the actual logging implementation underneath is swappable. Spring Boot uses **Logback** by default, pulled in transitively through `spring-boot-starter-logging` (itself a transitive dependency of every `spring-boot-starter-*`).
+
+**Always use parameterized logging (`{}` placeholders), never string concatenation:**
+
+```java
+// Wasteful — the string is built even if this log level is disabled
+log.debug("Processing order " + order.getId() + " with " + order.getItems().size() + " items");
+
+// Correct — arguments are only evaluated/formatted if DEBUG is actually enabled
+log.debug("Processing order {} with {} items", order.getId(), order.getItems().size());
+```
+
+With string concatenation, Java builds the full string *before* calling `log.debug()`, regardless of whether debug logging is even enabled — wasted work on every single call in a hot path. Parameterized logging defers that formatting until SLF4J confirms the level is actually active.
+
+## Log levels — using them with intent
+
+| Level | Use for |
+|---|---|
+| `ERROR` | Something failed and needs attention — an unhandled exception, a failed critical operation |
+| `WARN` | Something unexpected but recoverable — a retried operation, a deprecated code path still in use |
+| `INFO` | Significant business events — an order was created, a user registered |
+| `DEBUG` | Detailed diagnostic information, useful when actively investigating an issue |
+| `TRACE` | Extremely fine-grained detail, rarely enabled outside deep debugging |
+
+```yaml
+logging:
+  level:
+    root: INFO
+    com.example.demo: DEBUG
+    org.springframework.security: WARN
+```
+
+Per-package level configuration (Chapter 5's profile mechanism applies directly here) lets you run your own application's code at `DEBUG` while keeping noisy framework internals at `WARN` or `INFO` — essential for keeping logs actually readable rather than drowned in framework chatter.
+
+## Structured (JSON) logging
+
+Plain-text logs are fine to read directly on a laptop; they're painful for a log-aggregation platform (Elasticsearch, Datadog, CloudWatch) to search and filter reliably, since extracting a specific field means parsing free-form text. Structured logging outputs each log entry as JSON instead:
+
+```json
+{"timestamp":"2026-09-14T10:15:03.421Z","level":"INFO","logger":"OrderService","message":"Order created","orderId":42,"customerId":"cust_881"}
+```
+
+```xml
+<!-- logback-spring.xml -->
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder" />
+    </appender>
+    <root level="INFO">
+        <appender-ref ref="STDOUT" />
+    </root>
+</configuration>
+```
+
+With structured logs, a query like "show me every log line where `orderId=42`" becomes a precise, reliable field match in the aggregation platform, instead of a fragile text search hoping the order ID appears in a predictable place in a free-form message.
+
+## Correlation IDs — tying every request's log lines together
+
+This is the practical implementation of the trace ID concept introduced in Chapter 19, using SLF4J's **MDC** (Mapped Diagnostic Context) — a per-thread key-value map that Logback automatically includes in every log line for as long as it's set.
+
+```java
+@Component
+class CorrelationIdFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+                                     FilterChain chain) throws ServletException, IOException {
+        String correlationId = Optional.ofNullable(request.getHeader("X-Correlation-Id"))
+            .orElse(UUID.randomUUID().toString());
+        MDC.put("correlationId", correlationId);
+        response.setHeader("X-Correlation-Id", correlationId);
+        try {
+            chain.doFilter(request, response);
+        } finally {
+            MDC.remove("correlationId");   // critical — see gotcha below
+        }
+    }
+}
+```
+
+```
+%d{yyyy-MM-dd HH:mm:ss} [%X{correlationId}] %-5level %logger{36} - %msg%n
+```
+
+Every log statement executed anywhere during that request's processing — across the controller, service, and repository layers — now automatically includes the same `correlationId`, with zero changes to any of the actual `log.info(...)` call sites elsewhere in the codebase. This is a `Filter`, not an interceptor, deliberately (Chapter 8's distinction) — it needs to run as early as possible, wrapping the entire request.
+
+## The critical gotcha: `MDC` and thread pools
+
+MDC is stored **per-thread**. This creates two distinct, related dangers:
+
+1. **Thread pool reuse leaking context between requests.** If `MDC.remove(...)` is forgotten, a pooled thread that handled request A (correlation ID `abc`) can be reused for unrelated request B — and B's logs would incorrectly show `abc` until B happens to overwrite it, or worse, never overwrite it and log under entirely the wrong correlation ID.
+2. **`@Async` methods run on a different thread**, which has no MDC context at all by default — logs from inside an `@Async` method (Chapter 21) won't automatically carry the correlation ID set on the original request's thread, since MDC doesn't cross thread boundaries on its own.
+
+```java
+@Async
+void sendWelcomeEmail(String email, Map<String, String> parentMdcContext) {
+    MDC.setContextMap(parentMdcContext);   // explicitly propagate it
+    try {
+        log.info("Sending welcome email to {}", email);   // now correctly correlated
+    } finally {
+        MDC.clear();
+    }
+}
+```
+
+Spring's `TaskDecorator` interface, configured on the `ThreadPoolTaskExecutor` from Chapter 21, is the cleaner way to do this automatically for every `@Async` call rather than manually passing the context map at every call site.
+
+## Best practices & gotchas
+
+- **Always use parameterized logging, never string concatenation** — a small habit with a real, measurable cost at scale in a hot path.
+- **Never log sensitive data** — passwords, full credit card numbers, tokens (Chapter 15's warning about JWT claims applies identically here). Logs often live in less tightly-controlled systems (aggregators, long retention) than the primary application/database.
+- **Always clear MDC in a `finally` block.** A forgotten `MDC.remove(...)` is a subtle, hard-to-reproduce bug that only manifests under thread-pool reuse, exactly the kind of issue that's miserable to debug after the fact.
+- **Configure per-package log levels deliberately, not just a single global level.** A single `DEBUG` root level in production typically produces far more log volume (and cost, for aggregated logging platforms) than is useful.
+- **Prefer structured (JSON) logging for any environment with a log aggregation platform.** Plain text is for a developer tailing a local console; JSON is for a system that needs to query, filter, and alert on log data reliably at scale.
+- **Correlation IDs should be accepted from an inbound header (and passed through to downstream calls) as well as generated when absent** — this is exactly how a single logical request's trace connects across the multiple *services* in the microservices architectures covered starting in Part 7.
+
+## Quick reference
+
+| Concept | Purpose |
+|---|---|
+| SLF4J | Logging facade — application code logs against this, not a specific implementation |
+| Logback | Spring Boot's default logging implementation |
+| Parameterized logging (`{}`) | Avoids wasted string-building when a log level is disabled |
+| `logging.level.<package>` | Per-package log level configuration |
+| Structured (JSON) logging | Machine-queryable log format for aggregation platforms |
+| MDC | Per-thread key-value context automatically included in every log line |
+| `TaskDecorator` | Propagates MDC context across `@Async`/thread-pool boundaries |
+
+## Wrapping up
+
+Logging looks trivial precisely because it's easy to get *technically working* — the real skill, as with metrics and tracing, is making logs actually useful during an incident: structured, correctly leveled, and correlated across every layer a single request touches. This closes Part 6 — health, metrics, tracing, caching, async/scheduling, and logging are the operational baseline every production Spring Boot application needs. **Part 7** starts next, with **Chapter 23** introducing microservices architecture with Spring Boot.
+
+## Interview Questions
+
+**1. What is SLF4J, and why is it described as a "facade"?**
+SLF4J (Simple Logging Facade for Java) is an abstraction layer application code logs against, independent of whichever concrete logging implementation actually processes and writes those log statements. "Facade" describes exactly this: your code calls `log.info(...)` against SLF4J's API, and the actual implementation underneath (Logback by default in Spring Boot, but swappable to Log4j2 or others) can change without touching any of that calling code.
+
+*Follow-up: What would need to change in a Spring Boot application's dependencies to swap Logback for Log4j2, without changing any application logging code?* Exclude the default `spring-boot-starter-logging` (which pulls in Logback) from the relevant starter dependencies, and add `spring-boot-starter-log4j2` instead — since application code only ever calls SLF4J's API, none of the actual `log.info(...)`/`log.debug(...)` call sites need to change at all; only the underlying implementation dependency and its configuration file format change.
+
+**2. Why should logging always use parameterized placeholders (`{}`) instead of string concatenation?**
+With string concatenation, Java constructs the complete log message string *before* the logging call even executes, regardless of whether that log level is actually enabled — meaning the formatting work happens unconditionally on every call. With parameterized logging, the underlying framework only performs the actual string formatting if the log level is confirmed to be active, avoiding wasted computation on disabled log statements, which matters meaningfully in hot, frequently-executed code paths.
+
+*Follow-up: In a high-throughput hot path logging at DEBUG level in a production environment where DEBUG is disabled, how much practical difference does this actually make?* It can be significant — if the concatenated message involves calling `toString()` on complex objects, string-building for potentially every single request even though the result is immediately discarded (since DEBUG is disabled) adds real, unnecessary CPU and allocation overhead at scale; parameterized logging skips that formatting work entirely when the level check fails, which is precisely the intended optimization for exactly this scenario.
+
+**3. What's the difference between `INFO`, `WARN`, and `ERROR` log levels, in terms of what each should represent?**
+`INFO` represents significant, expected business events worth recording under normal operation (an order was created). `WARN` represents something unexpected but recoverable — the system handled it, but it's worth noting for awareness (a retried operation, a deprecated code path still being exercised). `ERROR` represents an actual failure requiring attention — an unhandled exception, a critical operation that didn't complete successfully.
+
+*Follow-up: What's a common mistake teams make with log level discipline that erodes the usefulness of these distinctions over time?* Logging routine, expected events at `WARN` or `ERROR` "just to make sure they're seen" — this desensitizes the team to those levels over time (since `WARN`/`ERROR` logs become common and mostly noise rather than a genuine signal), making it much harder to notice a real problem buried among routine, misleveled log entries when an actual incident occurs.
+
+**4. Why is configuring log levels per-package generally better than a single global level?**
+A single global level forces a trade-off between too much noise (running everything at `DEBUG`, including verbose framework internals you don't care about) and too little detail (running everything at `INFO`, losing diagnostic detail specifically for your own application code when you need it). Per-package configuration lets you run your own application's packages at a more detailed level while keeping noisy third-party/framework packages at a coarser level, keeping logs both detailed where it matters and readable overall.
+
+*Follow-up: In a production incident, how might you temporarily increase log verbosity for just one specific package without redeploying the application?* Spring Boot's Actuator (Chapter 19) exposes a `/actuator/loggers` endpoint (when included in `management.endpoints.web.exposure.include`) that allows viewing and changing a package's configured log level at runtime via a POST request — letting you temporarily raise a specific package to `DEBUG` while investigating an active issue, then revert it, all without a redeploy.
+
+**5. What is structured (JSON) logging, and why does it matter for a log aggregation platform?**
+Structured logging outputs each log entry as a well-defined, machine-parseable format (typically JSON) with fields like `timestamp`, `level`, `message`, and any custom fields, rather than a free-form text line. Log aggregation platforms (Elasticsearch, Datadog, CloudWatch) can then query and filter on these fields precisely and reliably — "show me every log line with `orderId=42`" becomes an exact field match, rather than a fragile text search that depends on the message format staying consistent.
+
+*Follow-up: What's a concrete failure mode of relying on free-form text search instead of structured field queries, once multiple developers are writing log statements across a large codebase?* Different developers phrase similar log messages inconsistently ("Order 42 created" vs. "Created order: 42" vs. "order_id=42 processed"), so a text search for one specific phrasing misses log lines that convey the same information but were written slightly differently — structured fields eliminate this inconsistency entirely, since the field name and value are explicit and consistent regardless of how the human-readable message text varies.
+
+**6. What is MDC, and what problem does it solve?**
+MDC (Mapped Diagnostic Context) is a per-thread key-value map that a logging framework automatically includes in every log statement executed on that thread, for as long as the relevant keys remain set. It solves the problem of tying together every log line produced while processing one logical request — without MDC, you'd need to manually pass a correlation ID as an explicit parameter into every single method and log statement involved, which is impractical across a real codebase.
+
+*Follow-up: Why is MDC described as "per-thread," and what does that actually mean in practice for a typical Spring MVC request?* Each thread maintains its own independent MDC map, isolated from every other thread's — in a typical (non-reactive) Spring MVC application, one incoming HTTP request is handled entirely on a single thread from the servlet container's thread pool, so setting an MDC value once (e.g., in an early filter) makes it automatically available to every subsequent log statement executed for that same request, on that same thread, without needing to pass it explicitly through every method call.
+
+**7. Why is it critical to always remove MDC values in a `finally` block?**
+Because the thread the request is running on typically comes from a reused thread pool (the servlet container's request-handling pool) — if an MDC value isn't explicitly cleared after the request finishes, that same thread, when later reused for a completely different, unrelated request, would still carry the old MDC context, causing the new request's log lines to be incorrectly correlated under the previous request's ID until (or unless) it's overwritten.
+
+*Follow-up: Why does using a `finally` block specifically matter here, rather than just calling `MDC.remove(...)` as the last line of the method?* If an exception is thrown partway through request processing, a plain "last line of the method" cleanup call would never actually execute, since the exception would propagate past it — a `finally` block guarantees the cleanup runs regardless of whether the method completes normally or exits via an exception, which is exactly the guarantee needed to reliably prevent MDC context from leaking into a subsequent, unrelated request on the same reused thread.
+
+**8. Why doesn't MDC context automatically carry over into an `@Async` method's execution?**
+Because `@Async` methods run on an entirely different thread from a separate thread pool (Chapter 21), and MDC is inherently per-thread — the new thread executing the async work has its own, empty MDC map by default, with no automatic mechanism linking it back to the MDC context that was set on the original calling thread that triggered the async call.
+
+*Follow-up: What's the cleanest way to ensure MDC context automatically propagates into every `@Async` call, without needing to manually pass and re-set it at every individual call site?* Implement Spring's `TaskDecorator` interface and configure it on the `ThreadPoolTaskExecutor` used for async execution — a `TaskDecorator` wraps every submitted task, letting you capture the calling thread's MDC context at submission time and restore it on the executing thread before the actual task runs (and clear it afterward), applying this consistently to every `@Async` call through the executor's configuration rather than requiring each call site to handle it manually.
+
+**9. Why should sensitive data (passwords, tokens, full credit card numbers) never appear in logs, even in a supposedly internal, non-public logging system?**
+Logs frequently flow into less tightly access-controlled systems than the primary application database — log aggregation platforms, long-term retention/archival storage, or even accidentally into a third-party monitoring vendor — often with broader internal access and longer retention than the original data source ever had, meaningfully increasing the exposure surface for anything sensitive that ends up captured there. This mirrors the same JWT-claims warning from Chapter 15, generalized to logging broadly.
+
+*Follow-up: If a bug caused a password to be accidentally logged in plaintext at some point in the past, what's the actual remediation challenge beyond just fixing the code?* The exposure isn't limited to the moment the bug is fixed — the sensitive value likely already persists in log storage, backups, and any downstream systems the logs were forwarded to, potentially for as long as those systems' retention periods allow; genuinely remediating it requires identifying and purging the exposed value from every place it propagated to (not just stopping future occurrences), and typically also rotating/invalidating the exposed credential itself as a precaution.
+
+**10. What's the relationship between a correlation ID (implemented via MDC) and the distributed tracing trace ID introduced in Chapter 19?**
+They serve the same underlying purpose — tying together everything related to one logical request — but a hand-implemented correlation ID (as shown in this chapter's `CorrelationIdFilter`) is a simpler, manually maintained mechanism scoped to logging specifically, while Micrometer Tracing's trace ID (Chapter 19) is part of a broader, standardized observability system that also integrates with metrics and span-based tracing tools like Zipkin, often auto-instrumented without needing a hand-written filter like this chapter's example at all.
+
+*Follow-up: Given that Micrometer Tracing can handle this automatically, why would this chapter still show a manually implemented `CorrelationIdFilter`?* Understanding the manual implementation makes clear exactly what's happening underneath the automatic tooling — MDC population, thread-boundary propagation challenges, and the filter-based approach to setting it as early as possible in request processing — which is valuable groundwork before relying on Micrometer Tracing's auto-instrumentation, and remains directly useful for teams not yet using a full tracing setup, or for propagating custom, business-specific correlation identifiers beyond what a generic trace ID captures.
+
+**11. Why is a `Filter` (rather than a `HandlerInterceptor`, from Chapter 8's distinction) the right choice for setting up correlation ID handling?**
+The correlation ID needs to be established as early as possible in request processing — ideally before any other logging (including from other filters further down the chain) happens — and needs to wrap the entire request/response lifecycle, including any later filters. A `HandlerInterceptor` only becomes involved once `DispatcherServlet` begins its own processing, by which point some logging could already have occurred without the correlation ID context in place yet.
+
+*Follow-up: Where in the filter chain from Chapter 14's diagram should this correlation ID filter be positioned relative to the security filters?* As early as possible — ideally one of the very first filters in the chain, so that logging occurring during authentication/authorization decisions (potential failures, security-related warnings) is also correctly correlated with the same request's ID, rather than only capturing correlation for logging that happens after security processing has already completed.
+
+**12. How would a correlation ID set on one service propagate to a downstream service it calls, in a multi-service architecture?**
+The calling service needs to explicitly forward the correlation ID as an outbound header (e.g., `X-Correlation-Id`) on any request it makes to another service, and the receiving service's own equivalent filter needs to check for and honor an incoming correlation ID header (as shown in this chapter's example, via `Optional.ofNullable(request.getHeader(...))`) rather than always generating a fresh one — this is exactly the mechanism that lets one logical request's correlation ID remain consistent as it flows across service boundaries.
+
+*Follow-up: What would happen to log correlation across services if the receiving service always generated a fresh correlation ID instead of checking for an existing one from the incoming request?* Each service in the call chain would end up with its own, unrelated correlation ID for what is actually the same overall logical request — completely defeating the purpose of correlation, since there would be no shared identifier linking log entries for service A's handling of the request to service B's handling of the same request, making cross-service debugging just as difficult as if no correlation mechanism existed at all.
+
+**13. Why might running the entire application at `DEBUG` level in production be a bad idea, even though it provides maximum diagnostic detail?**
+It substantially increases log volume — often dramatically — which increases both the storage/ingestion cost for a log aggregation platform (many of which charge based on data volume) and, more importantly, makes it genuinely harder to find the specific, relevant log lines during an actual investigation, since they're now diluted among a much larger volume of routine, low-value diagnostic noise from every layer of the application and its dependencies.
+
+*Follow-up: What's a middle-ground approach that gives detailed diagnostics when actually needed, without the constant cost and noise of always running at `DEBUG`?* Run production at a more conservative default level (`INFO` for application code, `WARN` for noisy frameworks) most of the time, and use the runtime log-level-adjustment capability mentioned earlier (via `/actuator/loggers`) to temporarily raise specific packages to `DEBUG` only while actively investigating a specific issue, then revert back — getting the detailed diagnostics exactly when and where needed without paying the ongoing cost of `DEBUG`-level logging by default.
+
+**14. What information beyond a correlation ID might be useful to include in structured logs for a typical business application?**
+Contextual business identifiers relevant to debugging real issues — a user or customer ID, an order or transaction ID, the specific service/module name, environment (staging vs. production), and the application version/build identifier currently deployed — all as separate structured fields rather than embedded in free-form message text, letting an investigation filter directly on "all logs for customer X" or "all logs from version Y" precisely.
+
+*Follow-up: Why is including the application's version/build identifier in every log line particularly useful during a deployment-related investigation?* If an issue appears to start around the time of a recent deployment, having the version identifier directly on each log line lets you immediately and precisely determine whether a specific problematic log entry occurred on the old or new version — without needing to separately cross-reference deployment timestamps against log timestamps, which is especially valuable during a rolling deployment where old and new versions are briefly running simultaneously across different instances.
+
+**15. How do logging, metrics (Chapter 19), and distributed tracing (Chapter 19) complement each other rather than being redundant?**
+Metrics answer "how much / how often / how fast" in aggregate — good for noticing *that* something is wrong (a latency spike, an error rate increase) via dashboards and alerts. Logs answer "what exactly happened" for a specific event or request — the detailed narrative needed once you know *where* to look. Tracing answers "where did the time go" across the specific steps and services involved in one particular request — connecting the aggregate metric signal to the detailed log narrative for the specific slow or failed request that triggered the investigation in the first place.
+
+*Follow-up: Walk through how these three would work together during a real investigation of "checkout is slow for some users."* A metrics dashboard (Chapter 19) would first reveal *that* p95 latency for the checkout endpoint has spiked, prompting investigation. Distributed tracing would then show *where* the time is actually going for slow checkout requests specifically — perhaps revealing a particular downstream call (say, the payment gateway) is unusually slow for a subset of requests. Structured, correlated logs (this chapter) for those specific slow traces' correlation/trace IDs would then provide the detailed narrative — the exact request parameters, any warnings or retries logged along the way — needed to pin down the actual root cause behind why that particular downstream call is behaving slowly for those specific requests.

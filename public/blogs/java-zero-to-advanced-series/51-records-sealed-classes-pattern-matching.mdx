@@ -1,0 +1,211 @@
+---
+title: "Records, Sealed Classes & Pattern Matching"
+description: "Records as concise immutable data carriers, sealed classes/interfaces for restricted hierarchies, and pattern matching for instanceof and switch."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Modern Java (9-21)"
+chapter: 51
+totalChapters: 65
+slug: "records-sealed-classes-pattern-matching"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "records", "sealed-classes", "pattern-matching", "java17", "java21"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 14
+---
+
+## Records (Java 16+) — Concise, Immutable Data Carriers
+
+Before records, a simple immutable data class required substantial boilerplate: a constructor, private final fields, getters, and correctly-implemented `equals()`/`hashCode()`/`toString()` (Chapter 13).
+
+```java
+// Pre-record boilerplate
+public final class Point {
+    private final int x;
+    private final int y;
+    public Point(int x, int y) { this.x = x; this.y = y; }
+    public int getX() { return x; }
+    public int getY() { return y; }
+    @Override public boolean equals(Object o) { /* ... */ }
+    @Override public int hashCode() { /* ... */ }
+    @Override public String toString() { /* ... */ }
+}
+```
+
+```java
+// Equivalent record — one line
+public record Point(int x, int y) { }
+```
+
+The compiler automatically generates: a canonical constructor, `private final` fields for each component, accessor methods (named `x()`/`y()`, **not** `getX()`/`getY()` — this is a common point of confusion), and correctly-implemented `equals()`, `hashCode()`, and `toString()` based on all components.
+
+```java
+Point p1 = new Point(3, 4);
+System.out.println(p1.x());          // 3 — accessor, not getX()
+System.out.println(p1);              // Point[x=3, y=4] — auto-generated toString()
+System.out.println(p1.equals(new Point(3, 4)));   // true — component-based equality
+```
+
+### Records Are Implicitly `final` and Cannot Extend Another Class
+
+```java
+public record Point(int x, int y) { }
+// public class Point3D extends Point { }   // COMPILE ERROR — records cannot be extended
+```
+
+Records can, however, implement interfaces, and every record implicitly extends `java.lang.Record` (not `Object` directly).
+
+### Compact Constructors — Validation Without Boilerplate
+
+```java
+public record Range(int min, int max) {
+    public Range {   // compact constructor — no parameter list repeated, no explicit field assignment needed
+        if (min > max) {
+            throw new IllegalArgumentException("min must be <= max");
+        }
+        // implicit "this.min = min; this.max = max;" happens automatically AFTER this block
+    }
+}
+```
+
+### When to Use a Record vs. a Regular Class
+
+Use a record when a type is genuinely just an immutable aggregate of data with no significant identity or lifecycle beyond its values — DTOs, value objects, tuple-like return values. Use a regular class when a type needs mutable state, inheritance from another class, or has behavior/identity that's more significant than its raw data.
+
+## Sealed Classes and Interfaces (Java 17+) — Restricted Hierarchies
+
+A sealed type explicitly declares the complete, closed set of classes/interfaces permitted to extend or implement it — no other type, anywhere, can extend it.
+
+```java
+public sealed interface Shape permits Circle, Square, Triangle { }
+
+public final class Circle implements Shape {
+    private final double radius;
+    public Circle(double radius) { this.radius = radius; }
+}
+
+public final class Square implements Shape {
+    private final double side;
+    public Square(double side) { this.side = side; }
+}
+
+public final class Triangle implements Shape {
+    private final double base, height;
+    public Triangle(double base, double height) { this.base = base; this.height = height; }
+}
+```
+
+Every permitted subtype must itself be declared `final`, `sealed` (continuing to restrict further), or `non-sealed` (explicitly reopening unrestricted extension from that point downward) — the compiler enforces this exhaustively.
+
+![Diagram: sealed interface Shape with exactly three permitted implementations (Circle, Square, Triangle), showing the compiler's closed-world knowledge of the complete type hierarchy](/diagrams/ch51-sealed-hierarchy-closed-world.svg)
+
+**Why this matters, combined with switch expressions:** because the compiler knows the *complete* set of possible subtypes, a switch expression over a sealed type's subtypes can be verified **exhaustive at compile time**, with no `default` branch required — and critically, adding a new permitted subtype later without updating every relevant switch produces an immediate **compile error** at every incomplete switch, rather than a silent runtime gap.
+
+```java
+double area(Shape shape) {
+    return switch (shape) {
+        case Circle c -> Math.PI * c.radius() * c.radius();
+        case Square s -> s.side() * s.side();
+        case Triangle t -> 0.5 * t.base() * t.height();
+        // NO default needed — compiler verifies these three cases are exhaustive
+    };
+}
+```
+
+## Pattern Matching for `instanceof` (Java 16+)
+
+Already introduced briefly in Chapter 4 — eliminates the redundant explicit cast after a successful `instanceof` check.
+
+```java
+Object obj = "hello";
+
+if (obj instanceof String s && s.length() > 3) {   // pattern variable "s" usable immediately, including in &&
+    System.out.println(s.toUpperCase());
+}
+```
+
+## Pattern Matching for `switch` (Java 21) — Type Patterns and Record Deconstruction
+
+Java 21 extends pattern matching directly into `switch`, including **record patterns** that deconstruct a record's components inline.
+
+```java
+sealed interface Shape permits Circle, Rectangle { }
+record Circle(double radius) implements Shape { }
+record Rectangle(double width, double height) implements Shape { }
+
+double area(Shape shape) {
+    return switch (shape) {
+        case Circle(double r) -> Math.PI * r * r;                    // record pattern — destructures directly
+        case Rectangle(double w, double h) -> w * h;
+    };
+}
+```
+
+```java
+// Combined with guards ("when" clauses) for additional conditions
+String describe(Shape shape) {
+    return switch (shape) {
+        case Circle c when c.radius() > 100 -> "Huge circle";
+        case Circle c -> "Circle";
+        case Rectangle r when r.width() == r.height() -> "Actually a square";
+        case Rectangle r -> "Rectangle";
+    };
+}
+```
+
+This combination — sealed types, records, and pattern-matching switch with exhaustiveness checking — gives Java a style of type-safe, exhaustive handling of "one of a fixed set of alternatives" that's conceptually very close to algebraic data types and pattern matching in languages like Kotlin, Scala, or Rust, achieved with substantially less boilerplate than pre-Java-16 Java required for the equivalent design.
+
+## Key Takeaways
+
+- Records eliminate boilerplate for immutable data carriers, auto-generating a canonical constructor, accessors (`x()`, not `getX()`), `equals()`, `hashCode()`, and `toString()`.
+- Sealed classes/interfaces declare a closed, complete set of permitted subtypes, enabling compiler-verified exhaustive `switch` handling with no `default` needed.
+- Pattern matching for `instanceof` and `switch` (including record deconstruction patterns) eliminates redundant casts and manual field extraction.
+- Together, records + sealed types + pattern-matching switch give Java a concise, type-safe way to model "one of a fixed set of alternatives," closely resembling algebraic data types in other modern languages.
+
+---
+
+## Interview Questions
+
+**1. What boilerplate does declaring a `record` automatically generate?**
+A canonical constructor accepting all declared components, `private final` fields for each component, public accessor methods named after each component (e.g., `x()`, not `getX()`), and correctly-implemented `equals()`, `hashCode()`, and `toString()` methods, all based on every declared component.
+
+**2. Why are a record's accessor methods named `x()` rather than the traditional JavaBeans `getX()` convention?**
+This is a deliberate design choice reflecting records' intent as concise data carriers rather than traditional mutable JavaBeans — the shorter `x()` form emphasizes that a record component is a simple, direct value access, distinct from the getter/setter convention associated with mutable, bean-style objects that records are explicitly not meant to be.
+
+**3. Can a record extend another class? Can it implement interfaces?**
+A record cannot extend any class (every record implicitly extends `java.lang.Record`, using up that single-inheritance slot) — but it can implement any number of interfaces, exactly like a regular class can, allowing records to participate in interface-based polymorphism despite not supporting class-based inheritance themselves.
+
+**4. What is a compact constructor in a record, and what happens automatically after its body executes?**
+It's a special constructor form that omits repeating the parameter list and doesn't require explicit field assignment statements — you write only validation or normalization logic in its body. After the compact constructor's body finishes executing, the standard field assignments (`this.componentName = componentName` for each component) happen automatically, using whatever values the parameters currently hold (which the compact constructor's body may have reassigned before this implicit assignment occurs).
+
+**5. Are records mutable or immutable by default, and can a record have additional mutable fields beyond its declared components?**
+Records are immutable by design — all declared components become `private final` fields with no generated setters. While technically a record's body *can* declare additional static fields or fields (though instance fields beyond the components themselves are not supported for records, only static fields can be added directly in the body), records are fundamentally intended and structured around the immutable-component pattern, not as a general-purpose mutable class replacement.
+
+**6. What does declaring an interface or class `sealed` accomplish, and what must every permitted subtype itself be declared as?**
+`sealed` restricts extension/implementation to only the classes/interfaces explicitly listed in its `permits` clause (or, if omitted, subtypes declared in the same file) — no other type anywhere can extend or implement it. Every listed permitted subtype must itself be declared `final` (no further extension at all), `sealed` (continuing to restrict further extension explicitly), or `non-sealed` (explicitly reopening unrestricted extension from that point downward) — the compiler requires one of these three modifiers on every direct permitted subtype.
+
+**7. Why does a `switch` expression over a sealed type's permitted subtypes not require a `default` branch, while a switch over a regular, non-sealed class hierarchy would?**
+Because the compiler has complete, closed-world knowledge of every possible subtype a sealed type can have (enforced by the `permits` clause), it can verify at compile time whether a switch's cases cover every single possibility — if they do, the switch is provably exhaustive with no need for a `default` fallback. A non-sealed hierarchy could theoretically be extended by any number of additional subtypes the compiler has no way of knowing about, so exhaustiveness can never be guaranteed without an explicit `default` case to handle whatever unforeseen subtype might appear.
+
+**8. What compile-time safety benefit do sealed types provide when a new subtype is added to the hierarchy later?**
+Any existing `switch` expression that was previously exhaustive over that sealed type's permitted subtypes will now fail to compile until it's updated to explicitly handle the newly-added subtype — turning what would otherwise be a silent, easy-to-miss runtime gap (a new case falling through to an unintended default, or worse, no default at all leading to a runtime exception) into an immediate, impossible-to-ignore compile-time error at every affected switch statement across the codebase.
+
+**9. What does pattern matching for `instanceof` eliminate compared to the traditional `instanceof` check followed by an explicit cast?**
+It eliminates the redundant, separate explicit cast statement — `if (obj instanceof String s)` both performs the type check and, if it succeeds, binds `s` as a properly-typed `String` variable directly, usable immediately within the scope where the compiler can prove the check passed (including within a chained `&&` condition), rather than requiring a manual `String s = (String) obj;` line afterward.
+
+**10. What is a record pattern in a `switch` (Java 21), and what does it let you do that a plain type pattern doesn't?**
+A record pattern (e.g., `case Circle(double r) -> ...`) matches against a specific record type *and* simultaneously destructures its components directly into local pattern variables, in a single step — a plain type pattern (`case Circle c -> ...`) only gives you the matched object itself, requiring separate calls to its accessor methods (`c.radius()`) to extract individual component values, whereas the record pattern extracts them inline as part of the match itself.
+
+**11. What is a "guard" (the `when` clause) in a pattern-matching switch, and what problem does it solve?**
+A guard adds an additional boolean condition to a case label (`case Circle c when c.radius() > 100 -> ...`), allowing a case to match only when both the pattern itself matches *and* the guard condition evaluates to true. It solves the need for more granular conditional matching beyond simple type/structure matching — without guards, distinguishing "a large circle" from "any circle" within the same switch would require either nested if-statements inside a single generic `Circle` case, or nesting logic outside the switch entirely, both less direct than expressing the condition right in the case label itself.
+
+**12. Why is the combination of records, sealed types, and pattern-matching switch often compared to algebraic data types in languages like Kotlin, Scala, or Rust?**
+This combination lets you define a closed, exhaustive set of possible "shapes" a value can take (via a sealed interface's permitted implementations, analogous to a sum type/tagged union), each carrying its own specific, immutable data (via records, analogous to product types), and handle every possible case exhaustively and safely via pattern-matching switch — achieving essentially the same modeling capability and compile-time exhaustiveness guarantees those languages' native algebraic data type and pattern-matching features provide, despite Java historically lacking dedicated syntax for this style prior to these combined features landing across Java 16-21.
+
+**13. Can a record implement `Comparable` or other interfaces requiring additional method implementations beyond the auto-generated ones?**
+Yes — a record's body can include additional method declarations (including implementing interface methods like `compareTo()` for `Comparable`) beyond what's auto-generated from its components; the compiler only auto-generates the canonical constructor, accessors, `equals()`, `hashCode()`, and `toString()`, leaving room for the record's body to add whatever further behavior, including satisfying additional interfaces, the design requires.
+
+**14. Is it possible to override a record's auto-generated `equals()`, `hashCode()`, or `toString()` method with a custom implementation?**
+Yes — while records generate these methods automatically based on their components by default, you can explicitly declare your own implementation of any of them in the record's body, which then takes precedence over the compiler-generated default, exactly as you'd override any inherited method — useful, for example, if a record needs `equals()`/`hashCode()` based on only a subset of its components rather than all of them.

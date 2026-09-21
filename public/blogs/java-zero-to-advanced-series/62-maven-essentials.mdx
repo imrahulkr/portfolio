@@ -1,0 +1,196 @@
+---
+title: "Maven Essentials"
+description: "The pom.xml structure, dependency scopes and transitive dependency resolution, the standard build lifecycle, and dependency conflict resolution."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Testing & Build Tools"
+chapter: 62
+totalChapters: 65
+slug: "maven-essentials"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "maven", "build-tools"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 11
+---
+
+## What Maven Actually Does
+
+Maven manages three related concerns for a Java project: **dependency management** (downloading and resolving the libraries your project needs, plus *their* dependencies), the **build lifecycle** (compiling, testing, packaging, in a standard, convention-driven sequence), and **project structure conventions** (a standard directory layout every Maven project shares, so tooling can make consistent assumptions).
+
+## Anatomy of `pom.xml`
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>          <!-- organization/namespace -->
+    <artifactId>order-service</artifactId>   <!-- this specific project's name -->
+    <version>1.0.0</version>                 <!-- this project's version -->
+    <packaging>jar</packaging>                <!-- jar, war, pom, etc. -->
+
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <version>3.2.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
+```
+
+`groupId:artifactId:version` (often abbreviated "GAV") uniquely identifies any specific artifact in a Maven repository — this is exactly the coordinate system used to locate and download the correct JAR from Maven Central or a private repository.
+
+## Dependency Scopes
+
+```xml
+<dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <scope>test</scope>   <!-- only available during test compilation/execution, NOT bundled in the final artifact -->
+</dependency>
+```
+
+| Scope | Available at compile time? | Available at runtime? | Bundled in final artifact? |
+|---|---|---|---|
+| `compile` (default) | Yes | Yes | Yes |
+| `provided` | Yes | No (assumed provided by the deployment environment) | No |
+| `runtime` | No | Yes | Yes |
+| `test` | Test only | Test only | No |
+
+`provided` is used for dependencies the deployment environment already supplies (a classic example: the Servlet API when deploying to an application server that already bundles it) — declaring it `provided` avoids packaging a redundant, potentially conflicting copy into your own artifact.
+
+## Transitive Dependencies and Conflict Resolution
+
+If your project depends on library A, and A itself depends on library B, Maven automatically pulls in B too — a **transitive dependency** — without you declaring it explicitly.
+
+```bash
+mvn dependency:tree   # visualizes the full dependency graph, including transitive dependencies and conflicts
+```
+
+**Dependency conflicts** arise when two different paths in the dependency graph pull in *different versions* of the same library. Maven resolves this using the **"nearest wins"** rule: the version declared at the shallowest depth in the dependency tree wins, regardless of which version is actually newer.
+
+```xml
+<!-- Force a specific version explicitly, overriding "nearest wins" if it picks the wrong one -->
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.16.0</version>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+```
+
+![Diagram: dependency tree showing project depending on library A and library C, both transitively pulling in different versions of library B, with Maven's nearest-wins rule selecting the version at the shallower depth](/diagrams/ch62-transitive-dependency-conflict.svg)
+
+`<dependencyManagement>` lets you centrally pin a specific version for a dependency across the whole project (or, in a multi-module project, across all modules), overriding whatever version "nearest wins" would otherwise have selected — this is exactly the mechanism Spring Boot's own parent POM (`spring-boot-starter-parent`) uses to guarantee a large, tested set of compatible library versions work together correctly.
+
+## The Standard Build Lifecycle
+
+Maven's default lifecycle is a fixed, ordered sequence of phases — running a given phase automatically runs every phase before it in the sequence:
+
+```
+validate → compile → test → package → verify → install → deploy
+```
+
+```bash
+mvn compile    # compiles source code only
+mvn test       # compiles AND runs tests (test phase comes after compile)
+mvn package    # compiles, tests, AND packages into a JAR/WAR (package comes after test)
+mvn install    # ...and installs the packaged artifact into your LOCAL repository (~/.m2)
+mvn deploy     # ...and uploads it to a REMOTE shared repository
+```
+
+This is why running `mvn install` also runs your tests — `install` is a later phase in the fixed sequence, and every phase before it (including `test`) runs automatically first.
+
+## Plugins — Where Actual Work Happens
+
+Every lifecycle phase is actually implemented by one or more **plugins** bound to it — Maven's lifecycle itself is just an ordered sequence of named phases with no inherent behavior; plugins are what do the real work at each phase.
+
+```xml
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>   <!-- runs unit tests during the "test" phase -->
+        </plugin>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>   <!-- packages an executable "fat" JAR -->
+        </plugin>
+    </plugins>
+</build>
+```
+
+## Multi-Module Projects
+
+```xml
+<!-- Parent pom.xml -->
+<packaging>pom</packaging>
+<modules>
+    <module>order-service</module>
+    <module>payment-service</module>
+    <module>shared-common</module>
+</modules>
+```
+
+A multi-module project's parent POM (`packaging=pom`, no actual code of its own) declares child modules and can centrally manage shared dependency versions and plugin configuration via `<dependencyManagement>`/`<pluginManagement>`, letting a large codebase split into several independently-buildable modules while keeping their dependency versions consistently aligned.
+
+## Key Takeaways
+
+- `groupId:artifactId:version` uniquely identifies any Maven artifact; dependency scopes (`compile`, `provided`, `runtime`, `test`) control when a dependency is available and whether it's bundled into the final artifact.
+- Transitive dependency conflicts are resolved via "nearest wins" by default; `<dependencyManagement>` lets you explicitly override that resolution.
+- The standard build lifecycle is a fixed, ordered sequence of phases — running a later phase (like `install`) automatically runs every phase before it, including `test`.
+- Plugins are what actually perform work at each lifecycle phase; the lifecycle itself is just an ordered sequence of named phases.
+
+---
+
+## Interview Questions
+
+**1. What do `groupId`, `artifactId`, and `version` together uniquely identify?**
+A specific, unique artifact (typically a JAR) in a Maven repository — `groupId` identifies the organization or namespace, `artifactId` identifies the specific project/library within that namespace, and `version` identifies exactly which release of that project. Together, this "GAV" coordinate is how Maven locates and downloads the exact correct dependency from Maven Central or any other configured repository.
+
+**2. What's the difference between the `compile`, `provided`, `runtime`, and `test` dependency scopes?**
+`compile` (the default) makes a dependency available at both compile time and runtime, and bundles it into the final packaged artifact. `provided` makes it available at compile time but assumes the deployment environment will supply it at runtime, so it's not bundled. `runtime` is needed only at runtime, not compile time, but is still bundled. `test` is available only during test compilation and execution, never bundled into the final production artifact at all.
+
+**3. Why would you mark a dependency as `provided` rather than the default `compile` scope?**
+When the target deployment environment already supplies that dependency itself (a classic example being the Servlet API when deploying a WAR to an application server that bundles its own implementation) — using `provided` avoids packaging a redundant, and potentially version-conflicting, copy of that dependency into your own deployable artifact, relying on the environment's own copy instead.
+
+**4. What is a transitive dependency?**
+A dependency that your project doesn't declare directly, but is automatically pulled in because one of your project's *direct* dependencies itself depends on it — Maven resolves and includes the entire transitive dependency graph automatically, without requiring you to manually enumerate every indirect dependency your project actually needs.
+
+**5. What does Maven's "nearest wins" rule mean for resolving dependency version conflicts?**
+When two different paths through the dependency graph pull in different versions of the same library, Maven selects whichever version is declared at the *shallowest* depth in the overall dependency tree (closest to your own project's direct declarations), regardless of whether that's actually the newer or older of the two conflicting versions — a purely structural, position-based rule rather than a semantic-version-aware comparison.
+
+**6. How would you explicitly override "nearest wins" if it selects an incorrect or problematic version of a transitive dependency?**
+Add an explicit `<dependencyManagement>` entry (or, in simpler cases, a direct explicit dependency declaration) specifying the exact desired version for that specific `groupId:artifactId` — this explicit declaration takes precedence over whatever version the automatic transitive resolution and "nearest wins" rule would otherwise have selected.
+
+**7. What command would you use to inspect a project's full dependency tree, including transitive dependencies?**
+`mvn dependency:tree` — it prints the complete dependency graph, including every transitive dependency and clearly flagging any version conflicts it had to resolve, making it the standard first diagnostic step when investigating an unexpected dependency version or a `NoSuchMethodError`/`ClassNotFoundException` caused by a version mismatch.
+
+**8. What is Maven's default build lifecycle, and why does running `mvn install` also run your tests?**
+The default lifecycle is a fixed, ordered sequence of phases: validate, compile, test, package, verify, install, deploy. Because Maven always executes every phase up to and including the one you explicitly request, running `mvn install` (a later phase) automatically triggers every earlier phase first, including `test` — which is exactly why tests run as part of an `install` (or `package`) command even without explicitly typing `mvn test` first.
+
+**9. What's the actual relationship between Maven's lifecycle phases and plugins?**
+The lifecycle itself is purely an ordered sequence of named phases with no inherent behavior of its own — plugins are bound to specific phases and are what actually perform real work when that phase executes (for example, the Surefire plugin runs your unit tests during the `test` phase, and the Compiler plugin compiles source code during the `compile` phase). Without any plugins bound to a given phase, reaching that phase would simply do nothing.
+
+**10. What does the `<dependencyManagement>` section do, and how does it differ from a regular `<dependencies>` declaration?**
+`<dependencyManagement>` declares a specific version (and potentially scope) for a dependency *without* actually adding it as an active dependency of the project — it only takes effect if that same dependency is later declared (without a version) in the actual `<dependencies>` section, at which point the managed version is applied. This is the mechanism used to centrally pin consistent versions across a multi-module project (or override a transitive dependency's resolved version) without needing to repeat the exact version number in every module or dependency declaration that needs it.
+
+**11. What is a multi-module Maven project, and what does the parent POM's `packaging=pom` signify?**
+It's a project structured as several independently-buildable sub-projects (modules) unified under one parent project that coordinates them, letting a large codebase be organized into logically separate, individually-versioned/buildable pieces while still sharing centralized dependency and plugin version management. `packaging=pom` on the parent signifies that the parent POM itself produces no actual compiled artifact (no JAR/WAR) — its sole purpose is aggregating and configuring its listed child `<modules>`, not containing application code of its own.

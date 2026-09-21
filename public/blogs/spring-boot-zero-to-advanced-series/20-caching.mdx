@@ -1,0 +1,228 @@
+---
+title: "Caching in Spring Boot: The Cache Abstraction & Redis"
+description: "Spring's caching annotations look almost too simple — the real skill is knowing what NOT to cache, and understanding exactly when a cached value goes stale."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 20
+tags: ["Spring Boot", "Caching", "Redis"]
+---
+
+Chapter 19 gave you visibility into a running application. This chapter addresses one of the most common things that visibility reveals: a specific, expensive, frequently-repeated operation dominating latency — and caching, applied correctly, is the fix.
+
+## Enabling the cache abstraction
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-cache</artifactId>
+</dependency>
+```
+
+```java
+@Configuration
+@EnableCaching
+class CacheConfig { }
+```
+
+`@EnableCaching` activates Spring's cache abstraction — an AOP-proxy-based mechanism (the same underlying pattern as `@Transactional` from Chapter 11) that intercepts annotated method calls and checks a cache before letting the method actually execute.
+
+## `@Cacheable`, `@CachePut`, `@CacheEvict`
+
+```java
+@Service
+class ProductService {
+
+    private final ProductRepository productRepository;
+
+    @Cacheable(value = "products", key = "#id")
+    Product findById(Long id) {
+        return productRepository.findById(id)
+            .orElseThrow(() -> new ProductNotFoundException(id));
+    }
+
+    @CachePut(value = "products", key = "#product.id")
+    Product update(Product product) {
+        return productRepository.save(product);
+    }
+
+    @CacheEvict(value = "products", key = "#id")
+    void delete(Long id) {
+        productRepository.deleteById(id);
+    }
+}
+```
+
+- `@Cacheable` — checks the cache first; if present, the method body **never executes at all**, and the cached value is returned directly. If absent, the method runs, and its result is stored in the cache for next time.
+- `@CachePut` — **always** runs the method, then updates the cache with the result. Used for writes that should also refresh the cache, rather than skip the underlying operation.
+- `@CacheEvict` — removes an entry (or, with `allEntries = true`, the whole cache) — essential after any operation that makes a cached value stale.
+
+```
+@Cacheable(value="products", key="#id")
+             │
+             ▼
+      Is "#id" in the "products" cache?
+        ┌────┴────┐
+      yes          no
+        │            │
+        ▼            ▼
+  return cached   run findById()
+  value, method    body, store
+  body never runs  result in cache
+```
+
+Because this is proxy-based AOP, exactly the same self-invocation gotcha from Chapter 11 applies here: calling a `@Cacheable` method from another method in the *same class* bypasses the proxy, and caching is silently skipped.
+
+## Redis as a distributed cache backend
+
+The default, in-memory `ConcurrentMapCacheManager` (used automatically if no other cache library is configured) is fine for a single instance, but is **useless in a multi-instance deployment** — each instance would maintain its own separate, inconsistent in-memory cache. Redis solves this with one shared cache all instances read from and write to.
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
+```
+
+```yaml
+spring:
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  cache:
+    type: redis
+    redis:
+      time-to-live: 600000   # 10 minutes, in milliseconds
+```
+
+```
+                    ┌───────────┐
+   Instance A ─────▶│            │
+   Instance B ─────▶│   Redis    │◀───── shared, consistent cache
+   Instance C ─────▶│            │        across every instance
+                    └───────────┘
+```
+
+With this configuration, the exact same `@Cacheable`/`@CachePut`/`@CacheEvict` annotations from before now transparently use Redis instead of local memory — no code changes required, again thanks to the cache abstraction sitting between your annotations and the actual storage mechanism.
+
+## Cache invalidation — the genuinely hard part
+
+The famous line ("There are only two hard things in Computer Science: cache invalidation and naming things") exists for a reason. Caching introduces a new failure mode that didn't exist before: **serving stale data**.
+
+```java
+@Service
+class ProductService {
+
+    @CacheEvict(value = "products", key = "#id")
+    @Transactional
+    void updatePrice(Long id, BigDecimal newPrice) {
+        Product product = productRepository.findById(id).orElseThrow();
+        product.setPrice(newPrice);
+        productRepository.save(product);
+    }
+}
+```
+
+Every write path that changes cached data needs a corresponding eviction (or a `@CachePut`) — miss even one, and that specific piece of data can silently serve stale values for as long as the cache's TTL allows. This is precisely why `time-to-live` matters even with correct eviction logic: it's a safety net bounding how long any missed-eviction bug can persist before self-correcting.
+
+## Best practices & gotchas
+
+- **Cache read-heavy, expensive, and relatively stable data.** A product catalog lookup, a computed report, an external API response that rarely changes — not something that changes on every request, where the cache would provide no benefit and only add staleness risk.
+- **Always set a sensible TTL, even with correct eviction logic.** It's the safety net that limits the damage of an eviction bug you haven't found yet.
+- **Watch for the self-invocation gotcha, exactly as with `@Transactional` (Chapter 11).** A `@Cacheable` method called from within the same class bypasses the caching proxy entirely.
+- **Choose cache keys carefully for methods with multiple parameters.** `@Cacheable(key = "#customerId + '-' + #status")` for a method taking two arguments — an incorrect or incomplete key can cause requests with genuinely different parameters to collide and return each other's cached results.
+- **Don't cache anything containing per-user sensitive data under a shared or poorly-scoped key.** A caching bug here isn't just a staleness problem — it's a way for one user to receive another user's cached, personal data.
+- **A distributed cache (Redis) is required the moment your application runs as more than one instance.** The default in-memory cache manager silently "works" in local development with one instance, then behaves completely differently — inconsistently — the moment it's scaled horizontally in production.
+
+## Quick reference
+
+| Annotation | Behavior |
+|---|---|
+| `@Cacheable` | Returns cached value if present; method body skipped entirely on a hit |
+| `@CachePut` | Always executes; updates the cache with the result |
+| `@CacheEvict` | Removes a cache entry (or all entries with `allEntries = true`) |
+| `ConcurrentMapCacheManager` | Default, in-memory, single-instance-only cache |
+| Redis | Shared, distributed cache — required for multi-instance deployments |
+| `time-to-live` | Safety-net expiration limiting the damage of a missed eviction |
+
+## Wrapping up
+
+Caching, applied to the right data with correct invalidation and a sane TTL, is one of the highest-leverage performance improvements available — and one of the easiest to get subtly wrong. **Chapter 21** continues Part 6 with asynchronous processing and scheduling: `@Async`, `@Scheduled`, and `CompletableFuture`.
+
+## Interview Questions
+
+**1. What does `@Cacheable` do, and what happens on a cache hit versus a miss?**
+On a cache hit (the key already exists in the specified cache), the annotated method's body is **never executed at all** — the cached value is returned directly. On a miss, the method executes normally, and its return value is stored in the cache under the computed key before being returned, so the next call with the same key becomes a hit.
+
+*Follow-up: If a `@Cacheable` method has side effects beyond just returning a value (e.g., it also increments a counter or logs an access event), what happens to those side effects on a cache hit?* They're skipped entirely, since the method body never runs on a hit — this is exactly why `@Cacheable` should only be applied to methods that are effectively pure lookups with no meaningful side effects; a method whose side effects matter every time it's logically "called" is a poor fit for `@Cacheable` regardless of how expensive its core computation is.
+
+**2. What's the difference between `@Cacheable` and `@CachePut`?**
+`@Cacheable` checks the cache first and skips the method entirely on a hit. `@CachePut` always executes the method, and afterward updates the cache with the result — used specifically for write operations that should both perform the real update and keep the cache in sync with the new value, rather than skip the actual work.
+
+*Follow-up: Why would you use `@CachePut` on an update method instead of just using `@CacheEvict` and letting the next read repopulate the cache?* `@CachePut` avoids the brief window (and the extra database read) where the cache is empty between the eviction and the next read repopulating it — for a value that's about to be read again soon after the update, proactively refreshing the cache with the just-computed result is more efficient than evicting and waiting for a subsequent cache miss to refill it.
+
+**3. What does `@CacheEvict(allEntries = true)` do, and when would you use it over evicting a single key?**
+It clears every entry in the specified cache, rather than removing just one key. It's used when an operation invalidates data broadly in a way that's impractical or impossible to express as specific individual keys — for example, a bulk update affecting many records at once, where evicting each individually would be cumbersome or where the exact set of affected keys isn't easily known.
+
+*Follow-up: What's the performance trade-off of using `allEntries = true` compared to evicting specific keys?* Clearing the entire cache means every subsequent request for *any* previously cached entry — not just the ones actually affected by the triggering operation — becomes a cache miss until repopulated, temporarily increasing load on the underlying data source across the board; targeted eviction of only the genuinely affected keys avoids this broader, unnecessary cache-cold period.
+
+**4. Why does the same self-invocation gotcha from `@Transactional` (Chapter 11) apply to caching annotations as well?**
+Both `@Transactional` and Spring's caching annotations (`@Cacheable`, `@CachePut`, `@CacheEvict`) are implemented via the same underlying AOP proxy mechanism — a call from one method to another *within the same class* happens directly on `this`, bypassing the proxy entirely, so the caching (or transactional) behavior is silently never triggered for that particular call.
+
+*Follow-up: What's the same fix that applies here as it did for the `@Transactional` self-invocation problem?* Extract the caching-annotated method into a separate Spring-managed bean and call it from there, so the call genuinely arrives through the proxy from outside the bean — exactly the same structural fix described for `@Transactional` in Chapter 11.
+
+**5. Why is the default `ConcurrentMapCacheManager` unsuitable for a multi-instance production deployment?**
+It stores cached values in local, in-process memory specific to a single JVM instance — each running instance maintains its own separate, independent cache with no shared state between them. In a multi-instance deployment, this means the same logical piece of data could be cached differently (or be stale in one instance but fresh in another) depending purely on which instance happened to handle a given request, producing inconsistent behavior across the fleet.
+
+*Follow-up: Beyond consistency, what's a concrete operational problem this inconsistency could cause during a rolling deployment?* During a rolling deployment, some instances would be running old code with an old in-memory cache while newly deployed instances start with an empty cache reflecting new code — a request hitting different instances during that transition period could see inconsistent results (fresh vs. stale, or old-format vs. new-format cached data) purely based on load-balancer routing, which is exactly the kind of confusing, hard-to-reproduce issue a shared, consistent cache like Redis avoids.
+
+**6. What changes in application code when switching from the default in-memory cache to Redis?**
+Nothing in the `@Cacheable`/`@CachePut`/`@CacheEvict`-annotated code itself — only the dependency (adding `spring-boot-starter-data-redis`) and configuration (`spring.cache.type=redis` plus Redis connection properties) change. This is the cache abstraction doing exactly its job: decoupling the caching annotations from the specific storage mechanism underneath them.
+
+*Follow-up: Is there any behavioral difference application code might need to account for beyond just configuration, once switching to Redis?* Values stored in Redis need to be serializable (typically via JSON or a similar format) since Redis is a separate, external process rather than in-process memory — objects cached must have a compatible serialization strategy configured (Spring Boot defaults to JDK serialization but JSON via Jackson is commonly configured instead), which isn't a concern at all with the in-memory cache manager since objects there are simply held by reference in the same JVM.
+
+**7. What is cache invalidation, and why is it considered one of the hardest problems in caching?**
+It's the process of ensuring a cached value is removed or updated whenever the underlying data it represents changes, so the cache never serves stale data. It's hard because every single write path that could affect cached data needs a correct, corresponding eviction or update — missing even one path (a new feature added later, an edge-case update flow) silently reintroduces staleness that's often difficult to detect until a user reports incorrect data.
+
+*Follow-up: Why is a "miss just one eviction path" bug particularly hard to catch in normal testing?* Because the bug only manifests as stale data being served under a specific sequence of operations (an update through the one code path that lacks eviction, followed by a read of that same cached key) — functional tests that check the update itself succeeded (e.g., verifying the database was updated correctly) can pass completely fine while the cache silently continues serving the old value, since the caching layer isn't necessarily exercised or asserted on by those same tests.
+
+**8. Why should a TTL (time-to-live) be set even when eviction logic is believed to be fully correct?**
+A TTL acts as a safety net bounding the maximum possible duration of a staleness bug that hasn't been discovered yet — even with careful eviction logic, a missed edge case, a new code path added later without updating the caching logic, or an entirely unanticipated write path can silently break invalidation; a TTL guarantees that even in that failure scenario, stale data self-corrects within a known, bounded window rather than persisting indefinitely.
+
+*Follow-up: How would you decide what TTL value is appropriate for a specific cached value?* Balance how frequently the underlying data actually changes against how costly a cache miss is to recompute, and how tolerable brief staleness is for that specific use case — a rarely-changing product catalog entry can tolerate a long TTL (hours), while something more dynamic or user-sensitive would need a much shorter TTL even if it means more frequent cache misses and recomputation.
+
+**9. What's the risk of caching per-user sensitive data under a poorly-scoped or shared cache key?**
+If the cache key doesn't uniquely and correctly incorporate the user's identity (or another discriminating factor), a caching bug could cause one user's request to receive another user's cached, personal data — turning a simple caching mistake into a genuine data-privacy incident, far more serious than ordinary staleness.
+
+*Follow-up: How would you design a cache key to safely avoid this risk for a method returning a user's personalized dashboard data?* Explicitly include the authenticated user's unique identifier as part of the cache key — e.g., `@Cacheable(value = "dashboards", key = "#userId")` — ensuring the key structurally guarantees that different users' data can never collide in the cache, rather than relying on some other, potentially ambiguous or incomplete distinguishing value.
+
+**10. How would you cache a method that takes multiple parameters, and what happens if the cache key doesn't account for all of them?**
+Spring EL lets you construct a composite key from multiple parameters: `@Cacheable(key = "#customerId + '-' + #status")`. If the key omits a parameter that actually affects the method's result, requests with different values for that omitted parameter would incorrectly collide on the same cache key — the first call's result (computed for one specific value of the omitted parameter) would be incorrectly served to subsequent calls with a *different* value for that same parameter.
+
+*Follow-up: What's a safer default approach to constructing cache keys for methods with several parameters, to avoid accidentally omitting one that matters?* Rather than manually composing a key expression, Spring Cache's default key generator automatically incorporates all of a method's parameters into the generated key when no explicit `key` attribute is provided — relying on this default (or a custom `KeyGenerator` bean applied consistently) avoids the specific risk of a developer manually writing a key expression and forgetting to include a parameter that actually affects the result.
+
+**11. Why is caching best suited to read-heavy, relatively stable data rather than frequently-changing data?**
+The value of caching comes from serving repeated requests for the same data without recomputing it — data that changes on nearly every request provides little to no opportunity for cache hits before it's already stale again, meaning the overhead of managing the cache (storage, invalidation logic, key computation) outweighs any performance benefit, while also introducing unnecessary staleness risk for data that needed to be fresh on every read anyway.
+
+*Follow-up: Give an example of data in a typical e-commerce application that would be a poor fit for caching, and explain why.* Real-time inventory stock counts during a high-demand flash sale — the value changes essentially continuously as purchases happen, so a cached count would almost immediately be stale, and serving a stale "in stock" status could lead to overselling a limited-quantity item, which is a far more damaging consequence of staleness than, say, showing a slightly outdated product description.
+
+**12. How does the cache abstraction's proxy-based mechanism compare to `@Transactional`'s from Chapter 11?**
+They're implemented with the same underlying pattern — Spring wraps the actual bean in an AOP proxy that intercepts calls to annotated methods and applies its specific behavior (checking/updating a cache, or beginning/committing a transaction) around the real method invocation. This is exactly why both share the identical self-invocation limitation: a call from within the same class bypasses the proxy for either mechanism in the same way.
+
+*Follow-up: Since both `@Transactional` and `@Cacheable` can be applied to the same method, what ordering consideration might matter if a method both writes to the database and needs its result cached?* Generally, you'd want the transaction to fully commit before the value is considered safe to cache (or evicted before, not after, if invalidating) — combining `@CachePut` with `@Transactional` on an update method, as shown in this chapter's `updatePrice` example, relies on Spring correctly sequencing the cache operation relative to the transaction boundary; getting this wrong (e.g., caching a value that's later rolled back) could cache data that was never actually committed to the database at all.
+
+**13. What's the difference between caching at the application layer (Spring's cache abstraction) versus caching at the HTTP layer (e.g., a CDN or reverse proxy cache)?**
+Application-layer caching (this chapter's focus) caches the result of a specific method call, typically tied to business logic and data-access patterns, and is under fine-grained programmatic control (custom keys, TTLs, eviction logic). HTTP-layer caching operates on entire HTTP responses based on caching headers (`Cache-Control`, `ETag`), typically for content that's the same for many or all clients, and is managed by infrastructure (a CDN, reverse proxy) rather than application code.
+
+*Follow-up: For a REST API returning personalized, per-user data, which of these two caching layers is generally more appropriate, and why?* Application-layer caching is generally more appropriate, since HTTP-layer/CDN caching is best suited to content that's identical (or nearly so) across many different clients/requests — personalized, per-user responses aren't a good fit for a shared HTTP cache (and doing so risks exactly the kind of cross-user data leakage discussed earlier), whereas application-layer caching can scope cache keys precisely to the individual user.
+
+**14. If a cached method's underlying data can be modified by a process outside your application entirely (e.g., a direct database update by another system), how would that affect your caching strategy?**
+Since your application's `@CacheEvict` logic only runs in response to writes it initiates itself, it has no way to know about — and therefore no way to invalidate the cache for — a change made by an entirely external process. In this scenario, relying on a shorter TTL becomes more important as the primary staleness safeguard, since explicit, code-driven eviction can't cover a write path your application doesn't control or even know about.
+
+*Follow-up: What's a more robust alternative to a short TTL for handling this specific scenario, if data freshness genuinely matters?* Have the external system publish an event (e.g., via a message broker, covered in Part 7) when it makes a relevant change, and have your application subscribe to that event specifically to trigger the appropriate cache eviction — extending explicit, event-driven invalidation to cover writes originating outside your own application's code paths, rather than relying purely on a TTL's passive expiration.
+
+**15. How would you decide whether a specific method in a real application is actually a good candidate for `@Cacheable`?**
+Check whether it's read-heavy relative to how often the underlying data changes, whether its computation or data-fetch cost is meaningful enough to be worth caching at all (caching a trivially fast operation adds complexity for no real benefit), whether the result can be safely scoped by a correct, collision-free key, and whether every write path that could make a cached result stale can realistically have a corresponding eviction/update added and kept in sync going forward.
+
+*Follow-up: What observability tool from Chapter 19 would help confirm, after adding a cache, whether it's actually providing the expected benefit in production?* Micrometer's cache metrics (auto-instrumented once Actuator and the cache abstraction are both present) expose hit/miss ratios and cache size per named cache, queryable via `/actuator/metrics/cache.gets` — a consistently low hit ratio in production would be a concrete signal that the caching strategy for that method isn't actually paying off as expected, prompting a review of the TTL, key design, or whether that data was a good caching candidate in the first place.

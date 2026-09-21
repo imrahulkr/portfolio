@@ -1,0 +1,196 @@
+---
+title: "Transactions Deep Dive: @Transactional, Propagation & Isolation"
+description: "@Transactional looks like one annotation, but propagation, isolation, and how Spring's proxy mechanism actually works underneath it are where most real-world transaction bugs come from."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 11
+tags: ["Spring Boot", "Transactions", "Spring Data JPA"]
+---
+
+Chapters 9 and 10 built real querying and persistence logic. This chapter covers what actually guarantees a multi-step database operation is atomic — and the specific ways `@Transactional` fails silently when it's misused, which is a frequent source of subtle production bugs.
+
+## What a transaction guarantees
+
+A transaction groups multiple database operations into a single atomic unit — either **all** of them succeed and are committed, or **none** of them are (a rollback undoes everything). This is commonly summarized as **ACID**: Atomicity, Consistency, Isolation, Durability.
+
+```java
+@Service
+class OrderService {
+
+    private final OrderRepository orderRepository;
+    private final InventoryRepository inventoryRepository;
+
+    @Transactional
+    public OrderResponse placeOrder(CreateOrderRequest request) {
+        Order order = orderRepository.save(new Order(request.customerName()));
+        inventoryRepository.decrementStock(request.productIds());   // if this throws...
+        return toResponse(order);                                    // ...the save() above is rolled back too
+    }
+}
+```
+
+Without `@Transactional`, if `decrementStock` throws after `save()` already committed, you'd have an order saved with no corresponding stock decrement — an inconsistent state. `@Transactional` ensures both operations succeed or fail together.
+
+## How `@Transactional` actually works: proxies
+
+Spring implements `@Transactional` using **AOP proxies** — Spring wraps the actual bean in a proxy that starts a transaction before the method runs and commits (or rolls back) after it returns (or throws). This mechanical detail explains several behaviors that otherwise look like bugs:
+
+```
+Caller
+  │
+  ▼
+┌────────────────────┐
+│   Proxy (transactional)  │  ← begins transaction here
+│  ┌──────────────────┐ │
+│  │   Real OrderService │ │  ← your actual method body runs here
+│  └──────────────────┘ │
+└────────────────────┘  ← commits or rolls back here, after the method returns
+```
+
+**This is why calling a `@Transactional` method from another method in the *same class* doesn't start a new transaction** — the call happens directly on `this`, bypassing the proxy entirely, since the proxy only intercepts calls arriving from *outside* the bean.
+
+```java
+@Service
+class OrderService {
+
+    public void processOrder(Long id) {
+        this.updateStatus(id);   // NOT going through the proxy — @Transactional is silently ignored
+    }
+
+    @Transactional
+    public void updateStatus(Long id) { }
+}
+```
+
+The fix is to move `updateStatus` into a separate bean and call it from there, so the call genuinely passes through the proxy.
+
+## Propagation: how transactions nest
+
+`propagation` controls what happens when a `@Transactional` method is called from within another already-active transaction.
+
+| Propagation | Behavior |
+|---|---|
+| `REQUIRED` (default) | Join the existing transaction if one is active; otherwise start a new one |
+| `REQUIRES_NEW` | Always suspend any existing transaction and start a fresh, independent one |
+| `NESTED` | Start a nested transaction (savepoint) within the current one, rollback-able independently |
+| `SUPPORTS` | Join an existing transaction if present; otherwise run non-transactionally |
+| `MANDATORY` | Requires an existing transaction; throws an exception if none is active |
+
+```java
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void logAuditEvent(String event) {
+    auditRepository.save(new AuditLog(event));
+}
+```
+
+`REQUIRES_NEW` is the practical one to know well: audit logging is the classic example — you often want the audit record saved *even if* the surrounding business transaction later rolls back, which `REQUIRED` (joining the same transaction) would not achieve, since a rollback of the outer transaction would undo the audit log too.
+
+## Isolation: what one transaction can see of another's uncommitted changes
+
+| Isolation level | Prevents |
+|---|---|
+| `READ_UNCOMMITTED` | Nothing — dirty reads possible |
+| `READ_COMMITTED` | Dirty reads |
+| `REPEATABLE_READ` | Dirty reads, non-repeatable reads |
+| `SERIALIZABLE` | Dirty reads, non-repeatable reads, phantom reads — full isolation, at a real performance cost |
+
+```java
+@Transactional(isolation = Isolation.READ_COMMITTED)
+public BigDecimal getAccountBalance(Long accountId) { }
+```
+
+Most databases (PostgreSQL, MySQL InnoDB with defaults) default to `READ_COMMITTED`, a reasonable balance for most applications. Higher isolation levels prevent more anomalies but reduce concurrency — reach for `SERIALIZABLE` only for genuinely correctness-critical operations (e.g., financial balance transfers) where the performance trade-off is justified.
+
+## The silent failure that catches almost everyone: checked exceptions
+
+```java
+@Transactional
+public void placeOrder(CreateOrderRequest request) throws InsufficientStockException {
+    orderRepository.save(new Order(request.customerName()));
+    if (!hasStock(request)) {
+        throw new InsufficientStockException();   // does NOT roll back the save() above, by default!
+    }
+}
+```
+
+**By default, `@Transactional` only rolls back on unchecked (`RuntimeException`/`Error`) exceptions — a checked exception does *not* trigger a rollback unless explicitly configured to.** This is one of the most common real-world transaction bugs. Fix it explicitly:
+
+```java
+@Transactional(rollbackFor = InsufficientStockException.class)
+public void placeOrder(CreateOrderRequest request) throws InsufficientStockException { }
+```
+
+Or, more simply, use unchecked exceptions for anything that should trigger a rollback — the idiomatic approach in most modern Spring codebases, avoiding this gotcha entirely.
+
+## Best practices & gotchas
+
+- **Never rely on self-invocation for `@Transactional` to apply.** Calling a `@Transactional` method from another method in the same class bypasses the proxy and silently runs without transactional behavior — extract it to a separate bean.
+- **Know your rollback rules.** Default behavior rolls back on unchecked exceptions only; use `rollbackFor` explicitly if a checked exception should also trigger a rollback, or avoid checked exceptions for this purpose altogether.
+- **Keep transactions short.** A `@Transactional` method that also makes a slow external HTTP call holds a database connection (and potentially locks) for the whole duration — move external calls outside the transactional boundary wherever possible.
+- **`@Transactional` on a `private` method has no effect** — Spring's proxy-based AOP can only intercept calls to `public` methods (with the default proxy mode); annotating a private method silently does nothing.
+- **Read-only methods should be marked `@Transactional(readOnly = true)`.** This is a hint to Hibernate that allows some optimizations (skipping dirty-checking) and to the database driver, and communicates intent clearly to future readers of the code.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| `@Transactional` | Wraps a method in a proxy-managed database transaction |
+| Default rollback rule | Rolls back on unchecked exceptions only, not checked ones |
+| `rollbackFor` | Explicitly extends rollback behavior to specific checked exceptions |
+| `Propagation.REQUIRED` | Default — join existing transaction, or start a new one |
+| `Propagation.REQUIRES_NEW` | Always starts an independent transaction, suspending any current one |
+| Isolation levels | Control visibility of concurrent transactions' uncommitted/committed changes |
+| Self-invocation | Bypasses the transactional proxy entirely — `@Transactional` is silently ignored |
+| `readOnly = true` | Optimization hint for read-only transactional methods |
+
+## Wrapping up
+
+`@Transactional` is simple to apply but easy to misuse in ways that fail silently rather than loudly — self-invocation and the checked-exception rollback rule are the two gotchas worth internalizing above everything else in this chapter. Part 3 continues with **Chapter 12**, covering schema migrations with Flyway/Liquibase and working with multiple datasources.
+
+## Interview Questions
+
+**1. What does `@Transactional` guarantee?**
+It guarantees that all database operations performed within the annotated method either all succeed and commit together, or, if any part fails (by default, via an unchecked exception), all of them are rolled back together — atomicity across multiple individual database operations.
+
+**2. How does Spring implement `@Transactional` mechanically?**
+Via AOP proxies. Spring wraps the actual bean in a dynamic proxy; calls to a `@Transactional` method arriving through that proxy begin a transaction before the real method runs and commit or roll back after it returns or throws. The transactional behavior lives entirely in this proxy wrapper, not inside the annotated method itself.
+
+**3. Why doesn't `@Transactional` apply when a method calls another `@Transactional` method within the same class?**
+Because that call happens directly on `this` (the real object), not through the Spring-managed proxy that wraps the bean — and it's the proxy, not the object itself, that implements the transactional behavior. Since the call never passes through the proxy, the transactional advice is never triggered, and the annotation is silently ignored.
+
+**4. How would you fix the self-invocation problem if you needed method A to call transactional method B within the same class?**
+Extract method B into a separate Spring-managed bean and inject that bean into the original class, so the call to B genuinely arrives from outside the bean and passes through the proxy. (Spring also offers `AopContext.currentProxy()` as a workaround to call through the proxy explicitly, but extracting a separate bean is the cleaner, more common solution.)
+
+**5. What is transaction propagation, and what does `REQUIRED` (the default) do?**
+Propagation defines how a `@Transactional` method behaves when it's called from within an already-active transaction. `REQUIRED`, the default, joins the existing transaction if one is active, or starts a new one if not — meaning nested `@Transactional` calls under `REQUIRED` all become part of the same outer transaction, and a rollback anywhere rolls back the whole thing.
+
+**6. What does `REQUIRES_NEW` do differently from `REQUIRED`, and give a realistic use case.**
+`REQUIRES_NEW` always suspends any currently active transaction and starts a completely independent new one, committing or rolling back on its own regardless of what happens to the outer transaction. A common use case is audit logging: you often want an audit record to persist even if the surrounding business operation later fails and rolls back — which `REQUIRED` wouldn't achieve, since the audit save would be undone along with everything else in the same transaction.
+
+**7. By default, does `@Transactional` roll back on a checked exception?**
+No. By default, Spring's transaction management only triggers a rollback for unchecked exceptions (`RuntimeException` and `Error`); a checked exception thrown from a `@Transactional` method does not cause a rollback unless the method is explicitly configured with `rollbackFor` naming that exception (or its superclass).
+
+**8. How would you make a `@Transactional` method roll back on a specific checked exception?**
+Explicitly declare it via the `rollbackFor` attribute: `@Transactional(rollbackFor = InsufficientStockException.class)`. Alternatively, and more commonly in modern code, avoid checked exceptions for conditions that should trigger a rollback, using unchecked exceptions instead so the default rollback rule applies without any extra configuration.
+
+**9. What is `Isolation.READ_COMMITTED`, and why is it a common default?**
+It prevents "dirty reads" — a transaction can never see another transaction's uncommitted changes — while still allowing relatively high concurrency, since it doesn't lock against other read/write anomalies like non-repeatable reads or phantom reads. It's the default isolation level for most mainstream databases (PostgreSQL, MySQL/InnoDB) because it offers a practical balance between correctness and performance for the majority of applications.
+
+**10. What's the trade-off of using `Isolation.SERIALIZABLE`?**
+It provides the strongest consistency guarantee, preventing dirty reads, non-repeatable reads, and phantom reads entirely — but at a significant performance and concurrency cost, since the database must enforce much stricter locking or use techniques like serializable snapshot isolation, which increases the likelihood of transactions blocking each other or failing with serialization conflicts under load. It should be reserved for operations where correctness genuinely outweighs throughput, such as financial balance transfers.
+
+**11. Why does `@Transactional` on a `private` method have no effect?**
+Spring's default proxy-based AOP mechanism (JDK dynamic proxies or CGLIB) can only intercept calls made to a bean's `public` methods through its external, proxied interface/subclass — a `private` method isn't part of that externally visible surface at all, so the proxy has no way to wrap it, and the annotation is silently ignored.
+
+**12. What does `@Transactional(readOnly = true)` do, and why use it?**
+It's a hint passed down to the underlying persistence provider (Hibernate) and, in some setups, the JDBC driver, indicating the method performs no writes. Hibernate can use this to skip dirty-checking on loaded entities (an optimization), and some drivers/databases can route read-only transactions differently (e.g., to a read replica). It also documents intent clearly for anyone reading the method later.
+
+**13. What happens if an exception is thrown and caught inside a `@Transactional` method, without being rethrown?**
+If the exception is fully caught and handled within the method (never propagating back out to the proxy), the transaction proceeds as if no exception occurred at all, and commits normally when the method returns — the proxy only decides to roll back based on an exception actually propagating out of the method call, not one that was caught and suppressed internally.
+
+**14. How would you design a method that needs to guarantee an audit log entry is saved regardless of whether the surrounding business transaction succeeds or fails?**
+Extract the audit-logging call into its own method on a separate bean, annotated `@Transactional(propagation = Propagation.REQUIRES_NEW)`. Calling it from within the outer transactional method causes it to run in a fully independent transaction that commits on its own — so even if the outer transaction later throws and rolls back, the already-committed audit log entry is unaffected.
+
+**15. Why is it good practice to keep transactional methods short, and specifically to avoid slow external calls (like an HTTP request to another service) inside them?**
+An open transaction typically holds a database connection from the connection pool, and depending on the operations performed and isolation level, may hold row or table locks, for its entire duration. A slow external call inside that boundary extends how long that connection and any locks are held, which under load can exhaust the connection pool or cause lock contention that blocks other transactions — external calls should generally happen before or after the transactional boundary, not inside it.

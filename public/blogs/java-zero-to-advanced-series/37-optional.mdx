@@ -1,0 +1,160 @@
+---
+title: "The Optional Class"
+description: "Modeling the absence of a value explicitly, Optional's core methods, chaining with map/flatMap/filter, and where Optional should (and shouldn't) be used."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Functional Programming"
+chapter: 37
+totalChapters: 65
+slug: "optional"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "optional", "functional-programming"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## The Problem `Optional` Addresses
+
+Before Java 8, "no value" was represented by `null` — but `null` carries no information about *why* a value is missing, and every method returning a potentially-`null` reference silently pushes the burden of remembering to null-check onto every single caller, forever, with the compiler offering no help at all.
+
+```java
+public Employee findById(String id) {
+    // returns null if not found — every caller must remember to check, or risk NullPointerException
+}
+```
+
+`Optional<T>` makes the possibility of absence **explicit in the type signature itself** — a method returning `Optional<Employee>` visibly documents "this might not find a result," and the API's design actively discourages accessing the value without acknowledging that possibility.
+
+```java
+public Optional<Employee> findById(String id) {
+    // returns Optional.empty() if not found — the return TYPE itself signals this possibility
+}
+```
+
+## Creating and Checking `Optional`
+
+```java
+Optional<String> present = Optional.of("hello");        // throws NPE immediately if the argument is null
+Optional<String> maybeNull = Optional.ofNullable(getValue());  // wraps a possibly-null value safely
+Optional<String> empty = Optional.empty();
+
+if (present.isPresent()) {
+    System.out.println(present.get());   // get() throws NoSuchElementException if empty — use cautiously
+}
+
+present.ifPresent(value -> System.out.println(value));   // preferred over isPresent()+get()
+```
+
+## Providing Defaults — `orElse`, `orElseGet`, `orElseThrow`
+
+```java
+String value1 = maybeNull.orElse("default");                     // always evaluates "default", even if present
+String value2 = maybeNull.orElseGet(() -> computeExpensiveDefault()); // only evaluates the supplier if empty
+String value3 = maybeNull.orElseThrow(() -> new NoSuchElementException("not found"));
+```
+
+**`orElse()` vs. `orElseGet()` — a common performance trap:** `orElse(value)` always evaluates its argument eagerly, even when the `Optional` is present and the fallback is never actually used. `orElseGet(supplier)` only invokes the supplier lazily, if and when it's actually needed. This matters when the default itself involves expensive computation (a database call, object construction):
+
+```java
+// BAD — computeExpensiveDefault() runs EVERY time, even when maybeNull already has a value
+String value = maybeNull.orElse(computeExpensiveDefault());
+
+// GOOD — computeExpensiveDefault() only runs if maybeNull is actually empty
+String value = maybeNull.orElseGet(() -> computeExpensiveDefault());
+```
+
+## Chaining: `map`, `flatMap`, `filter`
+
+```java
+Optional<Employee> employee = findById("123");
+
+Optional<String> upperName = employee
+        .map(Employee::getName)
+        .map(String::toUpperCase);
+
+Optional<Employee> seniorEmployee = employee
+        .filter(e -> e.getYearsOfExperience() > 5);
+```
+
+`map()` on an empty `Optional` simply short-circuits to another empty `Optional`, without ever invoking the mapping function or risking a `NullPointerException` — this is `Optional`'s real value: chaining a sequence of operations that gracefully "does nothing" the moment any step is absent, without an explicit null-check at every single stage.
+
+```java
+// Nested Optional-returning calls: use flatMap to avoid Optional<Optional<T>>
+Optional<Address> address = employee.flatMap(Employee::getAddress);   // getAddress() itself returns Optional<Address>
+// employee.map(Employee::getAddress) would instead produce Optional<Optional<Address>> — flatMap avoids the nesting
+```
+
+![Diagram: Optional.map() chain short-circuiting to empty as soon as any stage in the chain is absent, versus a traditional manual null-check chain requiring an explicit check at every stage](/diagrams/ch37-optional-chaining-shortcircuit.svg)
+
+## Where `Optional` Should — and Should NOT — Be Used
+
+**Good uses:**
+- Method **return types** where "no result" is a legitimate, expected outcome (a repository's `findById`, a search that might not match).
+
+**Discouraged uses (this is a very common interview trap):**
+- **Fields** — `Optional` is not `Serializable` and adds indirection/allocation overhead for no real benefit over a simple `null` check within the class's own code, which already knows its own invariants.
+- **Method parameters** — forces callers to wrap arguments in `Optional.of(...)` unnecessarily; method overloading or a well-named default-providing overload is clearer.
+- **Collections** — never return `Optional<List<T>>`; simply return an empty `List<T>` instead. A collection can already naturally represent "nothing" via being empty, without needing an extra wrapping layer.
+
+```java
+// Discouraged
+public class Employee {
+    private Optional<String> middleName;   // don't do this — use a plain, nullable field instead
+}
+
+// Discouraged
+public Optional<List<Order>> getOrders() { ... }   // don't do this — return an empty List instead
+
+// Preferred
+public List<Order> getOrders() { ... }   // empty list represents "no orders" naturally
+```
+
+## Key Takeaways
+
+- `Optional<T>` makes the possibility of a missing value explicit in a method's return type, rather than relying on implicit, easy-to-forget `null` checks.
+- `orElseGet()` lazily computes its default only when needed; `orElse()` always eagerly evaluates its argument — prefer `orElseGet()` for expensive defaults.
+- `map`/`filter`/`flatMap` let you chain operations on a possibly-absent value without explicit null-checks at every step.
+- Reserve `Optional` for method return types; avoid it for fields, method parameters, and collections (use an empty collection instead).
+
+---
+
+## Interview Questions
+
+**1. What problem does `Optional<T>` solve compared to simply returning `null`?**
+Returning `null` gives callers no compiler-enforced signal that a value might be absent — every caller must remember, entirely on their own discipline, to null-check before use, and forgetting produces a `NullPointerException` with no upfront warning from the type system. `Optional<T>` makes the possibility of absence part of the method's return type itself, and its API design (favoring `map`/`ifPresent`/`orElseGet` over a raw, unchecked `get()`) actively steers callers toward handling that absence explicitly.
+
+**2. What's the difference between `Optional.of()` and `Optional.ofNullable()`?**
+`Optional.of(value)` throws `NullPointerException` immediately if `value` is `null` — it's meant for cases where you already know the value is guaranteed non-null and want a hard failure if that assumption is somehow violated. `Optional.ofNullable(value)` safely wraps a value that might legitimately be `null`, producing `Optional.empty()` in that case instead of throwing.
+
+**3. Why is calling `.get()` directly on an `Optional` without checking `isPresent()` first generally discouraged?**
+`get()` throws `NoSuchElementException` if the `Optional` is empty, which reintroduces essentially the same "might throw if I forget to check" problem `Optional` was designed to help avoid in the first place — using `get()` unconditionally largely defeats the purpose of using `Optional` at all, compared to safer alternatives like `orElse()`, `orElseGet()`, `orElseThrow()` (with an intentional, specific exception), or `ifPresent()`.
+
+**4. What's the difference between `orElse()` and `orElseGet()`, and why does that difference matter for performance?**
+`orElse(value)` always evaluates its argument eagerly — even if the `Optional` already holds a present value and the fallback will never actually be used. `orElseGet(supplier)` only invokes the supplier lazily, exactly when the `Optional` turns out to be empty. This matters when the fallback computation is expensive (a database query, an API call, object construction) — using `orElse()` there wastes that computation every single time, whether or not it's actually needed, while `orElseGet()` avoids the unnecessary work entirely when a value is already present.
+
+**5. Why does `employee.map(Employee::getAddress)` potentially produce an awkward result if `getAddress()` itself returns `Optional<Address>`, and how does `flatMap` fix it?**
+`map()` would wrap whatever `getAddress()` returns inside another layer of `Optional`, producing `Optional<Optional<Address>>` — a nested, awkward structure requiring an extra unwrapping step to use. `flatMap()` instead expects the mapping function to itself return an `Optional`, and merges that returned `Optional` directly into the outer one rather than adding another wrapping layer, correctly producing a flat `Optional<Address>`.
+
+**6. Why is using `Optional` as a class field generally discouraged, even though it seems like a natural fit for a possibly-absent field value?**
+`Optional` isn't `Serializable`, so it complicates any class that needs to be serialized. It also adds an extra object allocation and indirection layer for a case a class can already handle perfectly well internally with a plain nullable field and its own null-checks in methods that use it — the main value of `Optional` (forcing external callers to explicitly acknowledge absence) doesn't really apply to a class's own private internal state, which the class already fully controls and understands.
+
+**7. Why is using `Optional` as a method parameter type generally discouraged?**
+It forces every caller to wrap their argument in `Optional.of(...)`/`Optional.ofNullable(...)` even for a simple, ordinary method call, adding unnecessary ceremony at every call site. A clearer alternative is usually a well-named overloaded method (one version with the parameter, one without, providing a sensible default), rather than pushing the `Optional`-wrapping burden onto every caller for what's typically better modeled as simple method overloading.
+
+**8. Why should a method never return `Optional<List<T>>`?**
+A collection type can already represent "nothing to return" naturally and unambiguously by simply being empty — wrapping it in an additional `Optional` layer adds redundant complexity (now there are two distinct ways to represent "no results": an empty `Optional` and an `Optional` containing an empty list) without providing any real additional benefit, since iterating an empty `List` is already always perfectly safe and requires no special-casing.
+
+**9. What does `Optional.filter()` do, and how does it behave differently than `Stream.filter()` in terms of possible outcomes?**
+`Optional.filter(predicate)` returns the same `Optional` unchanged if it's present and the predicate matches, or `Optional.empty()` if either the original `Optional` was already empty or the predicate doesn't match. Unlike `Stream.filter()`, which can produce a stream of any length from zero up to the full original count, `Optional.filter()` can only ever produce a result holding at most one element (since `Optional` itself never holds more than a single value to begin with) — it's really just a conditional collapse to empty, not a general filtering mechanism over multiple items.
+
+**10. Can `Optional<T>` itself be `null`? What's the correct way to guarantee it never is?**
+Technically yes, syntactically — nothing prevents a method declared to return `Optional<T>` from actually returning a literal `null` reference by mistake, which would be a serious API design bug, since it defeats the entire purpose of using `Optional` and reintroduces the exact null-check burden it was meant to eliminate. The correct convention is that a method returning `Optional<T>` should *never* return `null` itself — always return `Optional.empty()` to represent absence, ensuring callers can always safely call `Optional` methods on the result without an additional null-check for the `Optional` reference itself.
+
+**11. How would you convert an `Optional<String>` into a `Stream<String>` and why might you want to?**
+`optional.stream()` (Java 9+) converts the `Optional` into a `Stream` containing either zero elements (if empty) or exactly one element (if present). This is useful when you want to combine several `Optional`-returning calls into a single stream pipeline for further filtering, mapping, or flattening — for example, `employees.stream().flatMap(e -> e.getManager().stream())` to collect only the present managers across a list of employees, cleanly skipping any employees without one.
+
+**12. Is it appropriate to use `Optional` for primitive types like `int` or `double`, and what alternative does the JDK provide?**
+Using `Optional<Integer>` forces autoboxing overhead for what's meant to be a lightweight wrapper concept, so the JDK provides primitive-specialized alternatives — `OptionalInt`, `OptionalLong`, and `OptionalDouble` — which hold a raw primitive value directly (avoiding boxing) and are commonly returned by primitive stream terminal operations like `IntStream.average()` (which returns `OptionalDouble`, since an empty stream has no meaningful average).

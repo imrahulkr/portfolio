@@ -1,0 +1,140 @@
+---
+title: "Concurrent Collections"
+description: "ConcurrentHashMap's internal locking strategy, CopyOnWriteArrayList, atomic classes, and choosing the right concurrent structure."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Concurrency & Multithreading"
+chapter: 42
+totalChapters: 65
+slug: "concurrent-collections"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "concurrency", "concurrent-collections", "concurrenthashmap"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## Why Standard Collections Aren't Enough
+
+`HashMap`, `ArrayList`, and friends (Chapters 19–22) are explicitly not thread-safe — concurrent structural modification from multiple threads can corrupt internal state or throw `ConcurrentModificationException` (Chapter 24). `java.util.concurrent` provides purpose-built alternatives designed from the ground up for safe, efficient concurrent access.
+
+## `ConcurrentHashMap` — Fine-Grained Locking, Not One Big Lock
+
+Unlike the legacy `Hashtable` (which synchronizes the *entire* map on every operation), `ConcurrentHashMap` uses much finer-grained internal synchronization — modern versions (Java 8+) synchronize at the level of individual bins (buckets) during writes, using `CAS` (compare-and-swap) operations where possible, allowing many threads to read and write to *different* parts of the map fully concurrently.
+
+```java
+ConcurrentHashMap<String, Integer> map = new ConcurrentHashMap<>();
+map.put("a", 1);
+
+map.computeIfAbsent("b", k -> 2);          // atomic — check-then-act as ONE operation
+map.compute("a", (k, v) -> v + 1);          // atomic read-modify-write
+map.merge("a", 10, Integer::sum);           // atomic — combines with existing value, or inserts if absent
+```
+
+**Why atomic compound methods matter:** a naive `if (!map.containsKey(k)) map.put(k, v);` is **not** thread-safe, even on a `ConcurrentHashMap` — two threads can both pass the `containsKey` check before either calls `put`, both then unconditionally overwriting each other's intended insert. `computeIfAbsent`/`compute`/`merge` perform the entire check-then-act sequence as a single atomic operation, closing that race window entirely.
+
+![Diagram: ConcurrentHashMap internal structure showing multiple threads writing to different bins/segments concurrently without blocking each other, contrasted with Hashtable's single lock blocking all access](/diagrams/ch42-concurrenthashmap-fine-grained-locking.svg)
+
+`ConcurrentHashMap` also does **not** allow `null` keys or values (unlike `HashMap`), specifically because `null` would create ambiguity in concurrent code between "no mapping exists" and "the mapping's value is null" — a distinction that matters much more when multiple threads might be racing to check and act on that ambiguity.
+
+## `CopyOnWriteArrayList` — Read-Heavy, Write-Rare
+
+As covered in Chapter 24, every mutating operation copies the entire backing array. This makes reads (including iteration) never require any locking at all, and completely immune to `ConcurrentModificationException` — ideal for scenarios like a list of registered event listeners, read constantly but modified rarely.
+
+```java
+CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
+listeners.add(() -> System.out.println("Listener 1"));
+
+for (Runnable listener : listeners) {   // safe even if another thread adds/removes concurrently
+    listener.run();
+}
+```
+
+**Never use it for write-heavy workloads** — each write is O(n), copying the entire array regardless of how small the actual change is.
+
+## Atomic Classes — Lock-Free Compound Operations on a Single Value
+
+`java.util.concurrent.atomic` provides classes wrapping a single value with atomic compound operations, implemented internally using CAS (compare-and-swap) hardware instructions rather than locks — generally faster than synchronization for simple counters and flags under contention.
+
+```java
+AtomicInteger counter = new AtomicInteger(0);
+
+counter.incrementAndGet();      // atomic increment — fixes the count++ race condition from Chapter 39
+counter.compareAndSet(5, 10);   // atomically set to 10, but ONLY if current value is currently 5
+counter.getAndIncrement();      // returns the value BEFORE incrementing (like i++)
+counter.updateAndGet(x -> x * 2);   // atomic compound update using an arbitrary function
+```
+
+```java
+public class Counter {
+    private final AtomicInteger count = new AtomicInteger(0);
+    public void increment() { count.incrementAndGet(); }   // no synchronized keyword needed at all
+    public int get() { return count.get(); }
+}
+```
+
+This directly solves the exact `count++` race condition from Chapter 39, without needing `synchronized` or `ReentrantLock` at all — for simple single-value operations, atomic classes are typically both simpler and faster than lock-based alternatives.
+
+## `BlockingQueue` Implementations
+
+Covered functionally in Chapter 22 and Chapter 40 — `ArrayBlockingQueue` (fixed capacity, backed by an array) and `LinkedBlockingQueue` (optionally-bounded, backed by linked nodes) both provide thread-safe `put()`/`take()` with automatic blocking, forming the standard building block for producer-consumer pipelines without any manual `wait()`/`notify()` code.
+
+## Choosing the Right Concurrent Structure
+
+| Need | Choice |
+|---|---|
+| Thread-safe map, general use | `ConcurrentHashMap` |
+| Thread-safe list, read-heavy/write-rare | `CopyOnWriteArrayList` |
+| Thread-safe list, write-heavy | `Collections.synchronizedList(new ArrayList<>())`, or reconsider the design |
+| Single atomic counter/flag | `AtomicInteger`/`AtomicLong`/`AtomicBoolean`/`AtomicReference` |
+| Producer-consumer queue | `ArrayBlockingQueue`/`LinkedBlockingQueue` |
+| Priority-ordered concurrent queue | `PriorityBlockingQueue` |
+
+## Key Takeaways
+
+- `ConcurrentHashMap` uses fine-grained internal locking/CAS, allowing high concurrency, and provides atomic compound methods (`computeIfAbsent`, `merge`) that plain check-then-act code cannot safely replicate.
+- `CopyOnWriteArrayList` gives lock-free, `ConcurrentModificationException`-free reads at the cost of O(n) writes — only suitable for read-heavy, write-rare use cases.
+- Atomic classes (`AtomicInteger`, etc.) provide lock-free, CAS-based atomic operations on single values, often simpler and faster than synchronization for that specific case.
+- `null` keys/values are disallowed in `ConcurrentHashMap` specifically to avoid ambiguity in concurrent check-then-act patterns.
+
+---
+
+## Interview Questions
+
+**1. Why is `ConcurrentHashMap` generally preferred over `Collections.synchronizedMap(new HashMap<>())` for concurrent access?**
+`Collections.synchronizedMap()` wraps the map with a single lock guarding every single operation, meaning only one thread can access the map at all (for reads or writes) at any given time — effectively serializing all access. `ConcurrentHashMap` uses much finer-grained internal synchronization (locking individual bins during writes, CAS operations where possible), allowing many threads to operate on different parts of the map fully concurrently, offering substantially better throughput under concurrent load.
+
+**2. Why doesn't `ConcurrentHashMap` allow `null` keys or values, while `HashMap` allows one `null` key and any number of `null` values?**
+In a concurrent context, allowing `null` would create genuine ambiguity for compound operations like `get(key)` returning `null` — it would be impossible to distinguish "no mapping exists for this key" from "a mapping exists, but its value happens to be `null`," especially when another thread might be concurrently modifying the map between a `containsKey` check and a `get` call. Disallowing `null` entirely removes this ambiguity, which matters far more in concurrent code where such races are a real, ongoing risk rather than a single-threaded non-issue.
+
+**3. Why is `if (!map.containsKey(key)) map.put(key, value);` not thread-safe, even when `map` is a `ConcurrentHashMap`?**
+Even though each individual method (`containsKey`, `put`) is internally thread-safe on its own, the *combination* of checking and then acting isn't atomic as a whole — two threads can both execute `containsKey(key)` and both see it return `false` before either one calls `put()`, resulting in both threads unconditionally overwriting the map entry, with one thread's intended "only if absent" insert silently lost.
+
+**4. How does `ConcurrentHashMap.computeIfAbsent()` solve the check-then-act race condition?**
+It performs the "check if the key is absent, and if so, compute and insert a value" sequence as a single atomic operation from the perspective of other threads — internally using per-bin locking or CAS to ensure no other thread can interleave between the check and the insert for that specific key, guaranteeing only one thread's computation actually gets stored even if multiple threads call `computeIfAbsent()` for the same missing key concurrently.
+
+**5. What does `AtomicInteger.compareAndSet(expectedValue, newValue)` do, and what mechanism does it typically rely on at the hardware level?**
+It atomically checks whether the current value equals `expectedValue`, and if so, updates it to `newValue`, returning `true`; if the current value doesn't match `expectedValue` (because another thread already changed it), it does nothing and returns `false`. This is typically implemented using a hardware-level compare-and-swap (CAS) instruction, which the CPU itself performs atomically without requiring a traditional lock.
+
+**6. Why can atomic classes like `AtomicInteger` be faster than using `synchronized` for a simple counter under high contention?**
+Lock-based synchronization involves potentially blocking (suspending) a thread when it can't immediately acquire the lock, which involves relatively expensive OS-level thread scheduling/context-switching overhead if contention is significant. CAS-based atomic operations are lock-free — a thread that fails a CAS attempt simply retries immediately in a tight loop (typically succeeding quickly, since CAS failures are usually brief and rare under moderate contention) rather than being suspended and rescheduled, which is often considerably cheaper for simple, short operations like incrementing a counter.
+
+**7. In what scenario would `CopyOnWriteArrayList` be a clearly poor choice, and why?**
+A scenario with frequent writes — for example, a list being actively built up with many `add()` calls in a loop, or one with a high ratio of writes to reads — would perform poorly, since every single write operation copies the *entire* backing array regardless of how small the actual change is, making writes O(n) and imposing significant CPU and garbage-collection overhead that scales badly as both the list size and write frequency grow.
+
+**8. What thread-safety guarantee does iterating a `CopyOnWriteArrayList` provide that iterating a plain `ArrayList` does not?**
+Iterating a `CopyOnWriteArrayList` never throws `ConcurrentModificationException`, even if other threads concurrently add or remove elements during the iteration — the iterator operates over a fixed, immutable snapshot of the array as it existed at the moment the iterator was created, entirely unaffected by subsequent modifications (which simply produce a new, separate backing array).
+
+**9. What's the difference between `AtomicInteger.getAndIncrement()` and `AtomicInteger.incrementAndGet()`?**
+Both atomically increment the value by one, but they differ in what they return: `getAndIncrement()` returns the value *before* the increment was applied (matching the semantics of the post-increment operator `i++`), while `incrementAndGet()` returns the value *after* the increment (matching pre-increment `++i`).
+
+**10. Why might you choose `ArrayBlockingQueue` over `LinkedBlockingQueue`, or vice versa?**
+`ArrayBlockingQueue` requires a fixed capacity specified at construction, backed by a pre-allocated circular array — offering predictable, bounded memory usage and generally good performance from having a contiguous backing structure. `LinkedBlockingQueue` can optionally be unbounded (or given a very large capacity) and is backed by linked nodes allocated per element — offering more flexibility in capacity but with slightly higher per-element memory overhead and potentially less predictable memory usage if left effectively unbounded, which circles back to the same overload risk discussed for unbounded executor queues in Chapter 41.
+
+**11. What does `AtomicReference<T>` provide, and when would you use it instead of `AtomicInteger`/`AtomicLong`?**
+`AtomicReference<T>` provides the same atomic compare-and-swap/get-and-set operations, but for an arbitrary object reference of type `T` rather than a specific primitive numeric type — useful when you need to atomically swap an entire immutable object (like replacing a configuration snapshot or a node in a lock-free data structure) rather than a single numeric value.
+
+**12. If you need a thread-safe `Set` with fast average-case lookup, similar to `HashSet`, what would you reach for?**
+`ConcurrentHashMap.newKeySet()` (or, less commonly, `Collections.newSetFromMap(new ConcurrentHashMap<>())`) provides a `Set` view backed by a `ConcurrentHashMap`'s keys, giving the same fine-grained concurrent performance characteristics as `ConcurrentHashMap` itself, applied to set semantics — since `java.util.concurrent` doesn't provide a dedicated standalone "ConcurrentHashSet" class directly.

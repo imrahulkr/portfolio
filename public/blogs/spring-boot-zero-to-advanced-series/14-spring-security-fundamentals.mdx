@@ -1,0 +1,240 @@
+---
+title: "Spring Security Fundamentals: The Filter Chain, Authentication & Authorization"
+description: "Spring Security is a chain of servlet filters sitting in front of everything built in Part 2. This chapter makes that concrete — and finally answers what's actually deciding a request gets a 401 or a 403."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 14
+tags: ["Spring Boot", "Spring Security", "Authentication"]
+---
+
+Chapter 8 mentioned that Spring Security is implemented as filters registered ahead of `DispatcherServlet`. This chapter makes that concrete, and covers the two concepts everything else in Part 4 builds on: **authentication** (who are you?) and **authorization** (what are you allowed to do?).
+
+## Adding Spring Security
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+```
+
+The moment this dependency is on the classpath, auto-configuration (Chapter 4) secures **every** endpoint by default, requiring HTTP Basic authentication with a randomly generated password printed to the console at startup. This aggressive default is deliberate — Spring Security's philosophy is "secure by default," forcing you to explicitly configure what should actually be open, rather than accidentally shipping an unsecured endpoint.
+
+## Authentication vs authorization
+
+- **Authentication** answers *"who is making this request?"* — verifying a username/password, a JWT, or an API key, and producing a representation of the caller's identity.
+- **Authorization** answers *"is this identity allowed to do this specific thing?"* — checking roles or permissions against the requested resource or action.
+
+These are sequential and distinct: authentication happens first; authorization decisions are only meaningful once an identity is established.
+
+## The filter chain, concretely
+
+```
+HTTP Request
+     │
+     ▼
+┌───────────────────────────┐
+│  SecurityContextPersistenceFilter │  restores/saves SecurityContext
+├───────────────────────────┤
+│  UsernamePasswordAuthenticationFilter │  processes login attempts
+├───────────────────────────┤
+│  BasicAuthenticationFilter  │  processes HTTP Basic credentials
+├───────────────────────────┤
+│  ExceptionTranslationFilter │  converts security exceptions → 401/403
+├───────────────────────────┤
+│  FilterSecurityInterceptor  │  makes the final authorization decision
+└─────────────┬─────────────┘
+              │  authenticated + authorized
+              ▼
+       DispatcherServlet → your controller
+```
+
+Each filter has one job. If authentication fails, `ExceptionTranslationFilter` produces a `401 Unauthorized` — the request never reaches your controller at all. If authentication succeeds but authorization fails (wrong role for this endpoint), `FilterSecurityInterceptor` produces a `403 Forbidden`, again before `DispatcherServlet` routes to your code.
+
+## Configuring the security filter chain
+
+Modern Spring Security (6.x, matching Spring Boot 3.x) configures this declaratively via a `SecurityFilterChain` bean, replacing the older `WebSecurityConfigurerAdapter` class-extension approach from Spring Security 5 and earlier:
+
+```java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Bean
+    SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/api/public/**").permitAll()
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                .anyRequest().authenticated()
+            )
+            .httpBasic(Customizer.withDefaults())
+            .csrf(AbstractHttpConfigurer::disable);   // reasonable for a stateless REST API — see Chapter 16
+
+        return http.build();
+    }
+
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+```
+
+`authorizeHttpRequests` declares the authorization rules, evaluated top to bottom — the **first matching rule wins**, so order matters: a broad `anyRequest().authenticated()` must come last, or it would shadow more specific rules placed after it.
+
+## Where identities come from: `UserDetailsService`
+
+```java
+@Service
+public class DatabaseUserDetailsService implements UserDetailsService {
+
+    private final UserRepository userRepository;
+
+    DatabaseUserDetailsService(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    @Override
+    public UserDetails loadUserByUsername(String username) {
+        AppUser user = userRepository.findByUsername(username)
+            .orElseThrow(() -> new UsernameNotFoundException(username));
+
+        return org.springframework.security.core.userdetails.User.builder()
+            .username(user.getUsername())
+            .password(user.getPasswordHash())   // must already be encoded — see below
+            .roles(user.getRoles().toArray(new String[0]))
+            .build();
+    }
+}
+```
+
+`UserDetailsService` is the single extension point Spring Security uses to look up a user's credentials and authorities, regardless of where they're actually stored (a database, in this example). Implement this interface and it's automatically wired into the authentication process.
+
+## Password encoding — never store plain text
+
+```java
+@Service
+class UserRegistrationService {
+
+    private final PasswordEncoder passwordEncoder;
+    private final UserRepository userRepository;
+
+    void register(String username, String rawPassword) {
+        AppUser user = new AppUser(username, passwordEncoder.encode(rawPassword));
+        userRepository.save(user);
+    }
+}
+```
+
+`BCryptPasswordEncoder` hashes passwords with a computationally expensive, salted algorithm specifically designed to resist brute-force attacks. **Passwords must never be stored or compared as plain text** — `PasswordEncoder.matches(rawPassword, encodedPassword)` is how Spring Security verifies a login attempt against the stored hash without ever needing the plain-text password to be recoverable.
+
+## Best practices & gotchas
+
+- **Order of `authorizeHttpRequests` rules matters — most specific first.** A common bug is placing `anyRequest().authenticated()` before a more specific `permitAll()` rule, which never gets reached since the broader rule already matched.
+- **Never disable CSRF protection without understanding why it's safe to do so.** Disabling it is reasonable for a stateless, token-authenticated REST API with no browser-based session/cookie auth (Chapter 16 covers exactly why), but disabling it reflexively on a session-based application reopens a real vulnerability.
+- **Always use `PasswordEncoder`, never a custom hashing scheme.** `BCryptPasswordEncoder` (or `Argon2PasswordEncoder` for even stronger defaults) has had its security properties extensively reviewed; hand-rolled hashing almost always has subtle flaws.
+- **The default in-memory random password Spring Security generates at startup is only for a bare "just added the dependency, haven't configured anything yet" placeholder** — replace it with a real `UserDetailsService` and `SecurityFilterChain` before writing any real endpoint logic.
+- **`WebSecurityConfigurerAdapter` is deprecated (removed as of Spring Security 6).** If you encounter it in older tutorials or codebases, know that the `SecurityFilterChain` bean-based approach shown here is the current, correct pattern.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| Authentication | Verifying who is making the request |
+| Authorization | Deciding what an authenticated identity is allowed to do |
+| `SecurityFilterChain` | Bean declaring the security filter configuration (modern replacement for `WebSecurityConfigurerAdapter`) |
+| `authorizeHttpRequests` | Declares per-path authorization rules, evaluated in order, first match wins |
+| `UserDetailsService` | Extension point for loading a user's credentials/authorities from any source |
+| `PasswordEncoder` (`BCryptPasswordEncoder`) | Hashes and verifies passwords — never store plain text |
+| `401 Unauthorized` | Authentication failed or missing |
+| `403 Forbidden` | Authenticated, but not authorized for this specific action |
+
+## Wrapping up
+
+You now know exactly what decides whether a request gets through to your controller, gets rejected with a 401, or gets rejected with a 403 — and it all happens in the filter chain, before `DispatcherServlet` ever sees the request. HTTP Basic is fine for learning the mechanism, but real APIs need stateless, scalable authentication — that's **Chapter 15**, covering JWT and OAuth2/OIDC.
+
+## Interview Questions
+
+**1. What's the difference between authentication and authorization?**
+Authentication establishes *who* is making a request — verifying credentials like a username/password or a token and producing an identity. Authorization decides *what that identity is allowed to do* — checking roles or permissions against the specific resource or action being requested. Authentication always happens first; authorization is meaningless without an established identity.
+
+*Follow-up: Is it possible to have authorization checks apply to unauthenticated (anonymous) users?* Yes — Spring Security models an anonymous request as an "anonymous" authentication assigned a specific authority (commonly `ROLE_ANONYMOUS`), so authorization rules still evaluate against an established principal even when no real login has happened. `permitAll()` is really just a rule that accepts the anonymous principal like any other — authorization always operates against *some* identity, even a non-logged-in one.
+
+**2. Why does adding `spring-boot-starter-security` immediately secure every endpoint, even ones you haven't configured?**
+Spring Security's auto-configuration follows a "secure by default" philosophy specifically to prevent accidentally shipping an unsecured endpoint. As soon as the dependency is present, a default configuration requires authentication (HTTP Basic, with a randomly generated startup password) for all requests until you explicitly declare which paths should be open and which require what level of access.
+
+*Follow-up: How would you find out exactly which auto-configuration class is responsible for this default, and see the condition that activated it?* Run the application with `--debug` (introduced in Chapter 4) — the auto-configuration report's "Positive matches" section shows `SecurityAutoConfiguration` and related classes activating because Spring Security is on the classpath with no custom `SecurityFilterChain` bean present yet, which is exactly the condition that triggers the default secure-everything behavior.
+
+**3. What is `SecurityFilterChain`, and how does it relate to the older `WebSecurityConfigurerAdapter`?**
+`SecurityFilterChain` is a bean-based way of declaring Spring Security's configuration (authorization rules, authentication mechanisms, CSRF settings) — the current, idiomatic approach since Spring Security 5.7+ and the only supported approach in Spring Security 6.x (matching Spring Boot 3.x). It replaces the older pattern of extending `WebSecurityConfigurerAdapter` and overriding its `configure()` methods, which is deprecated and removed in Spring Security 6.
+
+*Follow-up: Can an application define more than one `SecurityFilterChain` bean, and why might that be useful?* Yes — multiple `SecurityFilterChain` beans can coexist, each scoped to a different set of paths via `securityMatcher(...)` and ordered with `@Order`. A common use case is one chain for `/api/**` using stateless JWT authentication, and a separate chain for `/admin/**` using traditional session-based form login — letting one application mix authentication models cleanly instead of forcing every path through identical rules.
+
+**4. In `authorizeHttpRequests`, why does rule order matter?**
+Rules are evaluated top to bottom, and the *first* matching rule for a given request determines the authorization outcome — later rules for a path that already matched an earlier rule are never reached. A broad rule like `anyRequest().authenticated()` must be placed last, or it would shadow more specific rules (like a `permitAll()` for a public endpoint) that come after it.
+
+*Follow-up: How would you verify, before deploying, that your authorization rules actually behave the way you intend for every path?* Write integration tests using `MockMvc` combined with Spring Security's test support (`@WithMockUser`, or `SecurityMockMvcRequestPostProcessors`), exercising each meaningfully distinct path with different authenticated and unauthenticated states, and asserting on the resulting status code — this catches ordering mistakes far more reliably than manually reasoning about the rule list.
+
+**5. What's the difference between `401 Unauthorized` and `403 Forbidden`?**
+`401` means authentication failed or wasn't provided at all — the server doesn't know who's making the request. `403` means authentication succeeded (the server knows who's asking) but that identity isn't authorized to perform the specific requested action, based on the configured authorization rules.
+
+*Follow-up: Some APIs deliberately return `404 Not Found` instead of `403` when a user isn't authorized to know a resource exists at all — what's the security rationale for that?* It avoids leaking the *existence* of a resource to someone who has no right to know about it — returning `403` for a private repository or record confirms it exists somewhere, which is itself information disclosure. Returning `404` in both the "doesn't exist" and "exists but you can't see it" cases hides that distinction entirely, at the cost of being slightly less precise for legitimate, authorized debugging.
+
+**6. What is `UserDetailsService`, and why is it the key extension point for custom authentication?**
+It's a single-method interface (`loadUserByUsername`) that Spring Security calls to retrieve a user's credentials and granted authorities during authentication, regardless of where that data actually lives. Implementing it against a database, an LDAP directory, or any other user store is how Spring Security integrates with a real, application-specific identity source instead of only its default in-memory test users.
+
+*Follow-up: What's the difference between `UserDetailsService` and `UserDetailsManager`?* `UserDetailsManager` extends `UserDetailsService` with additional mutation operations — `createUser`, `updateUser`, `deleteUser`, `changePassword` — making it the right interface to implement when the application also needs to manage user accounts programmatically, not just look them up for authentication.
+
+**7. Why should passwords always be hashed with something like `BCryptPasswordEncoder` rather than a custom or reversible encoding scheme?**
+`BCryptPasswordEncoder` uses a well-reviewed, deliberately slow, salted hashing algorithm specifically designed to resist brute-force and rainbow-table attacks, and it's never reversible — the plain-text password can never be recovered from the stored hash, only verified against it. A custom or reversible scheme almost always has subtle weaknesses that a dedicated, widely audited algorithm avoids.
+
+*Follow-up: Why is BCrypt considered better for password hashing than a fast, general-purpose cryptographic hash like SHA-256, even though SHA-256 is itself secure?* SHA-256 is deliberately designed to be fast, which is exactly the wrong property for password hashing — a fast hash lets an attacker with stolen hashes try billions of guesses per second. BCrypt (and newer alternatives like Argon2) is deliberately slow and has a tunable work factor, making large-scale brute-force guessing computationally expensive even with modern hardware.
+
+**8. How does Spring Security verify a login attempt against a stored password hash, if the hash can't be reversed?**
+Via `PasswordEncoder.matches(rawPassword, encodedPassword)` — it re-hashes the submitted raw password using the same algorithm and parameters (including the salt embedded in the stored hash) and compares the result to the stored hash, rather than ever attempting to decrypt the stored value back into plain text.
+
+*Follow-up: Why doesn't `matches()` just decode the stored hash and compare strings directly?* Because the hash is one-way by design — there's nothing to "decode" back into the original password. `matches()` instead extracts the salt and cost parameters embedded in the stored hash, applies the exact same hashing process to the freshly submitted password, and compares the two resulting hashes for equality — proving the passwords match without either the stored or submitted plain-text password ever needing to be recoverable.
+
+**9. What does `csrf(AbstractHttpConfigurer::disable)` do, and when is it appropriate?**
+It disables Spring Security's built-in CSRF (Cross-Site Request Forgery) protection. This is commonly appropriate for stateless REST APIs authenticated via a bearer token (like a JWT) sent in a header rather than a browser-managed session cookie, since CSRF specifically exploits the browser's automatic inclusion of cookies — without cookie-based session authentication, the attack this protection defends against doesn't apply. Chapter 16 covers this distinction in more depth.
+
+*Follow-up: What would be the risk of applying this same CSRF-disabling configuration to an application that also serves a browser-based login form using session cookies?* It would reopen a genuine CSRF vulnerability for that part of the application — a malicious site could trigger state-changing requests using the victim's browser-held session cookie, with no token check in place to reject the forged request. CSRF should only be disabled when cookie-based session authentication genuinely isn't in use anywhere in the application, not applied as a blanket default.
+
+**10. What is `FilterSecurityInterceptor`'s role in the filter chain?**
+It's the filter that makes the final authorization decision for a request — after authentication has already been established earlier in the chain, it checks the authenticated identity's authorities against the configured `authorizeHttpRequests` rules for the requested path, and either allows the request through to `DispatcherServlet` or rejects it with a `403`.
+
+*Follow-up: Is `FilterSecurityInterceptor` still the exact mechanism used in the newest Spring Security versions?* In Spring Security 5.8+/6.x, it has largely been superseded internally by `AuthorizationFilter`, built around the newer, more flexible `AuthorizationManager` API — the conceptual role (making the final allow/deny decision based on the configured rules) is the same, but the implementation was modernized to support more composable authorization logic than the older interceptor-based design allowed.
+
+**11. If an unauthenticated request hits a protected endpoint, does it ever reach your `@RestController`?**
+No. `ExceptionTranslationFilter`, running earlier in the security filter chain than `DispatcherServlet` itself, catches the authentication failure and produces the `401` response directly — the request never reaches routing, `DispatcherServlet`, or your controller code at all.
+
+*Follow-up: If you wanted to log every rejected request — including ones that never reach a controller — where would you hook in?* Implement and register a custom `AuthenticationEntryPoint` (for authentication failures) and `AccessDeniedHandler` (for authorization failures) as beans wired into the `SecurityFilterChain` — both are invoked directly by `ExceptionTranslationFilter` before it writes the `401`/`403` response, making them the correct place to add logging, metrics, or alerting for rejected requests that never reach application code.
+
+**12. Why is HTTP Basic authentication generally not sufficient for a production REST API?**
+HTTP Basic sends the username and password (Base64-encoded, not encrypted) on *every single request*, requiring the client to hold and resend raw credentials repeatedly, with no built-in mechanism for expiration, revocation, or scoped permissions. Token-based approaches like JWT (Chapter 15) instead issue a short-lived, revocable token once, after which the raw password is no longer transmitted on every subsequent call.
+
+*Follow-up: Is HTTP Basic ever an acceptable choice in production?* Yes, in narrower cases — for server-to-server calls within a trusted internal network over TLS, or for simple internal admin/ops tooling with tightly controlled, frequently rotated credentials, the operational simplicity can be an acceptable trade-off. It's specifically public-facing, browser- or client-facing APIs with many end users where its lack of expiration and revocation becomes a real liability.
+
+**13. What roles does `@EnableWebSecurity` play, and is it required in Spring Boot?**
+It enables Spring Security's web security support and integrates the `SecurityFilterChain` configuration into the application. In recent Spring Boot versions, adding `spring-boot-starter-security` already triggers the necessary auto-configuration, making explicit `@EnableWebSecurity` largely optional for standard setups — but it remains commonly used for clarity and is required for certain more advanced customizations.
+
+*Follow-up: What happens if you keep `@EnableWebSecurity` in a project but never define a custom `SecurityFilterChain` bean at all?* Spring Boot's default security auto-configuration takes over exactly as it would with no Spring Security configuration written at all — every endpoint requires authentication via HTTP Basic, with the randomly generated startup password. `@EnableWebSecurity` alone doesn't change behavior; it's the presence (or absence) of a custom `SecurityFilterChain` bean that determines whether the defaults or your own rules apply.
+
+**14. How would you configure a specific set of endpoints (say, `/api/public/**`) to require no authentication at all, while everything else requires it?**
+```java
+.authorizeHttpRequests(auth -> auth
+    .requestMatchers("/api/public/**").permitAll()
+    .anyRequest().authenticated()
+)
+```
+`permitAll()` on the more specific `/api/public/**` pattern, placed *before* the catch-all `anyRequest().authenticated()`, ensures the public paths are excluded from the authentication requirement while everything else still needs it.
+
+*Follow-up: How would you extend this so that only `GET` requests to `/api/public/**` are public, while `POST` requests to the same path still require authentication?* Add HTTP-method-specific matchers before the catch-all rule: `.requestMatchers(HttpMethod.GET, "/api/public/**").permitAll()` followed by `.requestMatchers(HttpMethod.POST, "/api/public/**").authenticated()`, then `.anyRequest().authenticated()` last — since rules are evaluated in order and matched by both path and method together, this lets the same path have different authorization requirements per HTTP verb.
+
+**15. Why does Spring Security's "secure by default" behavior matter from a security engineering perspective, compared to a framework that defaults to open?**
+A framework defaulting to open access means every new endpoint is insecure unless a developer remembers to explicitly secure it — a single oversight anywhere in a large codebase creates a real vulnerability. Defaulting to secured, and requiring explicit `permitAll()` for anything that should be public, means the failure mode of forgetting to configure something is "endpoint is inaccessible" (a bug that gets noticed quickly) rather than "endpoint is silently exposed" (a security incident that might not be noticed at all).
+
+*Follow-up: Does "secure by default" have any downsides during rapid prototyping, and how do teams typically deal with that friction?* Yes — it can slow down quick spikes or demos where auth isn't the point of the exercise yet, since every new endpoint requires at least a `permitAll()` decision before it's reachable. Teams typically handle this with a dedicated `dev`/`local` Spring profile that relaxes specific rules for local iteration (Chapter 5's profile mechanism), while being careful that profile is never the one active in any deployed environment.
+

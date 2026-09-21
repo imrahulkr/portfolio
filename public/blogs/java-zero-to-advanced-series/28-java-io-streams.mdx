@@ -1,0 +1,159 @@
+---
+title: "Java I/O Streams"
+description: "Byte streams vs character streams, the InputStream/OutputStream and Reader/Writer hierarchies, buffering, and the decorator pattern in java.io."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Exception Handling & I/O"
+chapter: 28
+totalChapters: 65
+slug: "java-io-streams"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "io"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 11
+---
+
+## Two Parallel Hierarchies: Bytes vs. Characters
+
+`java.io` splits I/O into two families based on what unit of data is being read or written:
+
+- **Byte streams** (`InputStream`/`OutputStream`) — raw 8-bit bytes, for any kind of data: images, audio, serialized objects, or text in any encoding.
+- **Character streams** (`Reader`/`Writer`) — 16-bit Unicode characters, specifically for text, handling character-encoding conversion (UTF-8, ISO-8859-1, etc.) internally.
+
+```
+InputStream (abstract)              Reader (abstract)
+  ├── FileInputStream                 ├── FileReader
+  ├── ByteArrayInputStream            ├── StringReader
+  └── BufferedInputStream             └── BufferedReader
+
+OutputStream (abstract)             Writer (abstract)
+  ├── FileOutputStream                ├── FileWriter
+  ├── ByteArrayOutputStream           ├── StringWriter
+  └── BufferedOutputStream            └── BufferedWriter
+```
+
+**Rule of thumb: use `Reader`/`Writer` for text, `InputStream`/`OutputStream` for everything else (or for text where you need direct control over byte-level encoding).**
+
+## Reading a File — Byte Stream vs. Character Stream
+
+```java
+// Byte stream — raw bytes, no encoding awareness
+try (InputStream in = new FileInputStream("data.bin")) {
+    int byteValue;
+    while ((byteValue = in.read()) != -1) {   // read() returns -1 at end of stream
+        // process each byte
+    }
+}
+
+// Character stream — text, encoding-aware
+try (Reader reader = new FileReader("data.txt", StandardCharsets.UTF_8)) {
+    int charValue;
+    while ((charValue = reader.read()) != -1) {
+        // process each character
+    }
+}
+```
+
+Reading one byte/character at a time via `read()` is correct but slow — each call can involve a system call to the OS. This is exactly the problem buffering solves.
+
+## Buffering — Why It Matters
+
+```java
+// Unbuffered — potentially one system call per single byte/character read
+try (Reader reader = new FileReader("data.txt")) { ... }
+
+// Buffered — reads a large chunk into memory at once, serves subsequent read() calls from that in-memory buffer
+try (BufferedReader reader = new BufferedReader(new FileReader("data.txt"))) {
+    String line;
+    while ((line = reader.readLine()) != null) {   // readLine() is a BufferedReader convenience method
+        System.out.println(line);
+    }
+}
+```
+
+`BufferedInputStream`/`BufferedReader` (and their `Output`/`Writer` counterparts) wrap an underlying stream and internally batch reads/writes into a large in-memory buffer, dramatically reducing the number of actual, expensive I/O system calls — this is one of the most impactful, simplest performance optimizations in everyday Java I/O code.
+
+![Diagram: BufferedReader wrapping a FileReader, showing many small read() calls being served from one large internal buffer that's refilled with a single bulk read from the underlying file only when exhausted](/diagrams/ch28-buffered-stream-wrapping.svg)
+
+## The Decorator Pattern in `java.io`
+
+Java's I/O classes are deliberately designed to be **composed/wrapped** together, layering functionality — this is a textbook real-world use of the Decorator design pattern (covered formally in Chapter 55).
+
+```java
+try (DataInputStream in = new DataInputStream(
+        new BufferedInputStream(
+            new FileInputStream("data.bin")))) {
+
+    int value = in.readInt();   // DataInputStream adds typed reading on top of buffering on top of raw file access
+}
+```
+
+Each layer adds one specific capability (`FileInputStream`: raw file access; `BufferedInputStream`: buffering; `DataInputStream`: reading typed primitives like `int`/`double` directly) without any single class needing to implement every combination of features itself.
+
+## Writing to a File
+
+```java
+try (BufferedWriter writer = new BufferedWriter(new FileWriter("output.txt"))) {
+    writer.write("Hello, file!");
+    writer.newLine();
+    writer.write("Second line");
+}
+```
+
+## `System.out`, `System.in`, and `System.err`
+
+These are pre-wired standard streams provided by the JVM: `System.out`/`System.err` are `PrintStream`s (byte-stream-based, but with convenient text-printing methods like `println`), and `System.in` is a raw `InputStream` typically wrapped for convenient text reading:
+
+```java
+BufferedReader consoleReader = new BufferedReader(new InputStreamReader(System.in));
+String line = consoleReader.readLine();
+```
+
+`InputStreamReader` (and its counterpart `OutputStreamWriter`) is the **bridge** class connecting the byte-stream and character-stream worlds — converting raw bytes to characters using a specified (or platform-default) charset.
+
+## Key Takeaways
+
+- Use `InputStream`/`OutputStream` for raw bytes and any non-text data; use `Reader`/`Writer` for text, with encoding handled for you.
+- Always wrap raw streams with a `Buffered...` decorator for anything beyond trivial I/O — the performance difference is substantial.
+- `java.io` classes are designed to be composed/wrapped (the Decorator pattern) to layer capabilities like buffering and typed reading.
+- `InputStreamReader`/`OutputStreamWriter` bridge between byte streams and character streams.
+
+---
+
+## Interview Questions
+
+**1. What's the fundamental difference between `InputStream`/`OutputStream` and `Reader`/`Writer`?**
+`InputStream`/`OutputStream` operate on raw 8-bit bytes with no awareness of character encoding, suitable for any binary data (images, serialized objects, or text you want to handle at the byte level yourself). `Reader`/`Writer` operate on 16-bit Unicode characters and handle the conversion between raw bytes and characters internally according to a specified (or default) character encoding, making them the right choice specifically for text data.
+
+**2. Why is reading a file one byte or character at a time with a raw, unbuffered stream considered inefficient?**
+Each individual `read()` call on an unbuffered stream can trigger an actual underlying system call to the operating system to fetch more data from disk, which is orders of magnitude slower than an in-memory operation. Doing this once per single byte/character, rather than in larger batches, means paying that system-call overhead repeatedly and unnecessarily for what could otherwise be one bulk read.
+
+**3. How does `BufferedReader`/`BufferedInputStream` improve performance?**
+It wraps an underlying stream and, on the first read, pulls a large chunk of data into an internal in-memory buffer with a single underlying I/O operation. Subsequent `read()` calls are served directly from that in-memory buffer with no further system calls, until the buffer is exhausted and needs refilling — collapsing what would be many expensive I/O operations into far fewer.
+
+**4. What design pattern do Java's I/O stream classes exemplify, and how does `new DataInputStream(new BufferedInputStream(new FileInputStream(...)))` demonstrate it?**
+The Decorator pattern (Chapter 55) — each wrapping class adds one specific piece of functionality on top of the object it wraps, without needing to implement every combination of features itself. In that example, `FileInputStream` provides raw file access, `BufferedInputStream` adds buffering on top of it, and `DataInputStream` adds the ability to read typed primitive values (`readInt()`, `readDouble()`, etc.) on top of that — each layer delegating the more basic byte-reading work to the layer it wraps.
+
+**5. What is the role of `InputStreamReader` and `OutputStreamWriter`?**
+They act as bridge classes connecting the byte-stream world to the character-stream world — `InputStreamReader` wraps a raw `InputStream` and converts its bytes into characters using a specified or platform-default charset, producing a `Reader`; `OutputStreamWriter` does the reverse, converting characters written to it into bytes on an underlying `OutputStream`.
+
+**6. Why is it important to explicitly specify a character encoding (like `StandardCharsets.UTF_8`) when constructing a `Reader`/`Writer`, rather than relying on the platform default?**
+The platform default encoding varies across different operating systems and even different JVM configurations, so code that relies on it can silently read or write text incorrectly (producing garbled or corrupted characters) when run in an environment with a different default encoding than the one originally intended. Explicitly specifying UTF-8 (or whatever encoding the data actually uses) makes the behavior deterministic and portable across environments.
+
+**7. What does `read()` return when it reaches the end of a stream, and why is checking for that value necessary in a loop?**
+It returns `-1`, a value that's not a valid byte (0–255) or character in normal use, specifically so it can serve as an unambiguous end-of-stream sentinel. A typical reading loop (`while ((c = reader.read()) != -1)`) relies on this sentinel value to know when to stop reading, since there's no separate "hasNext"-style method on the basic stream classes.
+
+**8. What's the difference between `FileOutputStream`'s default constructor behavior and passing `true` as a second constructor argument?**
+By default, `new FileOutputStream("file.txt")` truncates (overwrites) the file's existing content if it already exists, starting fresh. Passing `true` as the second argument (`new FileOutputStream("file.txt", true)`) opens the file in **append mode**, preserving existing content and adding new writes to the end of the file instead.
+
+**9. Why does `System.out` behave like a `Writer` (supporting `println` with strings) despite being declared as a `PrintStream`, which is fundamentally byte-stream-based?**
+`PrintStream` is a specialized `OutputStream` subclass that internally handles the text-to-bytes conversion itself (using a default or specified charset) as part of its convenience methods like `print`/`println`, effectively blending byte-stream output with a text-friendly API — it's a deliberate, pragmatic design choice for the extremely common case of printing readable text to the console, rather than requiring explicit `Writer` wrapping for that basic use case.
+
+**10. If you need to both buffer output and write typed primitive data (like `int` and `double` values) to a file, how would you compose the stream classes to achieve this?**
+Wrap a `FileOutputStream` with a `BufferedOutputStream` for buffering, then wrap that with a `DataOutputStream` for typed-primitive writing methods: `new DataOutputStream(new BufferedOutputStream(new FileOutputStream("data.bin")))` — the same layered decorator composition pattern shown for reading, applied to the output side.
+
+**11. What happens if you forget to close a `FileOutputStream` (or don't use try-with-resources) after writing data?**
+Depending on the JVM and underlying OS, buffered data that hasn't yet been flushed to disk may never actually be written, resulting in a truncated or incomplete file, and the underlying OS file handle/descriptor remains open and unreleased — potentially exhausting a limited system resource (file descriptors) if this happens repeatedly across many files, which is exactly the class of bug try-with-resources (Chapter 27) is designed to prevent.

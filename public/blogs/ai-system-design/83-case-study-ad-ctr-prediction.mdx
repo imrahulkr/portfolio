@@ -1,0 +1,105 @@
+---
+title: "Chapter 83: Case Study — Ad Click-Through-Rate Prediction"
+description: "CTR prediction system design: calibration versus ranking accuracy, real-time bidding latency constraints, feature crosses, and continual online learning under rapid concept drift."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 14
+partTitle: "Applied Case Studies"
+chapter: 83
+totalChapters: 96
+tags: ["ai-system-design", "ctr-prediction", "calibration", "online-learning", "case-study", "interview-prep"]
+---
+
+## Introduction
+
+This chapter examines a system where the prediction *itself* is a probability used in downstream financial calculations: ad click-through-rate (CTR) prediction. This introduces a concern this series hasn't yet centered — **calibration**, the requirement that a predicted probability actually reflect real-world frequency — alongside real-time bidding's extreme latency constraints and the rapid concept drift that makes online learning, rather than periodic batch retraining, the standard architecture.
+
+## Calibration: A Different Requirement Than Ranking Accuracy
+
+A recommendation or search ranker (Chapters 80-81) only needs to correctly *order* items — whether the top-ranked item's score is 0.9 or 0.99 doesn't matter, only that it outranks the second item. A CTR model's predicted probability feeds directly into an auction's expected-value calculation (bid = predicted CTR × value-per-click), meaning the *actual value* of the prediction matters, not just its relative ranking.
+
+```python
+def evaluate_calibration(predicted_probs: list, actual_outcomes: list, n_bins: int = 10) -> dict:
+    """
+    Directly extends Ch. 21's evaluation discipline with a metric
+    RANKING-focused systems (Ch. 80-81) never needed: does a
+    predicted probability of 0.1 actually correspond to a ~10%
+    real-world click rate?
+    """
+    bins = bin_by_predicted_probability(predicted_probs, n_bins)
+    calibration_error = sum(
+        abs(bin.mean_predicted - bin.actual_click_rate) * bin.weight
+        for bin in bins
+    )
+    return {"expected_calibration_error": calibration_error}
+```
+
+**Why a model can have excellent ranking accuracy (AUC) while being poorly calibrated**: AUC measures whether higher-CTR ads are correctly ranked above lower-CTR ones — a model could systematically over-predict every probability by a consistent multiplier and still achieve perfect AUC, while being catastrophically miscalibrated for bidding purposes, since the auction system would then consistently overbid; this is a genuinely distinct failure mode from anything Chapter 80's or Chapter 81's ranking-only evaluation would catch.
+
+## Real-Time Bidding: An Even Tighter Latency Budget Than Fraud Detection
+
+Directly extending Chapter 82's real-time latency discussion — real-time bidding auctions typically require a CTR prediction within single-digit milliseconds, an even tighter constraint than Chapter 82's fraud-screening budget, since an ad exchange's auction timeout is a hard, unforgiving deadline rather than a soft SLA.
+
+```python
+def predict_ctr_within_budget(ad_candidate, feature_store, model, timeout_ms: int = 5) -> float:
+    # Directly extends Ch. 27's low-latency serving discipline —
+    # feature lookup AND model inference must BOTH complete within
+    # this single, tight budget, or the bid is simply not submitted
+    features = feature_store.get_online_features("ad_impression", ad_candidate.id)
+    return model.predict_proba(features)  # a model architecture choice
+                                              # (e.g., a shallow model over
+                                              # a deep one) may be forced
+                                              # by this budget alone
+```
+
+## Feature Crosses: Capturing Interaction Effects
+
+CTR is heavily driven by *interaction* effects — a specific ad performs very differently for a specific user segment than either the ad's or the segment's individual features would predict alone — directly extending Chapter 12's feature engineering discipline with explicit **feature crosses** (combining two features into a joint feature) to capture this.
+
+```python
+def create_feature_cross(user_segment: str, ad_category: str) -> str:
+    # Directly extends Ch. 12's feature engineering — a joint feature
+    # capturing an INTERACTION EFFECT neither component feature alone
+    # represents
+    return f"{user_segment}_x_{ad_category}"
+```
+
+## Online Learning: Retraining as Continuous, Not Periodic
+
+Directly extending Chapter 19's training-at-scale material with a genuinely different retraining cadence: CTR patterns shift rapidly (new ad campaigns launch constantly, seasonal and trending effects shift by the hour), making the periodic batch retraining common in Chapters 80-82 too slow — CTR systems typically use **online learning**, incrementally updating model weights from a continuous stream of new impressions and clicks.
+
+## Key Takeaways
+
+- Calibration — a predicted probability actually reflecting real-world frequency — is a genuinely distinct requirement from ranking accuracy, since CTR predictions feed directly into auction bid calculations rather than only needing correct relative ordering.
+- Real-time bidding's latency budget is tighter than most other classical ML applications, often forcing model architecture trade-offs (favoring shallower, faster models) that a less latency-constrained application wouldn't need to make.
+- Feature crosses explicitly capture interaction effects between features that neither component alone represents, a critical feature-engineering technique for CTR's heavily interaction-driven prediction task.
+- Rapid concept drift in ad performance makes online learning, rather than periodic batch retraining, the standard architecture for keeping a CTR model's predictions current.
+
+---
+
+## Interview Questions
+
+**1. Why can a model have excellent AUC (ranking accuracy) while being poorly calibrated, and why does this matter specifically for CTR prediction?**
+AUC only measures whether higher-CTR ads are correctly ranked above lower-CTR ones, remaining invariant to a monotonic transformation of the predicted scores (a systematic over- or under-prediction by a consistent factor doesn't change relative ranking) — but a CTR prediction feeds directly into an auction's expected-value bid calculation, where the ACTUAL predicted value (not just its rank) determines the bid amount, meaning a miscalibrated model would systematically over- or under-bid despite perfect ranking accuracy.
+*Follow-up: Would this same calibration concern matter for Chapter 80's recommendation system?*
+Generally not to the same degree — a recommendation system typically only needs to correctly order items to decide what to show, with no downstream financial calculation depending on the ABSOLUTE predicted score value, making calibration a much lower-priority concern there than for CTR prediction's auction-feeding use case.
+
+**2. Why does real-time bidding's latency constraint sometimes force a simpler, shallower model architecture over a more accurate, deeper one?**
+An ad exchange's auction timeout is a hard deadline — a bid submitted even slightly late is simply not considered, meaning a highly accurate but too-slow model provides literally zero value in this specific context, while a somewhat less accurate but sufficiently fast model at least participates in every auction, directly the same "latency budget can override raw accuracy as the binding constraint" principle Chapter 27 established for low-latency serving generally.
+*Follow-up: How would you validate that a specific model architecture choice actually fits within this hard latency budget before deploying it?*
+Directly extending Chapter 27's load-testing discipline — measure the model's actual end-to-end inference latency, including feature lookup, under realistic production load and data volume, ensuring this measured latency (with margin for variance) reliably falls within the timeout budget, rather than relying on a theoretical or best-case latency estimate alone.
+
+**3. Why are feature crosses specifically necessary for CTR prediction, beyond the individual features they're derived from?**
+CTR is heavily driven by interaction effects — a specific ad category might perform very differently for one user segment than another, a pattern neither the ad-category feature nor the user-segment feature alone can represent; a feature cross explicitly encodes this joint relationship as its own feature, allowing even a relatively simple model to capture an interaction effect that would otherwise require a much more complex model architecture to discover implicitly.
+*Follow-up: What's the specific cost or risk of creating too many feature crosses indiscriminately?*
+Combinatorially many feature crosses can each have very sparse data (few observed examples for a specific combination), risking overfitting to noise in rarely-observed combinations — directly the same "escalate complexity only as demonstrated need justifies" discipline this series has applied consistently, suggesting feature crosses should be added based on evidence of genuine interaction effects rather than exhaustively combining every possible feature pair.
+
+**4. Why does CTR prediction typically require online learning rather than the periodic batch retraining common to Chapters 80-82's systems?**
+Ad performance patterns shift extremely rapidly — new campaigns launch continuously, and trending or seasonal effects can shift meaningfully within hours — a periodic batch retraining cadence (daily or weekly, as might be reasonable for a recommendation system) would leave the model working from stale, outdated patterns for a meaningful fraction of its deployment window, directly the "the world outside your system can drift" concern this series has raised repeatedly, but at a much faster timescale here than in most other classical ML applications this series has covered.
+*Follow-up: What genuinely new engineering challenge does online learning introduce that periodic batch retraining avoids?*
+Online learning requires careful handling of feedback delay and label availability — a click (or non-click) outcome for a given impression isn't immediately known at prediction time, requiring the system to correctly attribute delayed feedback back to the original prediction for incremental weight updates, a genuinely more complex data-pipeline challenge than batch retraining's simpler "collect all historical data, then retrain" pattern.
+
+**5. How would you diagnose whether a CTR model's declining bidding performance stems from a calibration problem versus a genuine ranking-accuracy problem?**
+Directly extending this series' consistent stage-by-stage diagnostic discipline — separately measure calibration error (this chapter's methodology) and AUC (ranking accuracy) — a calibration problem shows up as a systematic bias in predicted-versus-actual click rates while AUC remains strong; a ranking problem shows up as declining AUC directly, a genuinely different diagnosis pointing toward different remediation.
+*Follow-up: What remediation would each diagnosis point toward?*
+A calibration problem typically points toward a post-hoc calibration correction (recalibrating the model's output probabilities against recent actual outcomes) without necessarily retraining the underlying model; a ranking-accuracy problem points toward genuine model retraining or feature improvement, since the underlying relative ordering itself has degraded — two different remediation costs and approaches this diagnostic distinction correctly separates.

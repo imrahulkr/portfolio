@@ -1,0 +1,148 @@
+---
+title: "Stream API Fundamentals"
+description: "Creating streams, intermediate vs terminal operations, laziness, and the difference between streams and collections."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Functional Programming"
+chapter: 35
+totalChapters: 65
+slug: "stream-api-fundamentals"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "streams", "functional-programming"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## Streams Are Not Data Structures
+
+A `Stream` doesn't store elements — it's a pipeline describing a sequence of computations to perform over a source of data (a collection, an array, a range of numbers, an I/O channel), computed lazily and typically consumed exactly once.
+
+```java
+List<String> names = List.of("Charlie", "Alice", "Bob", "Dave");
+
+List<String> result = names.stream()
+        .filter(name -> name.length() > 3)   // intermediate — lazy
+        .map(String::toUpperCase)             // intermediate — lazy
+        .sorted()                              // intermediate — lazy
+        .collect(Collectors.toList());         // terminal — triggers actual execution
+```
+
+## Intermediate vs. Terminal Operations
+
+- **Intermediate operations** (`filter`, `map`, `sorted`, `distinct`, `limit`, `peek`) return a new `Stream` and are **lazy** — they don't execute anything by themselves, only building up a pipeline description.
+- **Terminal operations** (`collect`, `forEach`, `reduce`, `count`, `anyMatch`, `findFirst`) trigger the actual traversal of the source and execution of every intermediate operation in the pipeline, producing a final result (or side effect) — and consume the stream, which can never be reused afterward.
+
+```java
+Stream<String> stream = names.stream().filter(name -> {
+    System.out.println("Filtering: " + name);   // this never prints yet!
+    return name.length() > 3;
+});
+// Nothing has actually run — filter() is intermediate/lazy
+
+long count = stream.count();   // NOW the filtering actually executes, once, as part of this terminal operation
+```
+
+```java
+List<String> reused = names.stream().filter(n -> n.length() > 3).collect(Collectors.toList());
+// reused.stream() again would be fine — but calling .filter() AGAIN on the SAME already-consumed
+// stream instance throws IllegalStateException: stream has already been operated upon or closed
+```
+
+![Diagram: stream pipeline showing filter and map as lazy intermediate stages that only actually execute per-element when the terminal collect() operation pulls elements through the pipeline](/diagrams/ch35-lazy-pipeline-execution.svg)
+
+## Why Laziness Matters: Short-Circuiting
+
+Because operations are lazy and pulled through the pipeline element-by-element (not processed as separate full passes), operations like `findFirst()`, `anyMatch()`, and `limit()` can **short-circuit** — stopping as soon as the answer is known, without processing the entire source.
+
+```java
+Optional<String> first = names.stream()
+        .filter(name -> name.startsWith("B"))
+        .findFirst();   // stops as soon as the first match is found — doesn't check every remaining name
+```
+
+For a huge or infinite source, this laziness is what makes operations like `Stream.iterate(...).limit(10)` viable at all — without short-circuiting, an infinite stream would simply never terminate.
+
+## Creating Streams
+
+```java
+Stream.of("a", "b", "c");                        // from varargs
+List.of(1, 2, 3).stream();                        // from a collection
+Arrays.stream(new int[]{1, 2, 3});                 // from an array (IntStream)
+Stream.iterate(1, n -> n * 2).limit(5);            // infinite, generative: 1, 2, 4, 8, 16
+Stream.generate(Math::random).limit(3);            // infinite, generative via Supplier
+IntStream.range(0, 5);                             // 0, 1, 2, 3, 4 (exclusive end)
+IntStream.rangeClosed(1, 5);                       // 1, 2, 3, 4, 5 (inclusive end)
+```
+
+## Common Terminal Operations
+
+```java
+names.stream().forEach(System.out::println);                  // side effect, no return value
+long count = names.stream().count();
+boolean anyLong = names.stream().anyMatch(n -> n.length() > 5);
+boolean allLong = names.stream().allMatch(n -> n.length() > 2);
+Optional<String> first = names.stream().findFirst();
+Optional<String> maxByLength = names.stream().max(Comparator.comparingInt(String::length));
+int totalLength = names.stream().mapToInt(String::length).sum();
+```
+
+## Streams vs. Collections — A Mental Model Shift
+
+| | Collection | Stream |
+|---|---|---|
+| Stores data? | Yes | No — describes a computation |
+| Can be traversed multiple times? | Yes | No — single-use, consumed by a terminal op |
+| Evaluation | Eager | Lazy — intermediate ops don't run until a terminal op |
+| Typical style | Imperative (loops) | Declarative (what, not how) |
+
+Streams shift the programming style from imperative ("loop through, check a condition, add to a new list") to **declarative** ("filter, then transform, then collect") — describing *what* transformation you want, not manually writing *how* to iterate and accumulate it.
+
+## Key Takeaways
+
+- A `Stream` describes a lazy computation pipeline, not a data structure — it's consumed exactly once by a terminal operation.
+- Intermediate operations (`filter`, `map`, `sorted`) are lazy and build up the pipeline; terminal operations (`collect`, `forEach`, `count`) trigger actual execution.
+- Laziness enables short-circuiting (`findFirst`, `anyMatch`, `limit`) and makes infinite streams (`Stream.iterate`, `Stream.generate`) usable.
+- Attempting to reuse an already-consumed stream throws `IllegalStateException` — get a fresh stream from the source each time.
+
+---
+
+## Interview Questions
+
+**1. Is a `Stream` a data structure? What does it actually represent?**
+No — a `Stream` holds no elements of its own; it represents a description of a sequence of computational steps (filtering, transforming, etc.) to be applied over some underlying data source (a collection, array, generator function, or I/O channel) when a terminal operation eventually triggers execution.
+
+**2. What's the difference between an intermediate and a terminal operation?**
+An intermediate operation (`filter`, `map`, `sorted`, `distinct`, `limit`) returns a new `Stream` and is lazily evaluated — calling it alone performs no actual computation, only extending the pipeline's description. A terminal operation (`collect`, `forEach`, `reduce`, `count`, `anyMatch`) actually triggers traversal of the source and execution of every preceding intermediate operation, producing a concrete result or side effect, and it consumes the stream in the process.
+
+**3. What happens if you try to use the same `Stream` instance for two separate terminal operations?**
+It throws `IllegalStateException` with a message indicating the stream has already been operated upon or closed — a `Stream` is designed for single use; once a terminal operation has consumed it, you must obtain a fresh stream from the original source (e.g., calling `.stream()` again on the collection) for any further processing.
+
+**4. Why are streams described as "lazy," and what practical benefit does that laziness provide?**
+Intermediate operations don't execute any actual per-element work when called — they just build up a pipeline description. Actual execution happens only when a terminal operation is invoked, and even then, elements are pulled through the entire pipeline one at a time rather than materializing a fully-filtered, fully-mapped intermediate list at each stage. This enables short-circuiting operations (like `findFirst`, `anyMatch`, `limit`) to stop processing as soon as the answer is determined, and it's what makes conceptually infinite streams (`Stream.iterate` without a limit) usable at all, as long as a short-circuiting terminal operation eventually bounds the amount of actual work performed.
+
+**5. What is short-circuiting, and which operations exhibit it?**
+Short-circuiting means a stream pipeline can stop processing the source before reaching its end, once enough information is available to produce the final result. `findFirst()`, `findAny()`, `anyMatch()`, `allMatch()`, `noneMatch()`, and `limit()` are all short-circuiting — for example, `anyMatch()` returns `true` as soon as a single matching element is found, without evaluating any remaining elements.
+
+**6. What does `Stream.iterate(1, n -> n * 2)` produce, and why must a call like `.limit(5)` typically follow it?**
+It produces a conceptually infinite stream: 1, 2, 4, 8, 16, 32, and so on indefinitely, since there's no inherent stopping point defined. A short-circuiting operation like `.limit(5)` (or a matching terminal operation) is required to bound the amount of actual computation performed — without one, a terminal operation that needs to process the entire stream (like `collect` without a preceding `limit`) would never terminate.
+
+**7. What's the difference between `Stream.of(...)`/`collection.stream()` and `Stream.generate(...)`/`Stream.iterate(...)`?**
+`Stream.of(...)` and `collection.stream()` create streams over an already-existing, finite, fixed source of data. `Stream.generate(Supplier)` and `Stream.iterate(seed, function)` create streams that produce elements *on demand*, computed lazily from a generative function rather than pre-existing data — and unless explicitly bounded (via `limit()` or, for `iterate`, an optional predicate overload), they're conceptually infinite.
+
+**8. Why does calling `.filter()` on a stream not immediately execute the filtering logic, and when does it actually run?**
+`.filter()` is an intermediate operation, so calling it only records that this filtering step should be part of the pipeline — it returns a new `Stream` object representing "the original stream, with this filter step appended," without touching any actual elements yet. The filtering logic actually executes only when a terminal operation is eventually invoked, at which point each element is pulled through the entire pipeline (including this filter step) one at a time.
+
+**9. Give an example of a scenario where using streams shifts code from an imperative to a declarative style, and explain the distinction.**
+Finding all names longer than 3 characters, uppercased, and sorted: imperatively, you'd write an explicit loop creating an intermediate list, checking each element's length, conditionally uppercasing and adding it, then explicitly sorting the result afterward — manually specifying *how* to iterate and accumulate. Declaratively with streams: `names.stream().filter(n -> n.length() > 3).map(String::toUpperCase).sorted().collect(Collectors.toList())` — expressing *what* transformation is wanted (filter, then map, then sort) without manually managing the iteration or an explicit accumulator variable.
+
+**10. Does calling an intermediate operation like `.map()` on a stream modify the original collection it was created from?**
+No — streams never modify their underlying source collection (unless the mapping/filtering function itself has a side effect that does so, which is considered bad practice). A stream pipeline produces a new sequence of results through a terminal operation like `collect()`, entirely separate from the original collection, which remains unchanged.
+
+**11. What's the difference between `findFirst()` and `findAny()`?**
+`findFirst()` always returns the first element in encounter order that matches the preceding conditions, which is well-defined and consistent for both sequential and (with some overhead) parallel streams. `findAny()` makes no guarantee about *which* matching element is returned — for a parallel stream specifically, this relaxed guarantee allows the JVM to return whichever matching element is found first across parallel workers, potentially avoiding the synchronization overhead required to guarantee strict "first in encounter order" semantics.
+
+**12. Can a stream pipeline have zero intermediate operations, consisting of just a source and a terminal operation?**
+Yes — for example, `names.stream().forEach(System.out::println)` has no intermediate operations at all, going directly from the stream source to a terminal operation. Intermediate operations are entirely optional; a `Stream` pipeline requires only a source and exactly one terminal operation to actually produce a result or perform its side effect.

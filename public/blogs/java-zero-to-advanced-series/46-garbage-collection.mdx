@@ -1,0 +1,137 @@
+---
+title: "Garbage Collection"
+description: "Generational GC theory, minor vs major/full collections, and a comparison of Serial, Parallel, G1, ZGC, and Shenandoah collectors."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "JVM Internals, Memory & Performance"
+chapter: 46
+totalChapters: 65
+slug: "garbage-collection"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "jvm", "garbage-collection", "gc"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## Reachability, Not Reference Counting
+
+The JVM determines which objects are eligible for collection based on **reachability** from a set of "GC roots" (local variables on active stack frames, active static fields, JNI references) — not simple reference counting. An object is garbage once no chain of references from any GC root can reach it, even if objects reference *each other* in a cycle.
+
+```java
+class Node { Node next; }
+
+Node a = new Node();
+Node b = new Node();
+a.next = b;
+b.next = a;   // circular reference between a and b
+
+a = null;
+b = null;
+// Both nodes are now UNREACHABLE from any GC root, even though they still reference EACH OTHER —
+// a reachability-based collector correctly identifies both as garbage; a naive reference-counting
+// scheme would incorrectly see each object's count as 1 and never collect them
+```
+
+This is precisely why Java's GC correctly handles circular references that would leak memory under a naive reference-counting scheme (a well-known weakness of, historically, some other reference-counted memory management systems).
+
+## The Generational Hypothesis
+
+Empirically, most objects die young — a huge proportion of allocated objects (temporary variables, short-lived request-scoped objects) become garbage almost immediately, while a much smaller proportion survive to become long-lived. The JVM heap is divided accordingly:
+
+```
+Young Generation                          Old (Tenured) Generation
+  ├── Eden Space          (most objects allocated here first)
+  ├── Survivor Space S0
+  └── Survivor Space S1
+```
+
+![Diagram: heap divided into Young Generation (Eden, Survivor S0, Survivor S1) and Old Generation, with arrows showing objects being promoted from Eden through survivor spaces into Old Gen after surviving multiple minor GCs](/diagrams/ch46-generational-heap-layout.svg)
+
+New objects are allocated in **Eden**. A **minor GC** runs when Eden fills up: surviving objects are copied into a survivor space (alternating between S0/S1 on each collection), and objects that survive enough minor GCs (tracked via an "age" counter) are **promoted** to the **Old Generation**. A **major/full GC** collects the Old Generation (and typically the whole heap) — far less frequent, but significantly more expensive, since it involves a much larger memory region.
+
+This generational design means minor GCs — which happen far more often — only need to scan the (typically small) young generation, making them fast; the more expensive full-heap scan only happens occasionally.
+
+## Mark-and-Sweep (and Compact)
+
+Most collectors follow a variation of the same core algorithm:
+
+1. **Mark** — starting from GC roots, traverse every reachable object, marking each one as "live."
+2. **Sweep** — reclaim memory occupied by every unmarked (unreachable) object.
+3. **Compact** (optional but common) — move surviving objects together to eliminate fragmentation, so future allocations can use a simple, fast "bump the pointer" strategy rather than searching for suitably-sized free gaps.
+
+## Comparing Garbage Collectors
+
+| Collector | Approach | Pause Characteristics | Typical Use |
+|---|---|---|---|
+| **Serial** | Single-threaded, stop-the-world | Simple, but pauses scale with heap size | Small applications, single-core environments |
+| **Parallel** | Multi-threaded stop-the-world | Higher throughput than Serial, still full stop-the-world pauses | Throughput-focused batch workloads tolerant of pauses |
+| **G1 (Garbage-First)** | Divides heap into regions, collects the most garbage-dense regions first | Balanced, more predictable pause targets | Default collector since Java 9; general-purpose applications |
+| **ZGC** | Concurrent, most work done without stopping the application | Sub-millisecond pauses, largely heap-size-independent | Very large heaps, latency-sensitive applications |
+| **Shenandoah** | Concurrent, similar goals to ZGC (different implementation, from a different vendor lineage) | Very low pause times, heap-size-independent | Similar use cases to ZGC |
+
+`G1` is the JVM's default collector since Java 9 and remains an excellent general-purpose choice for most applications. `ZGC` and `Shenandoah` matter specifically when an application has very large heaps (many GB to TB) and cannot tolerate even the modest pauses `G1` can occasionally introduce — common in latency-critical trading systems or large in-memory caches.
+
+## Stop-the-World Pauses
+
+Even highly concurrent collectors like ZGC still require brief stop-the-world pauses for certain phases (like the initial root-scanning step) — "concurrent" means the *majority* of the collector's work happens while application threads keep running, not that pauses are eliminated entirely. Understanding that some pause is essentially unavoidable — the goal is minimizing and bounding it, not eliminating it — is an important, often-tested nuance.
+
+## `System.gc()` — A Request, Not a Command
+
+```java
+System.gc();   // merely SUGGESTS the JVM run garbage collection — it is NOT guaranteed to happen immediately, or at all
+```
+
+Calling `System.gc()` explicitly is almost always discouraged in production code — the JVM's collectors are generally far better at deciding *when* collection is actually needed than application code guessing, and an explicit full GC request can introduce a large, unnecessary pause exactly when the application least expects it.
+
+## Key Takeaways
+
+- Java's GC uses reachability from GC roots, not reference counting — it correctly reclaims circularly-referenced but unreachable objects.
+- The generational hypothesis (most objects die young) drives the Young/Old generation split, making frequent minor GCs cheap and infrequent major GCs the exception.
+- G1 is the modern default general-purpose collector; ZGC/Shenandoah trade some throughput for near-elimination of long pauses on very large heaps.
+- `System.gc()` is only a suggestion to the JVM, not a guaranteed, immediate collection — avoid relying on it in production code.
+
+---
+
+## Interview Questions
+
+**1. How does the JVM determine which objects are eligible for garbage collection?**
+Through reachability analysis starting from a set of "GC roots" — active local variables on thread stacks, active static fields, and JNI references, among others. Any object that cannot be reached by following a chain of references starting from some GC root is considered garbage, regardless of how many other unreachable objects might still reference it.
+
+**2. Why can Java's garbage collector correctly reclaim two objects that reference each other in a cycle, even though neither's "reference count" from the other's perspective ever reaches zero?**
+Because Java's GC is reachability-based, not reference-counting-based — it doesn't track how many references point to an object at all. It instead asks "can this object be reached at all, starting from a GC root?" A cyclic pair of objects with no other external references pointing to either of them is unreachable from any GC root despite referencing each other, so both are correctly identified and collected as garbage in a single pass.
+
+**3. What is the generational hypothesis, and how does it shape the heap's structure?**
+It's the empirical observation that the overwhelming majority of objects become garbage very shortly after being allocated, while a much smaller fraction survive long-term. This motivates splitting the heap into a Young Generation (further divided into Eden and two Survivor spaces) for newly-allocated, typically short-lived objects, and an Old (Tenured) Generation for objects that have survived enough collections to be considered long-lived, allowing the frequent, cheap collection of the young generation to handle the vast bulk of garbage without needing to scan the entire heap each time.
+
+**4. What's the difference between a minor GC and a major/full GC?**
+A minor GC collects only the Young Generation, which is relatively small and thus fast to scan — it runs frequently, whenever Eden fills up. A major (or full) GC collects the Old Generation (and often the entire heap, including Young Generation, depending on the collector), which is significantly larger and more expensive to scan and compact — it runs far less often but with a correspondingly bigger performance impact when it does.
+
+**5. What happens to an object that survives several minor garbage collections in the Young Generation?**
+It gets "promoted" (or "tenured") into the Old Generation, based on an age counter tracked per object (incremented each time it survives a minor GC) reaching a configurable threshold — reflecting the generational hypothesis's assumption that an object surviving several young-generation collections is likely to be long-lived and better handled by the less-frequently-collected Old Generation.
+
+**6. What are the three conceptual phases of a typical mark-and-sweep-based garbage collection cycle?**
+Mark (traverse from GC roots, flagging every reachable object as live), sweep (reclaim the memory of every object that wasn't marked as live), and often compact (relocate surviving objects to eliminate fragmented gaps left by reclaimed memory, so future allocations can use a fast, simple bump-the-pointer strategy rather than needing to search for a suitably-sized free block).
+
+**7. What does the "G" in G1 GC stand for, and what's its core strategic idea?**
+"Garbage-First." G1 divides the heap into many small, equally-sized regions rather than treating the Young/Old generations as single contiguous blocks, and prioritizes collecting the regions containing the *most* reclaimable garbage first — maximizing the amount of memory reclaimed per unit of collection time/pause, which helps G1 meet more predictable, configurable pause-time goals compared to older collectors.
+
+**8. What's the key difference in approach between G1 and ZGC/Shenandoah regarding stop-the-world pauses?**
+G1 still performs a meaningful portion of its work (particularly full/major collections) via stop-the-world pauses, though it works to keep them relatively short and predictable via its region-based, garbage-prioritized approach. ZGC and Shenandoah are designed to perform the vast majority of collection work *concurrently* with the application's own running threads, aiming for pause times in the sub-millisecond range that remain largely independent of overall heap size — making them better suited to very large heaps and strict low-latency requirements.
+
+**9. Does "concurrent" garbage collection (as in ZGC/Shenandoah) mean there are zero stop-the-world pauses?**
+No — even highly concurrent collectors still require brief stop-the-world pauses for certain necessarily-synchronous phases, such as the very initial scan of GC roots. "Concurrent" specifically means the large majority of the collector's work (tracing the object graph, reclaiming memory, compacting) happens while application threads continue running, dramatically reducing pause *duration and frequency* compared to fully stop-the-world collectors, rather than eliminating pauses altogether.
+
+**10. Why is calling `System.gc()` explicitly in application code generally discouraged?**
+It only requests that the JVM consider running a garbage collection — the JVM is free to ignore the request entirely, or to run a potentially large, disruptive full GC at a moment the application didn't actually need one, introducing an unnecessary pause. Modern collectors' own internal heuristics for deciding when and how to collect are generally far better-informed than an arbitrary application-level guess, making explicit `System.gc()` calls rarely beneficial and often actively harmful to performance predictability in production.
+
+**11. What is a "stop-the-world" pause, and why can't it be eliminated entirely even by the most advanced modern collectors?**
+It's a pause during which all application threads (except the garbage collector's own threads) are suspended so the collector can safely perform certain operations without the object graph changing underneath it mid-analysis. Certain operations — most notably, the very first step of identifying the initial set of GC roots — fundamentally require a globally consistent snapshot of thread state that's difficult or prohibitively complex to achieve while application threads are actively mutating references concurrently, which is why even the most advanced concurrent collectors still require at least brief synchronization pauses for these specific steps.
+
+**12. If an application has a very large heap (say, 64GB) and strict sub-10-millisecond pause-time requirements, which category of collector would generally be the better fit, and why?**
+ZGC or Shenandoah — both are specifically designed so that pause times remain largely independent of overall heap size, unlike G1 (and especially Serial/Parallel), where pause times for major collections tend to scale up with the amount of live data that must be scanned/compacted. For an application with both a very large heap and strict low-latency requirements, this heap-size independence is exactly the property needed to reliably meet such a tight pause-time target.
+
+**13. Why does understanding garbage collection matter for a Java/Spring Boot developer, even though the GC operates largely "automatically"?**
+GC behavior directly affects application throughput and latency — excessive object allocation (avoidable autoboxing, unnecessary intermediate objects in hot code paths, as touched on in earlier chapters like String concatenation in loops) increases GC pressure and pause frequency, and choosing an inappropriate collector or heap sizing for an application's actual latency/throughput requirements can cause real, measurable production performance problems. Understanding these fundamentals helps a developer recognize GC-related symptoms (e.g., latency spikes correlating with GC logs) and make informed decisions about collector choice, heap sizing, and allocation-conscious coding patterns, rather than treating GC purely as an opaque black box.

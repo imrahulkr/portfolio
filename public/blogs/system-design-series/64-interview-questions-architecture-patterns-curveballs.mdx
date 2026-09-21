@@ -1,0 +1,120 @@
+---
+title: "Interview Questions III — Architecture Patterns & Case-Study Curveballs"
+description: "The final grab-bag: architecture pattern questions from Parts 6-8, plus the mid-interview curveballs interviewers throw at the case studies from Part 9 — closing out the series."
+series: "system-design"
+seriesOrder: 64
+part: "Dedicated Interview Chapters"
+partOrder: 10
+slug: "interview-questions-architecture-patterns-curveballs"
+tags: ["system-design", "interview-prep", "architecture-patterns", "case-study"]
+readingTime: "20 min"
+publishedAt: "2026-09-15"
+updatedAt: "2026-09-15"
+---
+
+## Introduction
+
+This final chapter closes the series with two halves. The first covers standalone architecture-pattern questions from Parts 6-8 (microservices, resilience patterns, CQRS/event sourcing, reliability, security, and interview methodology). The second — the "curveballs" — presents mid-interview pivots on the Part 9 case studies: the kind of "now assume X changes" follow-up a strong interviewer uses to see whether a candidate's design genuinely adapts or was memorized.
+
+---
+
+## Architecture Patterns
+
+### 1. Why is "we split it into microservices" not, by itself, evidence of good fault isolation?
+**Answer:** Splitting into separately-deployed services doesn't automatically prevent one service's failure from cascading — if Service A makes a direct, synchronous call to a slow Service B with no timeout, circuit breaker, or bulkhead, A's own thread pool can still exhaust waiting on B, exactly as if a bug in one module took down a monolith. Genuine fault isolation requires the resilience patterns from Chapter 36 layered on top of the architectural decomposition, not decomposition alone.
+
+**Follow-up:** *What's the minimum combination of patterns you'd insist on before calling a microservices system "fault-tolerant"?* — At minimum: timeouts on every synchronous call, circuit breakers around each external dependency, and bulkheaded (isolated) resource pools per dependency — without all three, cascading failure remains a real risk.
+
+### 2. Why might a small, 5-person engineering team choosing microservices actually be fighting Conway's Law rather than benefiting from it?
+**Answer:** Conway's Law observes that system architecture mirrors organizational communication structure. A small, tightly-collaborating team splitting their system into "independent" services doesn't actually gain organizational independence — they'll likely still coordinate closely across those services anyway, since their real team structure hasn't changed, meaning they pay microservices' distributed-systems complexity cost without realizing the team-autonomy benefit that's supposed to justify it.
+
+**Follow-up:** *What organizational signal would indicate this same team has genuinely outgrown a monolith?* — The team growing large enough, or splitting into multiple genuinely separate sub-teams each owning distinct product areas, that a shared codebase's coordination overhead (merge conflicts, coordinated releases) becomes the actual bottleneck — at that point, microservices' benefits align with a real, existing organizational need.
+
+### 3. Explain why a distributed monolith is described as "the worst of both worlds."
+**Answer:** It results from splitting deployment without genuinely decoupling data ownership — services communicate over a network (paying microservices' latency and complexity cost) while still sharing a database or being so tightly coupled they must be deployed together (never realizing microservices' independent-scaling or independent-deployment benefits). It combines a monolith's tight coupling with a distributed system's overhead, with none of either architecture's actual advantages.
+
+**Follow-up:** *What single decision, made incorrectly, most commonly produces this outcome?* — Allowing multiple newly-separated services to continue directly reading/writing the same shared database, rather than each service owning its own distinct data store.
+
+### 4. Why does CQRS pair especially naturally with event sourcing, beyond both being "advanced patterns"?
+**Answer:** Event sourcing's primary write-side artifact is inherently a stream of events representing every change — exactly the kind of input a CQRS read-model projection needs to consume in order to build and continuously update its own denormalized view. Rather than needing a separate mechanism to detect and publish "what changed" events from a traditional write model, event sourcing already produces this stream as its natural, core output.
+
+**Follow-up:** *Does using CQRS require event sourcing, or vice versa?* — No — they're independently useful and can be adopted separately; the synergy is real but not a dependency in either direction.
+
+### 5. Why is "add a distributed lock" often an incomplete answer to "how do you prevent duplicate order processing"?
+**Answer:** A distributed lock reduces the risk of genuinely concurrent processing attempts, but the far more common real-world scenario is a single client retrying after a timeout, unsure whether its earlier request succeeded — a scenario a lock doesn't even apply to, since there's no actual concurrency involved. Preventing duplicate processing requires idempotency (handling the sequential-retry case) in addition to, not instead of, locking (handling the genuine-concurrency case).
+
+**Follow-up:** *If you had to build only one of these two mechanisms first, which would you choose and why?* — Idempotency — sequential client retries from ordinary network unreliability occur far more frequently in practice than genuine concurrent races for the same specific resource.
+
+### 6. Why is an untested disaster recovery plan considered "not actually a reliable plan," even if it's thoroughly documented?
+**Answer:** Real systems accumulate subtle drift over time — expired credentials referenced in a runbook, infrastructure changes not reflected in the written plan, manual steps only ever performed once by someone no longer on the team — and these discrepancies are typically only discoverable by actually attempting to execute the plan. A plan that looks complete on paper can fail in practice for reasons a review would never catch.
+
+**Follow-up:** *What specific organizational challenge often prevents teams from regularly running DR drills despite understanding their importance?* — DR drills require real coordination and effort to address a risk that hasn't materialized yet (and hopefully never will), making them easy to deprioritize against more immediately visible feature work without strong, deliberate leadership commitment to schedule them anyway.
+
+### 7. Why do RTO and RPO need to be defined as two separate metrics rather than a single "disaster recovery target"?
+**Answer:** They capture genuinely independent risks — RTO is about how long you can be down; RPO is about how much data you can afford to lose. A system can have excellent RTO but poor RPO (recovers fast, but from stale data) or the reverse (near-zero data loss, but a slow recovery process) — a single combined metric would obscure which specific risk a given architecture actually addresses.
+
+**Follow-up:** *Name a real business scenario where RPO would reasonably be far stricter than RTO.* — A financial ledger, where losing even seconds of transaction data is unacceptable, but a few hours of downtime during a genuine disaster (especially one severe enough to also affect the broader market) might be tolerable.
+
+### 8. Why does this series argue that observability is a "prerequisite," not an add-later feature, for adopting microservices or event-driven architecture?
+**Answer:** Both architectural styles significantly increase the difficulty of understanding what happened for any given request, since effects spread across many independently-deployed or asynchronously-reacting components. Without centralized logging, meaningful metrics, and distributed tracing already in place, a team would be effectively unable to debug production issues in their newly-adopted architecture from day one — the debugging complexity isn't a minor inconvenience to defer, it's an immediate operational capability gap.
+
+**Follow-up:** *What's the practical sequencing implication for a team planning a Strangler Fig migration to microservices?* — Establish observability infrastructure (logging, metrics, tracing with trace-ID propagation) as one of the very first steps, ideally before or alongside the first piece of functionality extraction, not as an afterthought addressed once debugging pain is already being felt.
+
+### 9. Why is chaos engineering described as a philosophical shift from "prevent all failures" to "assume failures and verify graceful handling"?
+**Answer:** Traditional reliability work focuses on reducing the probability of failure (better code, more testing, more redundancy). Chaos engineering starts from the realistic acknowledgment that failures are inevitable in any sufficiently complex distributed system, and shifts focus toward empirically verifying the system's response to those inevitable failures — rather than relying on unverified assumptions that redundancy and resilience mechanisms will work correctly when actually needed.
+
+**Follow-up:** *Does adopting chaos engineering mean failure-prevention practices become less valuable?* — No — they remain complementary; prevention reduces how often failures occur, chaos engineering verifies the system handles the failures that do still occur despite prevention efforts. A mature reliability strategy invests in both.
+
+### 10. Why is "we use HTTPS everywhere" an incomplete answer to "how do you secure this API"?
+**Answer:** HTTPS/TLS protects data confidentiality and integrity specifically in transit — it says nothing about application-level vulnerabilities like SQL injection, broken object-level authorization, or DDoS resilience. A perfectly encrypted request can still carry a malicious payload or be one of millions in a volumetric attack; encryption in transit and application/infrastructure security are separate, complementary concerns that must each be addressed.
+
+**Follow-up:** *What specific vulnerability class is famously NOT caught by a Web Application Firewall, and why?* — Broken Object-Level Authorization (BOLA) — it typically involves a perfectly well-formed, syntactically valid request (just referencing an object the caller shouldn't access), with no malicious pattern for a signature-based WAF to detect; it's an application-logic flaw, not a network-layer pattern-matching problem.
+
+---
+
+## Case-Study Curveballs
+
+These are the kind of mid-design pivots a strong interviewer introduces partway through a case study — testing adaptability, not memorization.
+
+### 11. (URL Shortener) "Now assume we need to support custom aliases, chosen by the user." How does this break the Base62-of-auto-increment design?
+**Answer:** Custom aliases are user-chosen strings, not derived from a sequential integer ID — they can't be produced by the Base62 encoding scheme at all. This requires a separate code path: checking the requested alias for uniqueness against both existing auto-generated codes and other custom aliases (a straightforward existence check against the same underlying key-value store), and rejecting the request if it's already taken. The core redirect/lookup mechanism is unaffected; only the creation path needs a new branch.
+
+### 12. (Rate Limiter) "What if this rate limiter needs to serve a client that's willing to pay for a strict, hard guarantee that no request beyond the limit is EVER let through, even during a Redis outage?" How does this challenge your fail-open default?
+**Answer:** This specific client's requirement directly conflicts with the general fail-open default chosen for availability reasons — for this client specifically, you'd need to fail closed (reject all requests) during a Redis outage, accepting a full availability impact for that client's traffic in exchange for the strict guarantee they're paying for. This would likely require per-client configuration of the fail-open/fail-closed behavior, rather than a single system-wide default, directly illustrating that this trade-off should be configurable per-use-case, not fixed universally.
+
+### 13. (Distributed Cache) "A specific customer's cache traffic pattern shows almost no key repetition — they're using this purely as fast key-value storage, not as a cache." Does your design still make sense for them?
+**Answer:** With no read repetition, the entire caching value proposition (amortizing repeated reads) doesn't apply — this customer is effectively using the system as a low-latency, in-memory key-value store, which the consistent-hashing and eviction-policy infrastructure still technically serves, but the eviction policy (LRU/LFU) becomes irrelevant since there's no "hot" subset to preferentially retain. You'd flag that this specific customer might be better served by a dedicated key-value store without cache-specific overhead, or that the same infrastructure can serve both use cases as long as this doesn't affect resource allocation for other, genuinely cache-pattern customers sharing the cluster.
+
+### 14. (Notification System) "The business now wants a notification to be cancellable up until 2 minutes before its scheduled send time." How does this interact with your queue-based architecture?
+**Answer:** This introduces a delay/scheduling requirement the original fire-and-forget queue model didn't have — rather than immediately enqueuing for delivery, a schedulable notification needs to sit in a durable, queryable store (similar to Chapter 61's job scheduler) until its scheduled time approaches, checked periodically by a scanner-like component, only then being enqueued for actual delivery. A cancellation request before the 2-minute cutoff simply removes or marks the pending record; after the cutoff, it may already be in the delivery pipeline and can no longer be reliably canceled — a limit worth explicitly communicating to the business as a consequence of the pipeline's own processing lead time.
+
+### 15. (Chat Application) "What if we need to support ephemeral messages that disappear after being viewed once?" How does this affect your "always persist before delivery" principle?
+**Answer:** The core principle still holds for durability reasons (you don't want to lose a message due to a delivery failure just because it's meant to be short-lived) — but the message record now needs a "consumed" flag, set atomically the moment it's actually viewed by the recipient, after which subsequent requests for that message (from other devices, or a reconnect) should return nothing rather than the original content. This is a straightforward extension of the existing message-status tracking (sent/delivered/read) rather than a fundamental architecture change, though it does introduce a new correctness requirement: the "mark as consumed and prevent re-delivery" step must itself be atomic to avoid a race where a message is viewed on two devices simultaneously before either can mark it consumed.
+
+### 16. (News Feed) "A user reports their feed is missing several posts from an account they follow — how would you debug this?" What does this reveal about the architecture's observability needs?
+**Answer:** Given the asynchronous, queue-based fan-out architecture, you'd need to trace: did the original post successfully persist? Was a fan-out job successfully enqueued for it? Did the fan-out worker successfully process that job and write to this specific user's feed cache? This requires the same trace-ID-based observability discussed in Chapter 42 — without it, diagnosing exactly which stage of the asynchronous pipeline failed for this specific post-and-follower pair would be extremely difficult, directly reinforcing why observability is a prerequisite (per this chapter's Question 8) rather than an afterthought for event-driven architectures like this one.
+
+### 17. (Ride-Sharing) "What happens if two riders in the same dense area both request a ride within milliseconds of each other, and both match to the same nearest driver?" Walk through how your design prevents double-booking here.
+**Answer:** This is precisely the scenario the atomic check-and-set on driver status addresses — both matching processes would query the geospatial index and independently identify the same driver as nearest, but when each attempts to atomically transition that driver from "available" to "pending offer," only one such atomic operation can succeed; the other observes that the driver is no longer available (zero rows affected, in the SQL-based version) and proceeds to the next-nearest candidate driver instead, exactly the same technique used to prevent overselling inventory in the e-commerce case study.
+
+### 18. (Video Streaming) "A content creator wants their video to be instantly available in all qualities the moment upload finishes, for a scheduled premiere." How does this change your encoding pipeline?
+**Answer:** This directly conflicts with the asynchronous, latency-tolerant encoding assumption established in Step 1 for the general case — for this specific, premium/scheduled scenario, you'd need to either begin encoding well ahead of the actual premiere time (if the creator uploads in advance, giving the pipeline a head start before the content needs to be live) or prioritize this specific encoding job with dedicated, higher-priority worker capacity to complete faster than the general-case SLA — directly illustrating that a stated non-functional requirement (latency tolerance) established early in a design isn't universal across every possible use case the system might need to support, and specific premium/priority paths may need their own distinct treatment.
+
+### 19. (E-commerce) "What happens if the payment gateway takes 30 seconds to respond (still within its own timeout, just very slow), during a flash sale with heavy inventory contention?" What's the specific risk?
+**Answer:** The inventory for this specific order would remain in "reserved" (not yet "sold," not yet "released") for this entire 30-second window — during a flash sale with heavy contention on the same item, this extended reservation hold could cause otherwise-fulfillable orders from other customers to be incorrectly rejected as "out of stock," even though this specific reservation might ultimately fail and release its held inventory. This is a direct illustration of the Saga's isolation gap (Chapter 20) becoming a genuine, customer-visible business problem under load — mitigations include a shorter payment-gateway timeout specifically during high-contention periods (accepting more payment failures in exchange for less inventory lock time) or reserving inventory only after a faster, preliminary payment-authorization check rather than the full charge.
+
+### 20. (Search Autocomplete) "The business wants autocomplete to reflect trending searches within 30 seconds, not the current hourly batch cycle." How would you evolve your design?
+**Answer:** This directly overrides the "minutes to hours lag is acceptable" assumption from Step 1 for this specific class of query — rather than restructuring the entire Trie-rebuild pipeline to a real-time cadence (a significant, likely unjustified overhaul for the *entire* dataset), you'd introduce a separate, fast-refreshing "trending" signal specifically tracking rapid recent search-volume spikes (a lightweight stream-processing component, Chapter 33), blended into the served suggestions alongside the base, hourly-refreshed Trie — directly the mitigation this chapter's own Step 6 already anticipated, now triggered by an explicit interviewer follow-up rather than proactively suggested.
+
+### 21. (Web Crawler) "What if a specific high-value news site explicitly wants us to crawl it more frequently than our standard politeness rate limit allows?" How do you accommodate this without abandoning politeness generally?
+**Answer:** This requires per-domain-configurable rate limits rather than a single, uniform politeness rate applied identically to every domain — the frontier's per-domain rate limiter (already partitioned by domain, per this case study's design) simply needs its token-bucket/leaky-bucket parameters to be configurable per domain, ideally informed by that domain's own explicitly stated crawl-rate allowance (many sites publish this via their `robots.txt` file's crawl-delay directive), rather than assuming one universal rate is correct for every site regardless of that site's own stated preferences and capacity.
+
+### 22. (File Storage) "Two different users, working entirely independently, happen to upload byte-for-byte identical large files." Does your chunking/deduplication design handle this efficiently, and what should you double check?
+**Answer:** Since chunks are content-addressed by hash, identical content naturally deduplicates regardless of which user uploaded it or when — the second user's upload would compute the same chunk hashes as the first user's already-stored file, and the system can recognize these chunks already exist rather than storing duplicate copies. The one thing to double-check, directly from this chapter's own follow-up discussion: if files are encrypted with per-user keys before chunking, this cross-user deduplication actually breaks (encrypted versions of identical plaintext produce different ciphertext, hence different hashes) — worth explicitly confirming which behavior (dedup for storage savings, vs. per-user encryption for stronger isolation) the business actually wants before assuming deduplication works as described.
+
+### 23. (Job Scheduler) "A specific recurring daily job's handler has been failing silently for a week due to a bug, and nobody noticed because the scheduler kept dutifully generating the next day's occurrence regardless of success." How would you address this gap?
+**Answer:** This directly surfaces a real observability gap in the design as described — while it's correct that generating the next occurrence shouldn't be blocked by a specific occurrence's failure (per this chapter's own discussion), a healthy system needs failure-rate monitoring and alerting (Chapter 42) specifically on job execution outcomes, so a string of repeated failures for the same recurring job triggers a proactive alert rather than silently continuing to regenerate and re-fail indefinitely with no one noticing — this is a good example of a design being technically correct in its core mechanics while still needing an operational/observability layer to actually be production-ready.
+
+## Summary
+
+This closing chapter paired standalone architecture-pattern review questions with mid-interview curveballs on every one of Part 9's thirteen case studies — deliberately mirroring how a real interviewer probes whether a design can genuinely flex under a changed requirement, not just recite a memorized answer. That adaptability, built on the seven-step framework from Chapter 48 and the concepts developed across all sixty-one preceding chapters, is the actual, transferable skill this entire series has been building toward.

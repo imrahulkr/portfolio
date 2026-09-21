@@ -1,0 +1,141 @@
+---
+title: "Method References"
+description: "The four kinds of method references, how they desugar to equivalent lambdas, and constructor references."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Functional Programming"
+chapter: 34
+totalChapters: 65
+slug: "method-references"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "method-references", "functional-programming"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 10
+---
+
+## Method References Are Shorthand for Certain Lambdas
+
+A method reference is a more concise way to write a lambda that does nothing but call an existing method. If a lambda's entire body is "call this one method with these arguments," it can usually be replaced with a method reference.
+
+```java
+// Lambda
+Function<String, Integer> length = s -> s.length();
+
+// Equivalent method reference
+Function<String, Integer> lengthRef = String::length;
+```
+
+## The Four Kinds of Method References
+
+### 1. Static Method Reference — `ClassName::staticMethod`
+
+```java
+Function<String, Integer> parse = Integer::parseInt;
+// equivalent to: s -> Integer.parseInt(s)
+
+BinaryOperator<Integer> max = Integer::max;
+// equivalent to: (a, b) -> Integer.max(a, b)
+```
+
+### 2. Instance Method Reference on a Particular Object — `instance::method`
+
+```java
+String greeting = "Hello";
+Supplier<Integer> lengthOfGreeting = greeting::length;
+// equivalent to: () -> greeting.length()  — "greeting" is captured, fixed
+
+List<String> names = new ArrayList<>();
+Consumer<String> adder = names::add;
+// equivalent to: name -> names.add(name)
+```
+
+### 3. Instance Method Reference on an Arbitrary Object of a Particular Type — `ClassName::instanceMethod`
+
+```java
+Function<String, Integer> length = String::length;
+// equivalent to: s -> s.length()  — the FIRST lambda parameter becomes the object the method is called on
+
+BiPredicate<String, String> equalsIgnoreCase = String::equalsIgnoreCase;
+// equivalent to: (s1, s2) -> s1.equalsIgnoreCase(s2)  — first param is the receiver, second is the argument
+```
+
+This is the kind most often confused with #2 — the distinguishing signal is that the lambda's *first parameter* becomes the object the method is invoked on, rather than a fixed, already-existing object.
+
+### 4. Constructor Reference — `ClassName::new`
+
+```java
+Supplier<ArrayList<String>> listFactory = ArrayList::new;
+// equivalent to: () -> new ArrayList<String>()
+
+Function<String, StringBuilder> sbFactory = StringBuilder::new;
+// equivalent to: s -> new StringBuilder(s)
+```
+
+![Diagram: four method reference kinds side by side with their equivalent lambda expressions, highlighting how the first parameter becomes the receiver in the "arbitrary object" kind](/diagrams/ch34-four-method-reference-kinds.svg)
+
+## Why Prefer Method References Over Equivalent Lambdas
+
+```java
+List<String> names = List.of("charlie", "alice", "bob");
+
+names.stream()
+     .map(String::toUpperCase)      // clearer intent than s -> s.toUpperCase()
+     .sorted(String::compareTo)     // clearer than (a, b) -> a.compareTo(b)
+     .forEach(System.out::println); // clearer than s -> System.out.println(s)
+```
+
+When a method reference is available, it's generally preferred over the equivalent lambda — it reads more directly as "call this named operation" rather than requiring the reader to parse a small lambda body to figure out that it's just delegating to an existing method. This is purely a readability preference, though — behaviorally, they compile to the same thing.
+
+## Method References Still Require an Exact Functional Interface Match
+
+```java
+Function<String, Integer> length = String::length;   // OK — String.length() matches Function<String, Integer>'s shape
+
+// Predicate<String> isEmpty = String::length;   // COMPILE ERROR — length() returns int, not boolean
+```
+
+The referenced method's signature (parameter types and return type) must be compatible with the target functional interface's abstract method — the compiler performs the same type-checking it would for an equivalent lambda.
+
+## Key Takeaways
+
+- A method reference is shorthand for a lambda whose entire body is a single existing method call.
+- There are four kinds: static, bound instance (on a specific object), unbound instance (on an arbitrary object of a type, using the first parameter as the receiver), and constructor references.
+- Method references and their equivalent lambdas compile to the same underlying mechanism (`invokedynamic`) — the choice between them is purely about readability.
+- The referenced method's signature must still match the target functional interface's abstract method exactly.
+
+---
+
+## Interview Questions
+
+**1. What is a method reference, and when can a lambda be replaced by one?**
+It's a compact syntax (`Class::method` or `object::method`) for referring to an existing method as if it were a lambda implementing a functional interface. Any lambda whose entire body consists of nothing more than calling a single existing method with the lambda's parameters (in order) can typically be rewritten as an equivalent method reference.
+
+**2. What are the four kinds of method references?**
+Static method references (`ClassName::staticMethod`), bound instance method references on a specific, already-existing object (`instance::method`), unbound instance method references on an arbitrary object of a given type (`ClassName::instanceMethod`, where the lambda's first parameter becomes the method's receiver), and constructor references (`ClassName::new`).
+
+**3. What's the key difference between `instance::method` and `ClassName::instanceMethod`?**
+`instance::method` refers to calling that method on one specific, already-existing object captured at the point the reference is created — equivalent to a lambda like `() -> instance.method()` (or with additional args passed through). `ClassName::instanceMethod` has no specific object bound yet — the *first* parameter supplied to the resulting functional interface becomes the object the method is invoked on, equivalent to `obj -> obj.method()` (with subsequent parameters, if any, passed as the method's own arguments).
+
+**4. Give the lambda equivalent of `String::compareTo` when used as a `Comparator<String>`.**
+`(s1, s2) -> s1.compareTo(s2)` — this is the "unbound instance method reference" case, where the first parameter (`s1`) becomes the receiver the `compareTo` method is called on, and the second parameter (`s2`) is passed as `compareTo`'s own argument.
+
+**5. What does a constructor reference like `ArrayList::new` represent, and what functional interface might it satisfy?**
+It represents a reference to the class's constructor, usable anywhere a functional interface expects a method that produces a new instance — most simply satisfying `Supplier<ArrayList<T>>` for the no-argument constructor, since calling `get()` on the resulting `Supplier` is equivalent to calling `new ArrayList<>()`. A constructor reference for a parameterized constructor could similarly satisfy `Function<ArgType, ClassName>` or other multi-argument functional interfaces, depending on which constructor overload matches the target interface's parameter shape.
+
+**6. Do method references and their equivalent lambda expressions compile to fundamentally different bytecode mechanisms?**
+No — both are compiled using the same `invokedynamic`-based mechanism, with `LambdaMetafactory` generating the actual functional interface implementation at runtime for either form. The choice between writing a method reference or the equivalent lambda is purely a source-code readability preference; there's no meaningful behavioral or performance difference between them.
+
+**7. Why does `Predicate<String> isEmpty = String::length;` fail to compile?**
+`String.length()` returns an `int`, but `Predicate<String>`'s abstract method `test(String s)` must return a `boolean` — the referenced method's return type doesn't match what the target functional interface's abstract method requires, so the compiler rejects the mismatch, exactly as it would for an equivalent explicitly-written lambda with the same type error.
+
+**8. Can a method reference refer to an overloaded method? How does the compiler decide which overload to use?**
+Yes — the compiler resolves which specific overload is being referenced based on the target functional interface's expected parameter types and return type, exactly the way it would resolve a normal overloaded method call given those same argument types. If the target context's shape is ambiguous between multiple overloads, the compiler reports an ambiguous reference error, just as it would for an ambiguous direct method call (Chapter 11).
+
+**9. Is `System.out::println` a bound or unbound instance method reference?**
+It's a bound instance method reference — `System.out` is a specific, already-existing `PrintStream` object (captured at the point the reference is created), and `println` is being referenced as a method to call on that particular fixed instance, equivalent to a lambda like `x -> System.out.println(x)`.
+
+**10. Why might a code reviewer prefer `list.forEach(System.out::println)` over `list.forEach(s -> System.out.println(s))`, given they behave identically?**
+The method reference form is generally considered clearer at a glance — it directly names the operation being performed ("call println on each element") without requiring the reader to parse a small lambda body to recognize that it's simply delegating to an existing method with no additional logic. This is purely a stylistic/readability preference favored by most Java style guides, not a functional or performance distinction.

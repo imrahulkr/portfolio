@@ -1,0 +1,164 @@
+---
+title: "Introduction to Microservices with Spring Boot: Monoliths, Decomposition & Trade-offs"
+description: "Part 7 goes deep on microservices — starting with the honest case for and against them, and how to actually decide where to draw service boundaries, before touching any Spring Cloud infrastructure."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 23
+tags: ["Spring Boot", "Microservices", "Architecture"]
+---
+
+Everything through Part 6 has been one application. Part 7 covers what changes once that application is deliberately split into several — and this chapter covers the decision itself, before Chapter 24 onward gets into the Spring Cloud infrastructure that makes it practical.
+
+## What a monolith actually is (and isn't)
+
+A **monolith** is a single deployable unit containing all of an application's functionality — not, contrary to the word's negative connotation, an inherently badly-designed system. A well-structured monolith has clear internal module boundaries (a well-organized package structure — `order`, `inventory`, `payment` — each with clear interfaces between them) without being physically split into separately deployable services.
+
+```
+Monolith (well-structured)              Microservices
+┌─────────────────────────┐            ┌──────────┐  ┌──────────┐  ┌──────────┐
+│  order  │ inventory │ payment │       │  order   │  │inventory │  │ payment  │
+│  (internal boundaries,   │            │ service  │  │ service  │  │ service  │
+│   one deployable unit)   │            │(own DB,  │  │(own DB,  │  │(own DB,  │
+└─────────────────────────┘            │ own deploy)│  │own deploy)│ │own deploy)│
+                                        └──────────┘  └──────────┘  └──────────┘
+```
+
+Everything from Chapters 1 through 22 works identically well inside a monolith or inside one microservice — the difference isn't the Spring Boot code itself, it's what sits *between* multiple deployable units once you have more than one, which is what the rest of Part 7 addresses.
+
+## The honest trade-offs — not a one-directional upgrade
+
+**Microservices genuinely help with:**
+- **Independent deployability** — deploying the `order` service doesn't require redeploying `inventory` or `payment`, reducing blast radius and enabling independent release cadences per team.
+- **Independent scalability** — if `order` receives 10x the traffic of `payment`, only `order` needs more instances.
+- **Technology and team autonomy** — different services can use different languages/frameworks if genuinely justified, and different teams can own different services with less coordination overhead.
+
+**Microservices genuinely cost:**
+- **Distributed systems complexity** — network calls can fail in ways a method call never does (Chapter 27), data consistency across services is no longer a single database transaction (Chapter 32), and debugging a request now spans multiple processes (Chapter 31).
+- **Operational overhead** — more deployables to build, deploy, monitor, and version means real infrastructure investment (much of the rest of Part 7) that a monolith doesn't require at all.
+- **Data consistency is harder** — a single `@Transactional` method (Chapter 11) can no longer atomically span two services' separate databases.
+
+**The honest recommendation:** most systems should start as a well-structured monolith and split into services only when a genuine, specific driver — independent scaling needs, real team-autonomy requirements, a clear bounded context emerging — justifies the real complexity cost above. Splitting prematurely, before those drivers exist, tends to produce a "distributed monolith": all of microservices' operational complexity, none of their genuine benefits, because services still end up tightly coupled and deployed together anyway.
+
+## Decomposition strategies: where do the boundaries go?
+
+**By business capability / bounded context** (the most common, durable approach): each service owns a distinct business capability — `order-service`, `inventory-service`, `payment-service` — with its own data and its own team, mirroring how the business itself is organized. This draws directly on Domain-Driven Design's concept of a "bounded context": a boundary within which a specific business model and its terminology are consistent.
+
+**By subdomain volatility**: services that change frequently (a rapidly evolving pricing engine) are separated from services that change rarely (a stable core ledger) so frequent changes don't require redeploying stable, high-risk-to-touch code.
+
+**Anti-pattern: decomposition by technical layer** — a `frontend-service`, `business-logic-service`, `database-service` — sounds appealing but produces exactly the tightly-coupled "distributed monolith" problem: nearly every real feature change requires touching all three, deployed together, with all of the network overhead and none of the independent-deployability benefit that's supposed to be the entire point.
+
+## The database-per-service rule
+
+```
+❌ Shared database (anti-pattern)          ✓ Database per service
+┌──────────┐  ┌──────────┐               ┌──────────┐  ┌──────────┐
+│  order   │  │inventory │               │  order   │  │inventory │
+│ service  │  │ service  │               │ service  │  │ service  │
+└────┬─────┘  └────┬─────┘               └────┬─────┘  └────┬─────┘
+     └──────┬───────┘                         │              │
+       shared DB                         order_db        inventory_db
+  (hidden coupling — a schema              (each service owns its
+   change breaks both services)             own data completely)
+```
+
+Each service owning its own database is what makes independent deployability *real* rather than superficial — a shared database means a schema migration (Chapter 12) in one service can silently break another service reading the same tables, reintroducing tight coupling through the back door regardless of how cleanly the *code* is separated into different deployables. This is precisely why cross-service data consistency becomes a genuinely hard problem (Chapter 32) — there's no longer one database transaction that can span both.
+
+## Best practices & gotchas
+
+- **Don't adopt microservices because of hype — adopt them for a specific, present driver.** "We might need to scale independently someday" isn't a driver; "the `order` service genuinely needs 10x the instances of `payment` right now" is.
+- **A monolith with clean internal boundaries is a legitimate, often better, long-term choice for many systems** — and critically, it's also the easiest starting point to later split into real services, since the internal boundaries you'd need already exist.
+- **Never share a database across services**, even "just for now" or "just for this one join" — it's the single decision most likely to quietly undo every other microservices benefit you're trying to gain.
+- **Expect and budget for the operational overhead honestly.** Every chapter for the rest of Part 7 (service discovery, config servers, gateways, resilience patterns, distributed tracing) exists specifically because splitting into services created a problem a monolith never had.
+- **"Distributed monolith" is the specific failure mode to watch for** — if deploying one service routinely requires also deploying two others in lockstep, the services aren't actually independently deployable, and the split isn't providing its intended benefit.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| Monolith | Single deployable unit; can still have clean internal module boundaries |
+| Microservices | Multiple independently deployable services, each owning its own data |
+| Bounded context | A boundary within which a business model/terminology is consistent — the usual basis for service boundaries |
+| Distributed monolith | Anti-pattern: services split physically but still tightly coupled and deployed together |
+| Database-per-service | Each service owns its data exclusively — the rule that makes independent deployability real |
+
+## Wrapping up
+
+The rest of Part 7 assumes the decision to split into services has already been made for good reasons — this chapter was about making sure that's actually true before paying the real complexity cost ahead. **Chapter 24** starts the infrastructure: service discovery with Eureka, solving the very first problem multiple services create — how do they find each other at all?
+
+## Interview Questions
+
+**1. What is a monolith, and is it inherently a bad architecture?**
+A monolith is a single deployable unit containing all of an application's functionality. It isn't inherently bad — a well-structured monolith can have clean internal module boundaries and clear separation of concerns without being physically split into separate deployables; "monolith" describes the deployment model, not the quality of the internal code organization.
+
+*Follow-up: What's a concrete sign that a monolith has poor internal structure, independent of the fact that it's a monolith at all?* Modules with no clear boundaries — business logic for unrelated concerns (say, order processing and user notification preferences) tightly intertwined in the same classes with no clean interface between them, such that a change to one routinely requires touching the other even though they're conceptually unrelated. This kind of tangled coupling is a code-organization problem that splitting into microservices wouldn't automatically fix — it would just relocate the same tangled coupling across a network boundary, which is often worse.
+
+**2. What is a "distributed monolith," and why is it considered a failure mode rather than a legitimate architecture?**
+It's a system that's been physically split into multiple separately deployed services, but where those services remain so tightly coupled (through a shared database, synchronous call chains that must all succeed together, or services that must always be deployed in lockstep) that they don't actually gain independent deployability or scalability — the defining benefits microservices are meant to provide. It combines all of the operational complexity of a distributed system with essentially none of its intended benefits.
+
+*Follow-up: What's a concrete symptom a team might notice that indicates they've built a distributed monolith?* Needing to coordinate and deploy multiple "independent" services together in a specific order for nearly every feature change, because they're too tightly coupled to safely deploy independently — if release planning routinely involves "deploy service A, then B, then C, all in the same window," the services aren't actually achieving independent deployability regardless of being physically separate deployables.
+
+**3. What is a "bounded context," and why is it commonly used as the basis for microservice boundaries?**
+A bounded context (from Domain-Driven Design) is a boundary within which a specific business domain model and its terminology remain internally consistent — the same term (e.g., "Customer") might mean something different in a billing context versus a support context, and a bounded context is the boundary where one specific meaning applies. Using bounded contexts as service boundaries aligns each service with a coherent, self-contained piece of the business domain, which tends to produce boundaries that are stable and meaningful over time, rather than arbitrary technical splits.
+
+*Follow-up: Why does decomposing services by technical layer (e.g., a separate "frontend service," "business logic service," and "database service") tend to work poorly compared to decomposing by bounded context?* A technical-layer split means nearly every real business feature requires coordinated changes across all three layers/services simultaneously, since a single business capability inherently spans presentation, logic, and data concerns together — this reintroduces the distributed-monolith problem, whereas a bounded-context split keeps each business capability's full stack (its own logic and data) within one service, genuinely enabling that capability to evolve and deploy independently.
+
+**4. Why is "database per service" considered such an important rule in microservices architecture?**
+Independent deployability is only real if a service can change its internal data model without needing coordination with any other service — a shared database means a schema change in one service can silently break another service that also reads from the same shared tables, reintroducing tight coupling through the data layer even if the application code itself is split into separate deployables.
+
+*Follow-up: If two services genuinely need access to overlapping data, what's the correct microservices-native approach instead of sharing a database?* Each service should own and expose its own data through its own API (or emit events, per Chapters 29–30) that other services consume — a service needing another service's data calls that service's API (or subscribes to its events) rather than directly querying its database tables, keeping each service's internal schema a private implementation detail it's free to change without breaking anyone else.
+
+**5. What's a genuine, legitimate driver for splitting a system into microservices, as opposed to a weak or premature justification?**
+A genuine driver is something concretely true *right now* — one part of the system needs to scale independently at a meaningfully different rate than the rest (e.g., 10x the traffic), distinct teams need to own and deploy their areas independently to reduce real coordination overhead, or a clear, stable bounded context has emerged that would benefit from independent technology or release cadence choices. A weak justification is speculative ("we might need to scale this independently someday") or purely following industry trends without a concrete present need.
+
+*Follow-up: Why is starting with a monolith and splitting later, once real drivers emerge, often considered lower-risk than starting with microservices from day one?* The correct service boundaries are often not obvious at a system's very beginning, before real usage patterns and team structures have emerged — a monolith with clean internal module boundaries can be split later along boundaries that have proven themselves correct through actual usage, whereas committing to microservice boundaries prematurely risks getting them wrong and then needing to either live with poor boundaries or perform an even more disruptive re-split later.
+
+**6. What operational overhead does splitting into microservices introduce that a monolith doesn't have?**
+Each additional service needs its own build pipeline, deployment process, monitoring/observability setup, versioning strategy, and often its own database instance to manage — multiplying infrastructure and operational work by the number of services, compared to a monolith's single deployable unit needing only one of each of these.
+
+*Follow-up: How does this operational overhead scale as the number of services grows, and what's a common organizational response to managing it?* The overhead tends to grow at least linearly (often faster, due to the added complexity of inter-service coordination) with the number of services — a common organizational response is investing in a platform/DevOps team and shared tooling (standardized CI/CD pipelines, service templates, centralized observability infrastructure like the tools covered later in this part) specifically to make each individual service's operational overhead as low and consistent as possible, rather than each team reinventing this infrastructure independently.
+
+**7. Why does data consistency become genuinely harder in a microservices architecture compared to a monolith?**
+In a monolith, an operation spanning multiple business concerns (placing an order and decrementing inventory) can be wrapped in a single `@Transactional` method (Chapter 11), guaranteeing atomicity via one database transaction. Once those concerns live in separate services with separate databases, there's no longer one database transaction that can span both — a partial failure (the order service succeeds, but the inventory service's decrement fails) can leave the two services' data inconsistent with each other, a problem that simply doesn't exist within a single database transaction.
+
+*Follow-up: What's the general category of solution this problem requires, that a monolith never needed to reach for?* Distributed transaction patterns — most commonly the Saga pattern (covered in depth in Chapter 32) — which coordinate a sequence of local transactions across services, with explicit compensating actions to undo already-completed steps if a later step fails, since there's no single ACID transaction available to guarantee all-or-nothing atomicity across separate databases the way Chapter 11's `@Transactional` could within one.
+
+**8. Why might a well-organized monolith actually be an easier starting point for a *future* microservices split than starting with microservices immediately?**
+If a monolith already has clean internal module boundaries mirroring genuine business capabilities (as recommended throughout this chapter), those existing boundaries are strong candidates for where actual service boundaries should go later — the hard work of correctly identifying bounded contexts has already been done through the monolith's internal structure, making an eventual split more a matter of physically separating already-well-defined modules than discovering the right boundaries from scratch under the added pressure of distributed systems concerns.
+
+*Follow-up: What monolith design practice specifically makes this later split easier, beyond just having separate packages?* Ensuring each internal module only communicates with others through well-defined interfaces (not reaching directly into another module's internal classes or database tables) — a monolith designed this way already behaves, internally, the way services would communicate with each other externally, so converting an internal method call behind a clean interface into a network call to a separate service is a much smaller, more mechanical change than untangling code that freely reaches across module boundaries with no such discipline.
+
+**9. What does "independent scalability" mean in a microservices context, and why can't a monolith achieve the same thing as cleanly?**
+It means each service can be scaled (running more or fewer instances) according to its own specific load, independent of every other service's load — if `order-service` needs far more capacity than `payment-service`, only `order-service` needs additional instances. A monolith, being one deployable unit containing all functionality, can only be scaled as a whole — every instance carries the full application's resource footprint even if only one part of it is actually under heavy load, which is less resource-efficient at scale.
+
+*Follow-up: Is there any way to achieve some of this scalability benefit within a monolith without fully splitting into microservices?* To a limited degree — vertical scaling (larger instances) or horizontal scaling (more identical instances) of the whole monolith still helps overall throughput, and some systems mitigate hot spots with targeted optimizations (caching from Chapter 20, async processing from Chapter 21) for the specific heavy-load feature — but this can't achieve the same fine-grained, per-capability resource allocation that scaling one specific service independently provides, since the monolith's instances are all-or-nothing units.
+
+**10. Why does "each team can use a different technology stack" get cited as a microservices benefit, but is described in this chapter as something to pursue only "if genuinely justified"?**
+While microservices architecturally *permit* different services to be built with different languages or frameworks, actually doing so introduces real costs: more technologies for the organization to hire for, maintain expertise in, and operate (monitoring, deployment tooling, security patching) — multiplying operational complexity beyond just having more services. It's a genuine option, not an automatic benefit worth pursuing by default; most organizations get more value from standardizing on one or two stacks across most services and reserving genuine polyglot choices for cases with a strong, specific technical justification.
+
+*Follow-up: Give an example of a specific, justified reason to use a different technology stack for one particular microservice.* A service with genuinely different computational characteristics than the rest of the system — for example, a machine-learning inference service where Python's ML ecosystem (rather than Java/Spring Boot) is the clearly dominant, best-supported choice — represents a concrete technical justification, as opposed to switching languages simply because a particular team happens to prefer a different one with no specific technical requirement driving the choice.
+
+**11. What's the relationship between the number of services a system is split into and the complexity of inter-service communication?**
+Complexity grows non-linearly as more services are added — with N services potentially needing to communicate, the number of possible direct communication paths grows roughly with N², meaning the coordination, network reliability (Chapter 27), and observability (Chapter 31) challenges compound significantly faster than the number of services itself grows, which is a major reason "start with fewer, coarser-grained services and split further only when justified" is generally sound advice.
+
+*Follow-up: What architectural pattern is commonly introduced specifically to manage this growing communication complexity as a system scales to many services?* An API Gateway (covered in depth in Chapter 26) centralizes and simplifies client-facing communication by providing one entry point that routes to the appropriate backend services, and service-to-service communication patterns like an event-driven architecture (Chapters 29–30) can reduce direct point-to-point coupling between services by having them communicate through a shared message broker instead of every service needing to know about and call every other service it depends on directly.
+
+**12. How does the concept of "team autonomy" relate to Conway's Law in the context of microservices adoption?**
+Conway's Law observes that a system's architecture tends to mirror the communication structure of the organization that built it. Microservices are often adopted specifically to *enable* team autonomy by aligning service boundaries with team boundaries — each team owns and can independently deploy its own service(s) — which, per Conway's Law, tends to naturally produce (and be reinforced by) an organizational structure where teams genuinely don't need to coordinate closely with each other for most day-to-day work.
+
+*Follow-up: What might go wrong if a company splits its system into many microservices without correspondingly restructuring its teams to actually match those service boundaries?* If team structure doesn't align with service boundaries — for example, one team is still responsible for changes spanning many different services, or multiple teams routinely need to coordinate changes across the same service — the organization doesn't actually gain the team-autonomy benefit microservices are meant to enable; per Conway's Law, the organizational communication structure will tend to reassert itself onto the architecture regardless of how the services were technically split, often reproducing tightly-coupled, hard-to-coordinate development even across nominally "independent" services.
+
+**13. Why is "we're already struggling to onboard new engineers into this codebase" sometimes cited as a monolith pain point, and does splitting into microservices automatically fix it?**
+A very large, poorly-organized monolith can genuinely be hard for a new engineer to navigate and understand, since everything lives in one large codebase with potentially unclear internal boundaries. However, simply splitting into microservices doesn't automatically fix this — it can just relocate the same complexity: instead of one large, confusing codebase, a new engineer now needs to understand how many small, separately deployed services interact with each other, which can be equally or more difficult to onboard into if the same underlying organizational/architectural clarity problems weren't actually solved, just physically distributed.
+
+*Follow-up: What's a more direct fix for a poorly-organized monolith's onboarding difficulty, that doesn't require the cost of a full microservices split?* Improving the monolith's internal structure directly — establishing clear module boundaries, consistent naming and package organization, and documentation of how the major modules relate to each other — addresses the actual root cause (poor internal organization) without taking on the substantial additional operational complexity of a full microservices architecture, and as covered earlier, this improved internal structure is also exactly what would make a future, better-justified microservices split easier if one is eventually warranted.
+
+**14. If a startup with a small engineering team and rapidly changing product requirements asked whether they should start with microservices, what would the honest advice be, and why?**
+Generally, start with a well-structured monolith. A small team doesn't yet have the team-autonomy driver that microservices are partly meant to enable (there's likely one team working across the whole system anyway), rapidly changing requirements mean service boundaries are especially likely to be wrong early on and need revisiting, and the added operational overhead of running multiple services would consume scarce engineering time that's better spent on product development at this stage — the monolith can be split later, along boundaries that have proven themselves through real usage, once and if genuine scaling or team-autonomy drivers actually emerge.
+
+*Follow-up: At what point would this advice for the same company likely change?* Once concrete, present signals emerge — the team has grown enough that multiple distinct teams are genuinely stepping on each other working in the same codebase, a specific part of the system has a measurably different and much higher load than the rest and needs independent scaling, or the business domain has stabilized enough that clear, durable bounded contexts have become apparent through real usage patterns — at that point, the monolith's existing internal module boundaries (if it was kept well-structured) become strong candidates for where an actual, justified microservices split should occur.
+
+**15. Summarize the overall decision framework this chapter suggests for choosing between a monolith and microservices for a new or growing system.**
+Default to a well-structured monolith with clean internal module boundaries mirroring genuine business capabilities. Only split into microservices when a specific, present driver justifies the real complexity cost — independent scaling needs that are actually happening now, genuine team-autonomy requirements from real team growth, or a stable, clear bounded context that would benefit from independent deployment. Avoid decomposing by technical layer, always give each service its own database, and watch specifically for the "distributed monolith" symptom (services that can't actually deploy independently) as a sign the split hasn't achieved what it was meant to.
+
+*Follow-up: How does this decision framework relate to the rest of Part 7's chapters on service discovery, gateways, resilience, and distributed transactions?* Every one of those chapters exists specifically to solve a problem that only exists *because* a system has been split into multiple services — they represent the real, concrete cost side of the trade-off this chapter lays out. Reading through the remaining Part 7 chapters with that framing in mind is itself a useful gut-check: if a team isn't prepared to invest in solving the discovery, configuration, resilience, and consistency problems those chapters cover, that's a signal they may not yet be ready for (or may not yet need) a genuine microservices split.

@@ -1,0 +1,182 @@
+---
+title: "CompletableFuture & Async Programming"
+description: "Composable, non-blocking asynchronous pipelines with thenApply/thenCompose/thenCombine, exception handling, and combining multiple futures."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Concurrency & Multithreading"
+chapter: 43
+totalChapters: 65
+slug: "completablefuture-and-async-programming"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "concurrency", "completablefuture", "async"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## What `CompletableFuture` Adds Over Plain `Future`
+
+`Future` (Chapter 41) only offers a blocking `get()` to retrieve a result — no way to chain follow-up actions, combine multiple futures, or react to completion without blocking a thread. `CompletableFuture<T>` implements `Future<T>` but adds a rich, composable API for building non-blocking asynchronous pipelines.
+
+```java
+CompletableFuture<Integer> future = CompletableFuture.supplyAsync(() -> {
+    // runs asynchronously on the common ForkJoinPool by default
+    return 42;
+});
+
+future.thenAccept(result -> System.out.println("Got: " + result));   // non-blocking — runs when ready
+```
+
+## Creating a `CompletableFuture`
+
+```java
+CompletableFuture<Void> runnableFuture = CompletableFuture.runAsync(() -> doSomething());          // no result
+CompletableFuture<Integer> supplierFuture = CompletableFuture.supplyAsync(() -> computeValue());    // has a result
+
+// Manually completing one — useful for wrapping non-Future-based async APIs
+CompletableFuture<String> manual = new CompletableFuture<>();
+someCallbackBasedApi.onSuccess(result -> manual.complete(result));
+someCallbackBasedApi.onFailure(error -> manual.completeExceptionally(error));
+```
+
+## Chaining Transformations: `thenApply`, `thenAccept`, `thenRun`
+
+```java
+CompletableFuture.supplyAsync(() -> 10)
+    .thenApply(x -> x * 2)              // transforms the result: int -> int (like Stream.map)
+    .thenAccept(result -> System.out.println(result))   // consumes the result, returns nothing
+    .thenRun(() -> System.out.println("Pipeline complete"));  // runs after, ignoring the previous result entirely
+```
+
+- **`thenApply(Function)`** — transforms the result, returns a new `CompletableFuture` with the transformed value.
+- **`thenAccept(Consumer)`** — consumes the result for a side effect, returns `CompletableFuture<Void>`.
+- **`thenRun(Runnable)`** — runs regardless of the previous result's value (doesn't even receive it).
+
+## `thenCompose` — Flattening Nested Futures (Like `flatMap`)
+
+```java
+CompletableFuture<User> userFuture = fetchUser(userId);
+
+// WRONG shape — thenApply nests: produces CompletableFuture<CompletableFuture<Order>>
+CompletableFuture<CompletableFuture<Order>> nested = userFuture.thenApply(user -> fetchOrder(user.getId()));
+
+// CORRECT — thenCompose flattens, since fetchOrder() itself returns a CompletableFuture
+CompletableFuture<Order> orderFuture = userFuture.thenCompose(user -> fetchOrder(user.getId()));
+```
+
+Exactly the same relationship as `Optional.map()`/`flatMap()` (Chapter 37) or `Stream.map()`/`flatMap()` (Chapter 36) — use `thenCompose` whenever the next step itself returns a `CompletableFuture`, to avoid an awkward nested result.
+
+## `thenCombine` — Merging Two Independent Futures
+
+```java
+CompletableFuture<Integer> price = fetchPriceAsync(itemId);
+CompletableFuture<Double> taxRate = fetchTaxRateAsync(region);
+
+CompletableFuture<Double> total = price.thenCombine(taxRate, (p, rate) -> p * (1 + rate));
+```
+
+Both `price` and `taxRate` execute **concurrently, independently** — `thenCombine` waits for both to complete, then merges their results with the given function, which is far more efficient than fetching them sequentially when they don't depend on each other.
+
+![Diagram: two independent CompletableFutures (price, taxRate) executing concurrently on separate threads, converging into thenCombine which waits for both before computing the final result](/diagrams/ch43-thencombine-concurrent-merge.svg)
+
+## Combining Many Futures: `allOf` and `anyOf`
+
+```java
+CompletableFuture<Void> all = CompletableFuture.allOf(future1, future2, future3);
+all.join();   // blocks until ALL complete (join() is like get(), but throws unchecked CompletionException)
+
+CompletableFuture<Object> any = CompletableFuture.anyOf(future1, future2, future3);
+// completes as soon as ANY ONE of them completes
+```
+
+`allOf()` returns `CompletableFuture<Void>` — notably, it doesn't give you the individual results directly; you retrieve them separately (typically already-completed by this point) via each original future's own `.join()`.
+
+## Exception Handling: `exceptionally`, `handle`, `whenComplete`
+
+```java
+CompletableFuture.supplyAsync(() -> {
+        if (Math.random() > 0.5) throw new RuntimeException("failed");
+        return 42;
+    })
+    .exceptionally(ex -> {                 // ONLY called if an exception occurred; supplies a fallback value
+        System.out.println("Recovered from: " + ex.getMessage());
+        return -1;
+    });
+
+CompletableFuture.supplyAsync(() -> riskyOperation())
+    .handle((result, ex) -> {              // ALWAYS called — result is null if ex is non-null, and vice versa
+        return (ex != null) ? -1 : result;
+    });
+
+CompletableFuture.supplyAsync(() -> riskyOperation())
+    .whenComplete((result, ex) -> {        // observes the outcome (success or failure) WITHOUT altering it
+        log(result, ex);
+    });
+```
+
+- **`exceptionally`** — a recovery handler, only invoked on failure, providing a fallback value.
+- **`handle`** — always invoked, receiving either the result or the exception (whichever applies), letting you unconditionally produce a final outcome.
+- **`whenComplete`** — an observer, always invoked, but doesn't change the future's outcome — purely for side effects like logging.
+
+## Controlling Which Thread Executes Each Stage
+
+```java
+ExecutorService customPool = Executors.newFixedThreadPool(4);
+
+CompletableFuture.supplyAsync(() -> computeValue(), customPool)   // runs on customPool, not the common pool
+    .thenApplyAsync(result -> transform(result), customPool);      // "Async" variant + explicit executor
+```
+
+By default, chained stages (`thenApply` without "Async") run on whichever thread completed the *previous* stage — which could be the common `ForkJoinPool`, or even the calling thread itself if the future was already complete. The `...Async` variants (`thenApplyAsync`, `thenAcceptAsync`, etc.) submit that stage to the common pool (or an explicitly supplied `Executor`) instead, giving explicit control — important in real applications, since blocking or CPU-heavy chained work should generally run on a dedicated pool, not the shared common `ForkJoinPool` used by parallel streams (Chapter 36) and other framework internals across the whole JVM.
+
+## Key Takeaways
+
+- `CompletableFuture` adds composable, non-blocking chaining (`thenApply`, `thenCompose`, `thenCombine`) on top of what plain `Future` offers.
+- Use `thenCompose` (not `thenApply`) when the next step itself returns a `CompletableFuture`, to avoid nesting.
+- `exceptionally` handles only failures; `handle` always runs and unconditionally produces the final result; `whenComplete` only observes without altering the outcome.
+- Use the `...Async` method variants with an explicit `Executor` to avoid overloading the shared common `ForkJoinPool` with blocking or heavy work.
+
+---
+
+## Interview Questions
+
+**1. What does `CompletableFuture` provide that plain `Future` does not?**
+Plain `Future` only offers a blocking `get()` call to retrieve a result, with no way to register callbacks, chain transformations, combine multiple futures, or handle failures without explicitly blocking a thread. `CompletableFuture` implements `Future` but adds a rich set of composable methods (`thenApply`, `thenCompose`, `thenCombine`, `exceptionally`, and more) enabling fully non-blocking, declarative asynchronous pipelines.
+
+**2. What's the difference between `thenApply()` and `thenCompose()`?**
+`thenApply(Function<T,R>)` transforms a completed result of type `T` into a plain value of type `R`, producing `CompletableFuture<R>` — if the transformation function itself returned a `CompletableFuture`, you'd end up with an awkward nested `CompletableFuture<CompletableFuture<R>>`. `thenCompose(Function<T, CompletableFuture<R>>)` is used specifically when the next step *itself* returns a `CompletableFuture`, flattening the result into a single `CompletableFuture<R>` instead of nesting — directly analogous to `flatMap` versus `map` for `Optional` and `Stream`.
+
+**3. What does `thenCombine()` do, and why is it more efficient than fetching two independent values sequentially?**
+It takes two independently-executing `CompletableFuture`s and, once *both* have completed, merges their results using a supplied combining function. Because the two original futures run concurrently rather than one waiting for the other to finish first, the total wall-clock time is roughly the time of the *slower* of the two operations, rather than the sum of both — a meaningful efficiency gain whenever the two computations don't actually depend on each other.
+
+**4. What's the difference between `exceptionally()`, `handle()`, and `whenComplete()`?**
+`exceptionally(Function<Throwable, T>)` is invoked only if the preceding stage failed, providing a fallback value to recover with — it's skipped entirely on success. `handle(BiFunction<T, Throwable, R>)` is always invoked regardless of success or failure, receiving either the result (with a `null` exception) or the exception (with a `null` result), and produces a new outcome either way. `whenComplete(BiConsumer<T, Throwable>)` is also always invoked with the same result/exception pair, but is purely observational — it doesn't change the future's eventual outcome, making it appropriate for logging or side-effect-only reactions.
+
+**5. What thread executes a chained stage like `future.thenApply(...)` by default, and how do you control that explicitly?**
+By default, if the preceding stage has already completed by the time `thenApply` is called, the chained function runs on the calling thread; otherwise, it runs on whichever thread ultimately completes the preceding stage (often a common `ForkJoinPool` worker thread, if the original future was created via `supplyAsync`/`runAsync` with no custom executor). To control this explicitly, use the `...Async` variant of the method (`thenApplyAsync`) and pass an explicit `Executor` as an additional argument, ensuring that stage always runs on your chosen thread pool.
+
+**6. Why might submitting many blocking or CPU-intensive tasks to `CompletableFuture`'s default (common `ForkJoinPool`) executor be problematic?**
+The common `ForkJoinPool` is a single, JVM-wide shared resource also used internally by parallel streams and other framework machinery — submitting long-running blocking calls (like slow I/O) or heavy CPU-bound work to it can starve that shared pool, degrading the performance of completely unrelated code elsewhere in the same application that also happens to rely on the common pool. Using an explicit, dedicated `Executor` (passed to the `...Async` method variants) isolates that workload from the shared pool.
+
+**7. What does `CompletableFuture.allOf(f1, f2, f3)` return, and how do you actually retrieve the individual results afterward?**
+It returns `CompletableFuture<Void>`, which completes only once every one of the given futures has completed — it does not itself aggregate or expose their individual results. To retrieve them, you call `.join()` (or `.get()`) on each of the original futures individually after `allOf(...)`'s resulting future has completed, at which point each individual `join()`/`get()` call returns immediately without blocking, since all the underlying work is already finished.
+
+**8. What's the difference between `CompletableFuture.join()` and `CompletableFuture.get()`?**
+Both block until the future completes and return its result, but `get()` declares checked exceptions (`InterruptedException`, `ExecutionException`) that must be caught or declared, while `join()` throws an unchecked `CompletionException` wrapping the underlying cause instead — `join()` is often more convenient in stream pipelines or lambda contexts where checked exceptions would otherwise force awkward try-catch blocks or a `throws` declaration that doesn't fit the surrounding functional interface's signature.
+
+**9. If a chained pipeline like `future.thenApply(f1).thenApply(f2)` has `f1` throw an exception, does `f2` still execute?**
+No — an exception thrown by any stage causes that stage's resulting future to complete exceptionally, and that exceptional completion propagates directly through any subsequent `thenApply`/`thenAccept`/`thenRun` stages, skipping their execution entirely, until it reaches a stage specifically designed to handle exceptions (`exceptionally`, `handle`) or the final blocking `get()`/`join()` call, which then surfaces (or, for `handle`, recovers from) that exception.
+
+**10. How would you fetch data from three independent, slow external services concurrently and combine all three results once they're all available?**
+Kick off three separate `CompletableFuture.supplyAsync(...)` calls (ideally with a dedicated executor rather than the default common pool, if the calls involve blocking I/O), then use `CompletableFuture.allOf(f1, f2, f3).thenRun(...)` (or chain further `thenCombine` calls, though `allOf` scales more cleanly to three or more) to wait for all three to complete before combining their individually-retrieved results — this achieves a total latency close to the slowest single call, rather than the sum of all three sequential calls.
+
+**11. What happens if you call `.complete(value)` on a `CompletableFuture` that has already completed (whether normally or exceptionally)?**
+It has no effect on the future's actual outcome — `complete()` returns `false` and the future's already-established result (or exception) remains unchanged, since a `CompletableFuture` can only be completed once; this is important when manually bridging a callback-based API where both a success and failure callback might theoretically be invoked, ensuring only the first one to fire actually determines the future's final outcome.
+
+**12. Why is `CompletableFuture` often preferred over the older `Future`-plus-`ExecutorService` pattern for chaining multiple asynchronous steps?**
+With plain `Future`, chaining requires manually blocking on `get()` for one step's result before submitting the next step as a new task — this defeats non-blocking asynchronous execution partway through the chain, since the calling thread must sit idle waiting at each step boundary. `CompletableFuture`'s chaining methods (`thenApply`, `thenCompose`, etc.) let each subsequent step be registered as a callback that fires automatically upon completion, with no thread ever needing to block just to hand off from one stage to the next.
+
+**13. In what way is `CompletableFuture`'s design philosophy similar to `Stream`'s and `Optional`'s?**
+All three favor composing small, declarative transformation steps (`map`/`thenApply`, `flatMap`/`thenCompose`) into a pipeline describing *what* should happen to a value once it's available, rather than imperatively writing out each step's control flow by hand — the specific "value" each one wraps differs (a sequence of elements for `Stream`, a possibly-absent single value for `Optional`, an eventually-available asynchronous result for `CompletableFuture`), but the underlying compositional pattern and method-naming conventions are deliberately consistent across all three.

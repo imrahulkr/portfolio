@@ -1,0 +1,235 @@
+---
+title: "API Gateway Deep Dive: Spring Cloud Gateway — Routing, Filters & Rate Limiting"
+description: "External clients shouldn't need to know your system is made of a dozen services, or call each one directly. An API Gateway is the single front door — and where cross-cutting concerns finally stop being duplicated across every service."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 26
+tags: ["Spring Boot", "Spring Cloud Gateway", "Microservices", "API Gateway"]
+---
+
+Chapters 24 and 25 solved discovery and configuration *between* services. This chapter addresses the client-facing side: once a system is a dozen services, what does an external client actually call?
+
+## The problem without a gateway
+
+```
+Mobile App ──────▶ order-service        (client needs to know every
+Mobile App ──────▶ inventory-service     service's address, and every
+Mobile App ──────▶ payment-service       service needs its own public-
+Mobile App ──────▶ notification-service  facing auth, CORS, rate limiting...)
+```
+
+Without a single entry point, every client needs to know every service's address (defeating much of the point of the discovery layer being internal), and cross-cutting concerns — authentication, CORS (Chapter 16), rate limiting, request logging — end up duplicated across every individual service instead of handled once.
+
+## The API Gateway pattern
+
+```
+                     ┌─────────────────┐
+Mobile App ─────────▶│                   │────▶ order-service
+Web App ─────────────▶│   API Gateway     │────▶ inventory-service
+Partner API ─────────▶│  (single entry)   │────▶ payment-service
+                     └─────────────────┘────▶ notification-service
+```
+
+A gateway is a reverse proxy purpose-built for microservices: it routes incoming requests to the correct backend service, and is the natural place to centralize cross-cutting concerns that would otherwise be duplicated everywhere. Clients only ever need to know the gateway's address; internal service topology (and any future refactoring of it) stays entirely hidden from them.
+
+## Setting up Spring Cloud Gateway
+
+```xml
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-gateway</artifactId>
+</dependency>
+```
+
+```yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: order-route
+          uri: lb://order-service          # "lb://" — resolved via Eureka, like Chapter 24
+          predicates:
+            - Path=/api/orders/**
+        - id: inventory-route
+          uri: lb://inventory-service
+          predicates:
+            - Path=/api/inventory/**
+```
+
+Each **route** maps an incoming path pattern (the **predicate**) to a backend service. `lb://order-service` — "load-balanced" — means the gateway resolves `order-service` through the same service-discovery mechanism from Chapter 24, so it automatically adapts as instances scale, exactly like the `@LoadBalanced WebClient` did for direct service-to-service calls.
+
+## Filters: where cross-cutting logic actually lives
+
+```yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: order-route
+          uri: lb://order-service
+          predicates:
+            - Path=/api/orders/**
+          filters:
+            - AddRequestHeader=X-Gateway-Source, api-gateway
+            - name: CircuitBreaker
+              args:
+                name: orderServiceCircuitBreaker
+                fallbackUri: forward:/fallback/orders
+```
+
+```java
+@Component
+class AuthenticationGatewayFilterFactory extends AbstractGatewayFilterFactory<Object> {
+
+    @Override
+    public GatewayFilter apply(Object config) {
+        return (exchange, chain) -> {
+            String token = exchange.getRequest().getHeaders().getFirst("Authorization");
+            if (token == null || !isValidToken(token)) {
+                exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+                return exchange.getResponse().setComplete();
+            }
+            return chain.filter(exchange);
+        };
+    }
+}
+```
+
+Filters run for every request matching a route, before it's forwarded to the actual backend service. This is exactly where JWT validation (Chapter 15) can be centralized — instead of every backend service independently validating a token, the gateway validates it once, and can even strip the raw token and forward a simpler, already-authenticated identity header downstream, so backend services trust the gateway rather than each re-implementing token validation themselves.
+
+```
+Request
+   │
+   ▼
+┌───────────────────────────────────────┐
+│              API Gateway                │
+│  ┌───────────┐  ┌────────────────────┐ │
+│  │ Predicate  │─▶│  Filters (auth,     │ │
+│  │  matches    │  │  rate limit, logging)│ │
+│  │  the route  │  └──────────┬─────────┘ │
+│  └───────────┘             │           │
+└─────────────────────────────┼───────────┘
+                               ▼
+                     lb://order-service
+                               │
+                               ▼
+                    resolved via Eureka
+                    to an actual instance
+```
+
+## Rate limiting
+
+```yaml
+- id: order-route
+  uri: lb://order-service
+  predicates:
+    - Path=/api/orders/**
+  filters:
+    - name: RequestRateLimiter
+      args:
+        redis-rate-limiter.replenishRate: 10   # tokens added per second
+        redis-rate-limiter.burstCapacity: 20    # max tokens that can accumulate
+```
+
+Spring Cloud Gateway's built-in rate limiter uses Redis (the same infrastructure from Chapter 20) and a token-bucket algorithm — tokens replenish at a steady rate, and a burst can consume more than the steady rate up to the configured capacity, then must wait for tokens to refill. Centralizing rate limiting at the gateway protects every backend service uniformly, without each one needing to implement its own limiting logic.
+
+## Best practices & gotchas
+
+- **Centralize genuinely cross-cutting concerns at the gateway — authentication, rate limiting, CORS, request logging — but keep business logic entirely out of it.** A gateway that starts making business decisions becomes a bottleneck and a hidden coupling point that undermines the independent-service benefits from Chapter 23.
+- **The gateway becomes a single point of failure and a traffic chokepoint by design** — it must be run as multiple instances behind its own load balancer, and its own performance and availability now directly gate every request into the system.
+- **Don't let the gateway become a "second monolith."** If every routing/filtering decision requires deep, service-specific knowledge hardcoded into gateway configuration, the gateway itself starts accumulating the coupling and complexity microservices were meant to avoid.
+- **Backend services should still validate that a request genuinely came through the gateway** (e.g., a shared secret header, or network-level restriction so services aren't directly reachable from outside) — otherwise, an attacker who discovers a backend service's real address could bypass the gateway's authentication/rate-limiting entirely.
+- **Use `lb://` with a logical service name, not a hardcoded address, in every route** — this is what keeps the gateway compatible with the elastic, auto-scaling deployment model the rest of Part 7 assumes.
+
+## Quick reference
+
+| Concept | Purpose |
+|---|---|
+| API Gateway | Single entry point routing external traffic to internal services |
+| Route | Maps a path predicate to a backend service |
+| Predicate | Condition determining whether a route matches a request |
+| Filter | Cross-cutting logic applied to matching requests (auth, headers, rate limiting) |
+| `lb://service-name` | Resolves a route's target via service discovery (Chapter 24) |
+| Rate limiter (token bucket) | Bounds request rate per client, commonly backed by Redis |
+
+## Wrapping up
+
+The gateway is where a distributed system presents itself to the outside world as one coherent API, and where cross-cutting concerns stop being duplicated across every service. **Chapter 27** covers what happens on the other side of a gateway-routed (or direct service-to-service) call when the target service is slow or failing — circuit breakers, retries, and the rest of Resilience4j.
+
+## Interview Questions
+
+**1. What problem does an API Gateway solve in a microservices architecture?**
+It provides external clients with a single, stable entry point into a system made of many services, so clients don't need to know every individual service's address or internal topology, and it centralizes cross-cutting concerns (authentication, rate limiting, CORS, logging) that would otherwise need to be duplicated independently across every backend service.
+
+*Follow-up: If a system only has two or three services, is an API Gateway still clearly justified, or is this another case of "don't add infrastructure before a concrete need justifies it" from Chapter 23?* With only a handful of services, the benefit is smaller — clients could reasonably call a couple of services directly without excessive complexity, and cross-cutting concerns aren't yet duplicated across many places. The value of a gateway grows with the number of services and the amount of cross-cutting logic being repeated; a very small system might reasonably defer adopting one until that duplication becomes a genuine, felt pain point.
+
+**2. What does `lb://order-service` mean in a Spring Cloud Gateway route configuration?**
+The `lb://` prefix tells the gateway to resolve `order-service` as a logical service name through the load-balancing/service-discovery mechanism (Eureka, from Chapter 24) rather than treating it as a literal hostname — the gateway looks up currently healthy instances of that service and routes the request to one of them, exactly mirroring how `@LoadBalanced WebClient` resolves service names in direct service-to-service calls.
+
+*Follow-up: What would happen if a route were configured with a hardcoded `uri: http://10.0.1.15:8081` instead of `lb://order-service`?* It would lose the dynamic, discovery-based routing benefit entirely — the gateway would always send matching requests to that one specific, fixed address, which would break the moment that particular instance is scaled down, redeployed to a new address, or replaced, exactly the same hardcoded-address problem Chapter 24 introduced service discovery to solve in the first place.
+
+**3. What is a "predicate" in Spring Cloud Gateway routing?**
+A predicate is a condition that determines whether an incoming request matches a particular route — commonly based on the request path (`Path=/api/orders/**`), but also supportable on headers, HTTP methods, query parameters, and other request attributes. A route is only applied to a request if its predicate(s) evaluate to true.
+
+*Follow-up: Could a single incoming request path match more than one route's predicate, and if so, how is the conflict resolved?* Yes, this is possible if predicates aren't mutually exclusive — Spring Cloud Gateway evaluates routes in a defined order (which can be explicitly controlled) and uses the first matching route, similar in spirit to the "first matching rule wins" principle from `authorizeHttpRequests` in Chapter 14, so route ordering and predicate specificity need to be considered carefully to avoid an unintended route unexpectedly capturing traffic meant for a more specific one.
+
+**4. Why is centralizing JWT validation at the gateway (rather than in each backend service) considered a good practice?**
+It avoids duplicating the same token validation logic (and the same dependency on the identity provider's public keys, per Chapter 15) across every backend service — the gateway validates the token once, and can forward a simpler, already-verified identity representation downstream, letting backend services trust that any request reaching them has already been authenticated, rather than each independently re-implementing the same validation.
+
+*Follow-up: What security risk does this introduce if backend services are directly reachable from outside the gateway, bypassing it entirely?* If a backend service can be reached directly (its address is discoverable or otherwise exposed) and it fully trusts that any request reaching it has already been authenticated by the gateway, an attacker who bypasses the gateway and calls the service directly could skip authentication entirely — this is exactly why backend services should still be network-isolated from direct external access, or independently verify a shared secret/header proving the request genuinely passed through the gateway, rather than blindly trusting all incoming traffic.
+
+**5. How does Spring Cloud Gateway's built-in rate limiter work, conceptually?**
+It commonly uses a token-bucket algorithm backed by Redis: tokens are added to a client's bucket at a steady configured rate (`replenishRate`), up to a maximum capacity (`burstCapacity`); each incoming request consumes a token, and a request is rejected (or delayed, depending on configuration) if no tokens are currently available — allowing a steady baseline rate of traffic while still tolerating occasional short bursts up to the configured capacity.
+
+*Follow-up: Why is Redis specifically well-suited as the backing store for this rate-limiting mechanism, particularly if the gateway itself is running as multiple instances?* Since the gateway typically runs as multiple instances for its own availability (as this chapter's best practices note), rate-limiting state (how many tokens a specific client currently has) needs to be shared and consistent across all of those gateway instances — otherwise a client could effectively get a higher rate limit just by having requests randomly distributed across multiple gateway instances, each tracking its own separate, inconsistent count; Redis provides exactly the shared, fast, consistent store needed to track this state correctly across all gateway instances together.
+
+**6. Why should business logic be kept out of the API Gateway, even though it's technically capable of running arbitrary filter logic?**
+Putting business logic in the gateway reintroduces the kind of tight coupling and centralized bottleneck that splitting into microservices (Chapter 23) was meant to avoid — the gateway would need deep, evolving knowledge of individual services' business rules, becoming a shared dependency that every business logic change might require touching, and undermining the independent-deployability benefit of keeping each service's own business logic self-contained within that service.
+
+*Follow-up: Where's the line between a legitimate cross-cutting gateway filter and something that's crept into being business logic?* A legitimate gateway concern applies uniformly and generically across many or all routes without needing to know anything about a specific service's domain rules — authentication, rate limiting, generic request logging, adding a correlation ID header (Chapter 22). The moment a filter needs to know something domain-specific — like "orders over $1000 need additional processing" — it's encoding business logic that belongs in the relevant backend service instead, not generic, route-agnostic gateway behavior.
+
+**7. Why is the API Gateway itself described as "a single point of failure and a traffic chokepoint by design"?**
+Since every external request into the system passes through the gateway by design, its availability and performance directly gate the availability and performance of the entire system from an external client's perspective — if the gateway is down or overwhelmed, it doesn't matter how healthy the individual backend services are, since clients can't reach any of them without going through it first.
+
+*Follow-up: What operational practices mitigate this single-point-of-failure risk, given that the gateway's centralizing role is also exactly its value?* Running the gateway itself as multiple instances behind its own load balancer or DNS-based distribution (rather than a single gateway instance), applying the same resilience patterns covered in Chapter 27 to the gateway's own outbound calls to backend services, and closely monitoring the gateway's own health and performance (via the observability practices from Chapter 19) with particular urgency, since gateway degradation has an outsized, system-wide impact compared to a single backend service having issues.
+
+**8. What's the risk of a gateway becoming "a second monolith," and how does that happen?**
+If routing and filtering decisions accumulate deep, hardcoded, service-specific knowledge over time (increasingly complex conditional logic per route, business-rule-aware filters, service-specific quirks baked directly into gateway configuration), the gateway itself becomes a large, tightly-coupled, hard-to-change piece of shared infrastructure that every team's changes might need to touch — recreating, at the gateway layer, exactly the kind of monolithic coupling and change-coordination overhead that splitting into independent services was meant to eliminate in the first place.
+
+*Follow-up: What practice specifically helps prevent this from happening as a system and its gateway configuration grow over time?* Keeping gateway routes and filters generic, declarative, and free of embedded business logic (per the earlier answer's distinction) — treating the gateway configuration itself with the same discipline as any other piece of shared infrastructure code, reviewing additions carefully for whether they're introducing genuinely cross-cutting behavior versus service-specific logic that's crept in for convenience, and pushing anything domain-specific back into the owning service instead.
+
+**9. How does an API Gateway relate to the CORS configuration covered in Chapter 16 — does a gateway change where CORS should be configured?**
+Since the gateway is the single entry point browsers actually communicate with directly, CORS configuration (allowed origins, methods, headers) is naturally centralized at the gateway rather than needing to be independently configured on every backend service — backend services, no longer directly reached by browser-originated cross-origin requests, generally don't need their own CORS configuration at all once a gateway is in place and enforces this centrally on their behalf.
+
+*Follow-up: If a backend service is still occasionally called directly (bypassing the gateway) for some internal purpose, would it still need its own CORS configuration?* If that direct access is purely server-to-server (another backend service calling it internally, not a browser), CORS wouldn't apply at all, since CORS is specifically a browser-enforced mechanism (per Chapter 16) — CORS configuration on the backend service itself would only matter if there's a genuine scenario where a browser could call that service directly, bypassing the gateway, which is generally a configuration/network-topology situation worth avoiding for the same reasons noted regarding backend services trusting gateway-validated authentication.
+
+**10. What's the difference between a route's "predicate" and its "filter" in Spring Cloud Gateway?**
+A predicate determines *whether* a route applies to a given request (a matching condition, like a path pattern) — it's evaluated to decide if this route is the one handling the request at all. A filter defines *what happens* to a request (and/or its response) that has already matched a route — modifying headers, enforcing rate limits, applying a circuit breaker — applied only after the predicate has already determined the route is a match.
+
+*Follow-up: Could a route have a predicate but no filters at all, and if so, what would that route do?* Yes — a route can consist purely of a predicate and a target `uri` with no filters defined, in which case it simply forwards matching requests directly to the resolved backend service with no additional cross-cutting processing applied by the gateway at all, relying entirely on whatever other routes' shared/global filters (if configured) or the backend service itself to handle any additional concerns.
+
+**11. Why might a gateway filter add a custom header (like `X-Gateway-Source`) to requests before forwarding them to a backend service?**
+It gives the backend service a reliable way to distinguish requests that genuinely passed through the gateway from any that might have reached it directly (bypassing the gateway) — supporting the earlier point about backend services verifying requests actually came through the expected path, and can also carry useful contextual information (like an already-validated user identity, extracted from a JWT the gateway already checked) without the backend service needing to redo that work itself.
+
+*Follow-up: Why isn't a custom header alone, without any additional verification, a fully sufficient way to prevent bypassing the gateway?* A header value alone can be trivially forged by anyone who discovers what header name and value the gateway adds — without cryptographic signing or a shared secret that's genuinely difficult for an attacker to guess or obtain, an attacker calling the backend service directly could simply include the same header themselves, defeating the intended protection; genuine protection typically requires either network-level isolation (the backend service simply isn't reachable from outside the internal network at all) or a properly secured, hard-to-forge mechanism rather than a plain, guessable header.
+
+**12. How does the `CircuitBreaker` filter shown in this chapter's example relate to the deeper coverage of circuit breakers in Chapter 27?**
+This chapter shows the circuit breaker pattern applied specifically at the gateway level, wrapping calls the gateway makes to a backend service — if that service is failing or too slow, the circuit breaker can "trip" and redirect matching requests to a `fallbackUri` instead of continuing to send traffic to a struggling service. Chapter 27 covers the full underlying Resilience4j mechanics (how a circuit breaker actually decides to open/close, its states, and its configuration) in depth, of which this gateway-level filter is one specific, practical application.
+
+*Follow-up: Why might applying a circuit breaker at the gateway level be valuable in addition to (not instead of) applying one within the calling service's own code, as Chapter 27 will show?* A gateway-level circuit breaker protects the gateway itself (and, by extension, every client and every other route it serves) from being degraded by one struggling backend service, providing a fast, centralized fallback response to clients — while a circuit breaker within a specific calling service's own code (as Chapter 27 covers) protects that service's own internal logic and resource usage from being tied up waiting on or retrying calls to a failing dependency; the two operate at different levels and are complementary rather than redundant.
+
+**13. Why is it important that the gateway's own filters (like authentication) run *before* the request is forwarded to the backend service, rather than after?**
+The entire point of centralizing a cross-cutting concern like authentication at the gateway is to prevent invalid or unauthorized requests from ever reaching (and consuming resources on) the backend service at all — if the filter ran after forwarding, the backend service would already have processed the request by the time the gateway's check occurred, defeating the purpose of centralizing that protection and wasting backend resources on requests that should have been rejected immediately.
+
+*Follow-up: In the earlier custom authentication filter example, what does `exchange.getResponse().setComplete()` accomplish, and why is it necessary?*Ê It completes the response immediately at the gateway level (after setting the `401 Unauthorized` status) without ever calling `chain.filter(exchange)` to continue processing — this is what actually stops the request's journey through the rest of the filter chain and prevents it from ever being forwarded to the backend service, functioning analogously to returning `false` from `HandlerInterceptor.preHandle()` in the non-gateway filter chain covered back in Chapter 8.
+
+**14. If a system adds a new microservice, what needs to change at the API Gateway to make it reachable by external clients?**
+A new route needs to be added to the gateway's configuration, defining a predicate (typically a distinct path prefix) mapping to the new service's logical name via `lb://new-service-name` — once configured (and assuming the new service registers with the discovery mechanism from Chapter 24 as expected), external clients can reach it through the gateway using the newly defined path, with no changes needed to any existing routes or other services.
+
+*Follow-up: Does adding this new route require restarting or redeploying the API Gateway itself?* Depending on how routes are configured, this can sometimes be avoided — routes defined via a properties/YAML file typically do require a gateway restart or refresh (potentially via the same `@RefreshScope`/Config Server mechanism from Chapter 25 if the gateway's own routes are centrally managed) to pick up the change, while Spring Cloud Gateway also supports defining routes programmatically or dynamically through its `RouteLocator` API, which can allow routes to be added or changed without a full restart if that flexibility is specifically needed.
+
+**15. Summarize the overall role the API Gateway plays in the broader microservices architecture established across Chapters 23–26 so far.**
+Chapter 23 established why and how to split a system into independently deployable services; Chapter 24 solved how those services find each other; Chapter 25 solved how they share and centrally manage configuration; and this chapter solves how *external clients* interact with the resulting system as a single, coherent API despite it being made of many independently evolving services underneath — while also becoming the natural, centralized home for cross-cutting concerns (auth, rate limiting, CORS) that would otherwise need to be duplicated across every individual service.
+
+*Follow-up: What's the next category of problem this architecture still hasn't addressed, that Chapter 27 begins covering?* What happens when a call to one of these discovered, gateway-routed services actually fails, times out, or becomes slow — none of the infrastructure covered so far (discovery, config, gateway routing) provides any resilience against a downstream service being unhealthy or unreachable at the moment of an actual call, which is exactly the gap Chapter 27's circuit breakers, retries, and related patterns are introduced to close.

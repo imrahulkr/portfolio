@@ -1,0 +1,207 @@
+---
+title: "Building REST APIs with Spring Boot: @RestController, Mapping Annotations & ResponseEntity"
+description: "The annotations behind every Spring Boot REST endpoint you'll write — request mapping, path/query/body binding, and precise control over the HTTP response."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 6
+tags: ["Spring Boot", "REST", "Spring MVC"]
+---
+
+Part 1 built the foundation — this chapter is where that foundation starts producing something a client can actually call. We'll build a small `Order` API and use it to cover every mapping annotation you'll reach for daily.
+
+## `@RestController` vs `@Controller`
+
+```java
+@RestController   // = @Controller + @ResponseBody on every method
+@RequestMapping("/api/orders")
+class OrderController { }
+```
+
+`@Controller` is the base Spring MVC annotation for a class that handles requests; its methods, by default, return a *view name* to be resolved into an HTML template. `@RestController` is `@Controller` plus `@ResponseBody` applied to every method — meaning return values are written directly to the response body (serialized to JSON by Jackson, auto-configured per Chapter 4) instead of being resolved as a view. For REST APIs, you almost always want `@RestController`.
+
+## Mapping requests
+
+```java
+@RestController
+@RequestMapping("/api/orders")
+class OrderController {
+
+    private final OrderService orderService;
+
+    OrderController(OrderService orderService) {
+        this.orderService = orderService;
+    }
+
+    @GetMapping
+    List<OrderResponse> getAll() {
+        return orderService.findAll();
+    }
+
+    @GetMapping("/{id}")
+    OrderResponse getOne(@PathVariable Long id) {
+        return orderService.findById(id);
+    }
+
+    @GetMapping(params = "status")
+    List<OrderResponse> getByStatus(@RequestParam String status) {
+        return orderService.findByStatus(status);
+    }
+
+    @PostMapping
+    ResponseEntity<OrderResponse> create(@RequestBody CreateOrderRequest request) {
+        OrderResponse created = orderService.create(request);
+        return ResponseEntity
+            .created(URI.create("/api/orders/" + created.id()))
+            .body(created);
+    }
+
+    @PutMapping("/{id}")
+    OrderResponse update(@PathVariable Long id, @RequestBody UpdateOrderRequest request) {
+        return orderService.update(id, request);
+    }
+
+    @DeleteMapping("/{id}")
+    ResponseEntity<Void> delete(@PathVariable Long id) {
+        orderService.delete(id);
+        return ResponseEntity.noContent().build();
+    }
+}
+```
+
+`@GetMapping`, `@PostMapping`, `@PutMapping`, `@DeleteMapping`, and `@PatchMapping` are shorthand for `@RequestMapping(method = ...)`. `@RequestMapping` at the class level sets a shared path prefix for every method beneath it.
+
+## Binding request data
+
+| Annotation | Binds |
+|---|---|
+| `@PathVariable` | A segment of the URL path (`/orders/{id}`) |
+| `@RequestParam` | A query-string parameter (`?status=SHIPPED`) |
+| `@RequestBody` | The full request body, deserialized by Jackson into a Java object |
+| `@RequestHeader` | A specific HTTP header value |
+
+```java
+@GetMapping("/{id}/items")
+List<Item> getItems(
+    @PathVariable Long id,
+    @RequestParam(defaultValue = "0") int page,
+    @RequestParam(defaultValue = "20") int size,
+    @RequestHeader("X-Client-Version") String clientVersion
+) {
+    // ...
+}
+```
+
+## Requests and responses as records
+
+Using Java records for request/response DTOs keeps them immutable and removes boilerplate — a natural fit with Java 21:
+
+```java
+public record CreateOrderRequest(String customerName, List<Long> productIds) { }
+
+public record OrderResponse(Long id, String customerName, String status, BigDecimal total) { }
+```
+
+Jackson (auto-configured, Chapter 4) deserializes incoming JSON into `CreateOrderRequest` via its canonical constructor, and serializes `OrderResponse` back to JSON using its accessor methods — no manual mapping code required for straightforward DTOs.
+
+## Precise control with `ResponseEntity`
+
+Returning a plain object (like `OrderResponse` in `getAll()` above) always produces a `200 OK`. When you need explicit control over the status code, headers, or an empty body, wrap the return type in `ResponseEntity`:
+
+```java
+@PostMapping
+ResponseEntity<OrderResponse> create(@RequestBody CreateOrderRequest request) {
+    OrderResponse created = orderService.create(request);
+    return ResponseEntity
+        .created(URI.create("/api/orders/" + created.id()))   // 201 + Location header
+        .body(created);
+}
+```
+
+```
+Client                        OrderController                OrderService
+  │  POST /api/orders               │                              │
+  │─────────────────────────────────▶                              │
+  │                                  │  create(request)             │
+  │                                  │──────────────────────────────▶
+  │                                  │◀─────────────────────────────│
+  │  201 Created                    │  OrderResponse                │
+  │  Location: /api/orders/42       │                              │
+  │◀─────────────────────────────────                              │
+```
+
+This is the correct pattern for a `POST` that creates a resource: `201 Created` with a `Location` header pointing at the new resource, rather than a bare `200 OK`.
+
+## Best practices & gotchas
+
+- **Return DTOs, never entities, from controllers.** Returning a JPA entity directly from a `@RestController` couples your API contract to your database schema and risks accidentally serializing lazy-loaded associations (and, worse, sensitive fields). Map to a dedicated response record instead — this becomes even more important once Spring Data JPA is introduced in Part 3.
+- **Use the correct HTTP status code deliberately** — `201 Created` for successful creation, `204 No Content` for a successful action with nothing to return (like a delete), `200 OK` for a successful read/update. Interviewers and code reviewers both notice when every endpoint just returns `200`.
+- **Prefer constructor injection for controllers too**, same as any other Spring bean (Chapter 2) — a `@RestController` is just another bean managed by the `ApplicationContext`.
+- **Keep controllers thin.** A controller's job is translating HTTP concerns (paths, params, status codes) to and from your service layer — business logic belongs in `@Service` classes, not in the controller method body.
+- **Don't forget `@RequestMapping` at the class level for a shared prefix** — repeating `/api/orders` on every method is easy to get wrong when one endpoint's path silently diverges from the rest.
+
+## Quick reference
+
+| Annotation | Use |
+|---|---|
+| `@RestController` | Controller whose method return values are written directly as the response body |
+| `@RequestMapping` | Class- or method-level path/method mapping |
+| `@GetMapping` / `@PostMapping` / `@PutMapping` / `@DeleteMapping` / `@PatchMapping` | Shorthand for `@RequestMapping(method=...)` |
+| `@PathVariable` | Bind a URL path segment |
+| `@RequestParam` | Bind a query-string parameter |
+| `@RequestBody` | Deserialize the request body into an object |
+| `ResponseEntity<T>` | Full control over status code, headers, and body |
+
+## Wrapping up
+
+You now have a fully working REST controller and know exactly what each mapping annotation binds. What's still missing is what happens when a request is *invalid*, or when something goes wrong inside the service layer — right now, both would produce Spring's default, unhelpful error response. **Chapter 7** fixes that with Bean Validation and centralized exception handling.
+
+## Interview Questions
+
+**1. What's the difference between `@Controller` and `@RestController`?**
+`@Controller` is the base Spring MVC annotation; by default its method return values are treated as view names to be resolved into a rendered template. `@RestController` is a composed annotation equal to `@Controller` plus `@ResponseBody` applied to every method, meaning return values are serialized directly into the response body (typically as JSON) instead of being resolved as a view — the standard choice for REST APIs.
+
+**2. What does `@RequestMapping` at the class level do when combined with `@GetMapping` at the method level?**
+The class-level `@RequestMapping("/api/orders")` sets a shared path prefix for every handler method in the class. A method-level `@GetMapping("/{id}")` is then appended to that prefix, resulting in the full mapped path `/api/orders/{id}`.
+
+**3. What's the difference between `@PathVariable`, `@RequestParam`, and `@RequestBody`?**
+`@PathVariable` binds a value embedded in the URL path itself (e.g., the `42` in `/orders/42`). `@RequestParam` binds a query-string parameter (e.g., `?status=SHIPPED`). `@RequestBody` binds the entire request body, deserialized by Jackson into a Java object — typically used for `POST`/`PUT` payloads.
+
+**4. Why should controllers return DTOs rather than JPA entities directly?**
+Returning entities directly couples the public API contract to the internal database schema, so any schema change risks breaking API consumers. It also risks accidentally serializing lazy-loaded associations (potentially triggering extra queries, or throwing a `LazyInitializationException` outside a transaction) or exposing sensitive fields that were never meant to be public. A dedicated response record decouples the two concerns cleanly.
+
+**5. What does `ResponseEntity` give you that returning a plain object doesn't?**
+Explicit control over the HTTP status code, response headers, and body — including cases like returning `204 No Content` with no body at all, or `201 Created` with a `Location` header. Returning a plain object from a handler method always produces `200 OK` by default, with no way to customize the status or headers from the return value alone.
+
+**6. Why is `201 Created` with a `Location` header the correct response for a successful `POST` that creates a resource?**
+It follows REST/HTTP semantics precisely: `201` communicates that a new resource was created (distinct from `200`, which implies an existing resource was successfully retrieved or acted on), and the `Location` header gives the client the URI of the newly created resource so it can immediately fetch or reference it without needing to construct that URL itself.
+
+**7. How would you bind an optional query parameter with a default value?**
+```java
+@RequestParam(defaultValue = "0") int page
+```
+If the `page` query parameter is absent from the request, Spring binds `0` instead of throwing a "missing parameter" error — useful for pagination parameters that should have a sensible default.
+
+**8. What HTTP status code should a `DELETE` endpoint typically return, and why?**
+`204 No Content` is the conventional choice for a successful delete, since there's no meaningful resource representation to return — the resource has been removed. Some APIs alternatively return `200 OK` with a confirmation body, but `204` is the more precise, widely-used convention.
+
+**9. How does Spring know to convert a JSON request body into a Java object, and vice versa for the response?**
+Through Jackson's `ObjectMapper`, auto-configured by Spring Boot (via `JacksonAutoConfiguration`, covered in Chapter 4) as part of `spring-boot-starter-web`. `@RequestBody` triggers deserialization of the incoming JSON into the target type; `@ResponseBody` (implicit via `@RestController`) triggers serialization of the returned object back into JSON for the response.
+
+**10. What happens if a client sends a request body that doesn't match the shape of the `@RequestBody` target type?**
+Jackson throws an exception during deserialization (typically `HttpMessageNotReadableException`), which Spring MVC translates into a `400 Bad Request` response by default. Chapter 7 covers how to customize this into a more informative, structured error response via `@ControllerAdvice`.
+
+**11. Why use a Java record instead of a traditional class for request/response DTOs?**
+Records provide immutability, a concise canonical constructor, and automatically generated accessors, `equals()`, `hashCode()`, and `toString()` — exactly what a request/response DTO needs, with far less boilerplate than a traditional class with private fields, a constructor, and manually written getters.
+
+**12. Can a single method handle multiple HTTP methods on the same path? How?**
+Yes, using `@RequestMapping` directly with a `method` attribute listing multiple values (e.g., `method = {RequestMethod.GET, RequestMethod.HEAD}`), though in practice it's far more common and readable to define separate methods, each with its own specific shorthand annotation (`@GetMapping`, `@PostMapping`, etc.) mapped to the same path.
+
+**13. What's the difference between `@RequestParam` being required by default versus marked optional?**
+By default, `@RequestParam` is required — a request missing that parameter results in a `400 Bad Request`. Marking it `@RequestParam(required = false)` (or providing a `defaultValue`) makes it optional, in which case a missing parameter binds to `null` (or the given default) instead of failing the request.
+
+**14. How would you version a REST API built with Spring MVC — what are the common approaches?**
+Common approaches include URI versioning (`/api/v1/orders`, the most explicit and cache-friendly), a custom request header (`X-API-Version: 1`), or content negotiation via the `Accept` header's media type (`application/vnd.company.v1+json`). URI versioning is the most common in practice because it's simple, visible, and trivially routable, even though it technically mixes versioning into the resource identifier.
+
+**15. Why should business logic live in a `@Service` class rather than directly inside the `@RestController` method?**
+Keeping controllers thin — responsible only for translating HTTP request/response concerns — keeps business logic reusable (callable from multiple controllers, a scheduled job, or a messaging listener without duplicating it) and independently testable without needing to simulate an HTTP request at all. It also keeps the controller layer easy to scan for "what endpoints exist and what do they map to," rather than mixing routing with logic.

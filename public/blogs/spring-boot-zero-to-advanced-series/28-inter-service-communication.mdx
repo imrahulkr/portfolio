@@ -1,0 +1,238 @@
+---
+title: "Inter-Service Communication: WebClient, OpenFeign & gRPC"
+description: "Every prior chapter in Part 7 assumed services can call each other — this chapter covers the actual mechanics and the real choice between three genuinely different ways to make that call."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 28
+tags: ["Spring Boot", "Microservices", "WebClient", "OpenFeign", "gRPC"]
+---
+
+Chapters 24–27 assumed services call each other, without covering exactly how. This chapter fills that gap — and the choice between the three main options genuinely matters for how a codebase feels to work in day to day.
+
+## `WebClient`: reactive, non-blocking
+
+```java
+@Service
+class InventoryClient {
+
+    private final WebClient webClient;
+
+    InventoryClient(WebClient.Builder builder) {
+        this.webClient = builder.baseUrl("http://inventory-service").build();
+    }
+
+    Mono<InventoryResponse> checkStock(Long productId) {
+        return webClient.get()
+            .uri("/api/inventory/{id}", productId)
+            .retrieve()
+            .onStatus(HttpStatusCode::is4xxClientError, resp -> Mono.error(new ProductNotFoundException(productId)))
+            .bodyToMono(InventoryResponse.class);
+    }
+}
+```
+
+`WebClient` is Spring's non-blocking HTTP client, returning `Mono`/`Flux` (Project Reactor's reactive types, covered fully in Chapter 39) rather than a plain object. Calling `.block()` (as briefly shown in Chapter 27) converts it back to a synchronous call when needed, but used as intended — composed with `.flatMap()`, combined with other reactive calls — it lets a service handle many concurrent outbound calls without dedicating a thread to each one waiting on a response.
+
+## `RestClient`: synchronous, modern
+
+```java
+@Service
+class InventoryClient {
+
+    private final RestClient restClient;
+
+    InventoryClient(RestClient.Builder builder) {
+        this.restClient = builder.baseUrl("http://inventory-service").build();
+    }
+
+    InventoryResponse checkStock(Long productId) {
+        return restClient.get()
+            .uri("/api/inventory/{id}", productId)
+            .retrieve()
+            .body(InventoryResponse.class);
+    }
+}
+```
+
+`RestClient` (introduced in Spring 6.1/Boot 3.2) is the modern, synchronous alternative — a fluent API in the same style as `WebClient`, but blocking, and the currently recommended replacement for the older `RestTemplate` (now in maintenance mode, not deprecated but no longer actively enhanced). For a traditional Spring MVC application not otherwise using reactive types, `RestClient` is generally the simplest, most idiomatic choice.
+
+## OpenFeign: declarative, interface-based
+
+```xml
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-openfeign</artifactId>
+</dependency>
+```
+
+```java
+@FeignClient(name = "inventory-service")
+public interface InventoryClient {
+
+    @GetMapping("/api/inventory/{id}")
+    InventoryResponse checkStock(@PathVariable Long id);
+}
+```
+
+```java
+@Service
+class OrderService {
+
+    private final InventoryClient inventoryClient;   // just an interface — Spring generates the implementation
+
+    OrderResponse create(CreateOrderRequest request) {
+        InventoryResponse stock = inventoryClient.checkStock(request.productId());
+        // ...
+    }
+}
+```
+
+OpenFeign takes a fundamentally different approach: you declare an interface describing the remote call using familiar Spring MVC annotations (`@GetMapping`, `@PathVariable`), and Feign generates a working implementation at startup — no manual URI-building, no explicit client instantiation. `@FeignClient(name = "inventory-service")` integrates directly with service discovery (Chapter 24), resolving the target exactly like `@LoadBalanced`/`lb://` did elsewhere in this Part. This reads almost exactly like calling a local method, which is precisely Feign's appeal — and precisely the thing to stay mindful of, since it's still a real network call underneath (Chapter 27's resilience patterns apply to Feign clients identically).
+
+```java
+@FeignClient(name = "inventory-service", fallback = InventoryClientFallback.class)
+public interface InventoryClient {
+    @GetMapping("/api/inventory/{id}")
+    InventoryResponse checkStock(@PathVariable Long id);
+}
+
+@Component
+class InventoryClientFallback implements InventoryClient {
+    @Override
+    public InventoryResponse checkStock(Long id) {
+        return InventoryResponse.unavailable();
+    }
+}
+```
+
+Feign integrates natively with Resilience4j's circuit breaker via this `fallback` attribute, applying the same graceful-degradation principle from Chapter 27 with even less boilerplate than the `@CircuitBreaker`-annotated method shown there.
+
+## gRPC: a different protocol entirely
+
+Everything above is built on HTTP/JSON — human-readable, universally supported, easy to debug with `curl`. gRPC takes a different approach: it uses HTTP/2 and Protocol Buffers (a compact binary format) instead of JSON, defined via a strongly-typed `.proto` schema shared between client and server.
+
+```protobuf
+// inventory.proto
+service InventoryService {
+    rpc CheckStock(StockRequest) returns (StockResponse);
+}
+
+message StockRequest {
+    int64 product_id = 1;
+}
+
+message StockResponse {
+    int32 quantity_available = 1;
+}
+```
+
+```
+                  HTTP/JSON (WebClient/RestClient/Feign)      gRPC
+Payload format:   Human-readable JSON                        Compact binary (Protocol Buffers)
+Contract:         Implicit (DTOs, hopefully kept in sync)     Explicit, code-generated from .proto
+Performance:       Good                                        Better — smaller payloads, HTTP/2 multiplexing
+Debuggability:      Trivial — curl, Postman, browser devtools    Requires gRPC-specific tooling
+Browser support:    Native                                       Limited, needs a proxy (grpc-web)
+```
+
+gRPC's performance and strongly-typed contract benefits are real, particularly for high-volume internal service-to-service traffic — but the cost is losing the "just curl it" debuggability and universal tooling support that makes HTTP/JSON the default choice for the vast majority of Spring Boot microservices. It's a deliberate, narrower trade worth making specifically where the performance gain matters and the services genuinely control both ends of the contract, not a default replacement for REST.
+
+## Best practices & gotchas
+
+- **Prefer `RestClient` over the older `RestTemplate` for new, synchronous code** — `RestTemplate` still works and isn't deprecated, but `RestClient` is the actively evolving, currently recommended API in the same synchronous style.
+- **Reach for `WebClient` specifically when non-blocking behavior matters** — high-concurrency scenarios, or composing multiple dependent calls reactively — not by default for every service, since it introduces genuinely different (reactive) programming patterns covered fully in Chapter 39.
+- **OpenFeign's declarative style trades explicitness for convenience** — it's easy to forget a Feign-annotated interface call is a real network call with real failure modes, exactly the kind of call that needs the resilience patterns from Chapter 27 wrapped around it, not treated like a guaranteed-to-succeed local method.
+- **Every inter-service HTTP call, regardless of which client makes it, needs a sensible timeout configured explicitly.** None of these clients default to a short, safe timeout — an unconfigured client can hang far longer than acceptable, undermining the Time Limiter protections from Chapter 27 if they're not applied consistently everywhere calls are made.
+- **Don't reach for gRPC by default.** It's the right tool for a specific, justified performance need between services you fully control — not a general-purpose replacement for the REST/JSON approach the rest of this series has built on.
+
+## Quick reference
+
+| Client | Style | Best for |
+|---|---|---|
+| `RestClient` | Synchronous, fluent | New synchronous code — the modern default |
+| `RestTemplate` | Synchronous, older API | Legacy code — not deprecated, but not actively evolving |
+| `WebClient` | Reactive, non-blocking | High-concurrency or reactive pipelines (Chapter 39) |
+| OpenFeign | Declarative, interface-based | Reducing boilerplate for many service-to-service calls |
+| gRPC | Binary, HTTP/2, strongly-typed | High-performance, internally-controlled service pairs |
+
+## Wrapping up
+
+Whichever client makes the call, it's still a network call — everything from Chapter 27 about circuit breakers, retries, and timeouts applies regardless of whether the code reads like a fluent builder or a plain interface method. **Chapter 29** moves away from direct, synchronous request/response entirely, covering event-driven communication with Kafka.
+
+## Interview Questions
+
+**1. What's the fundamental difference between `WebClient` and `RestClient`?**
+`WebClient` is Spring's non-blocking, reactive HTTP client, returning `Mono`/`Flux` types that represent asynchronous, composable results. `RestClient` is a synchronous, blocking client with a similarly fluent API, introduced as the modern replacement for `RestTemplate` — the choice between them is really a choice between adopting reactive programming (Chapter 39) or staying with a traditional synchronous programming model.
+
+*Follow-up: If a service is built entirely with traditional Spring MVC (not WebFlux) and has no other reactive code anywhere, is there a strong reason to still use `WebClient` for an outbound call instead of `RestClient`?* Generally no — introducing `WebClient` into an otherwise fully synchronous application means either calling `.block()` (which defeats its non-blocking benefit and adds unnecessary complexity for no gain) or introducing a small island of reactive code that doesn't fit naturally with the rest of the synchronous codebase; `RestClient` provides the same fluent ergonomics without that mismatch, making it the more natural choice for a fully synchronous application.
+
+**2. What is `RestTemplate`'s current status, and what should be used instead for new code?**
+`RestTemplate` is in maintenance mode — it's not deprecated and continues to work and be supported, but it's no longer being actively enhanced with new features. `RestClient` (introduced in Spring 6.1/Boot 3.2) is the currently recommended, actively evolving synchronous alternative for new code, offering a similar fluent API style.
+
+*Follow-up: Does "maintenance mode" mean existing code using `RestTemplate` needs to be migrated immediately?* No — maintenance mode means it continues to function and receive necessary fixes, so existing, working code using `RestTemplate` doesn't need urgent migration; the recommendation to prefer `RestClient` primarily applies to new code being written, with migration of existing `RestTemplate` usage being a reasonable, non-urgent improvement to make opportunistically rather than a pressing requirement.
+
+**3. What does `@FeignClient(name = "inventory-service")` do, and how does it relate to service discovery from Chapter 24?**
+It declares an interface as a Feign client targeting the service registered under the logical name `inventory-service`, and Spring generates a working implementation of that interface at startup. The `name` attribute integrates directly with the service discovery mechanism (Eureka, from Chapter 24), resolving that logical name to an actual, currently healthy instance's address at call time — exactly the same underlying resolution mechanism as `lb://inventory-service` or a `@LoadBalanced WebClient`.
+
+*Follow-up: Does a Feign client method call actually make an HTTP request, or does Spring somehow avoid the network call since it "looks like" a local interface method?* It absolutely makes a real HTTP request — the declarative, interface-based style is purely a code-authoring convenience; underneath, Spring generates a proxy implementation of the interface that constructs and sends an actual HTTP request based on the method's annotations (`@GetMapping`, `@PathVariable`, etc.), with all the same real network behavior, latency, and failure modes as an explicitly written `WebClient`/`RestClient` call.
+
+**4. Why is it specifically noted as important to remember that a Feign-annotated interface call is "still a real network call," given how it's used?**
+Because Feign's declarative style makes a remote call look syntactically identical to calling a local method (`inventoryClient.checkStock(id)` reads exactly like any other method call), it's easy for a developer — especially one newer to the codebase — to mentally treat it like a reliable, always-succeeding local call and forget to apply the resilience patterns (Chapter 27) or handle the failure modes that any real network call genuinely has, unlike an actual local method invocation.
+
+*Follow-up: How does Feign's built-in `fallback` attribute help address this specific risk?* By making circuit-breaker-style graceful degradation a first-class, easily-declared part of the `@FeignClient` definition itself (`fallback = InventoryClientFallback.class`), it nudges developers toward explicitly considering and handling the failure case as part of defining the client in the first place, rather than requiring them to separately remember to wrap every individual call site with additional resilience annotations after the fact.
+
+**5. What are the two most significant technical differences between gRPC and a typical HTTP/JSON-based API?**
+gRPC uses Protocol Buffers — a compact, binary serialization format — instead of human-readable JSON, resulting in smaller payloads and generally better performance; and it's built on HTTP/2 (supporting multiplexed, bidirectional streaming over a single connection) rather than the more common HTTP/1.1-style request/response pattern most REST APIs use, enabling communication patterns (like server-streaming or bidirectional streaming) that are considerably more awkward to achieve with typical HTTP/JSON APIs.
+
+*Follow-up: Why does gRPC's use of a binary format specifically hurt debuggability compared to JSON?* A JSON payload can be read directly by a human, inspected in a browser's network tab, or passed through `curl`/Postman with no special tooling — a binary Protocol Buffers payload isn't human-readable at all without decoding it against its `.proto` schema using gRPC-specific tooling, meaning quick, ad hoc inspection or debugging of a request/response — trivial with JSON — requires dedicated tooling support that most general-purpose HTTP debugging tools don't provide out of the box.
+
+**6. Why does a `.proto` file provide a "stronger contract" between client and server than typical REST/JSON DTOs?**
+A `.proto` file is an explicit, formally defined schema that both client and server code are generated from directly, guaranteeing structural agreement between what one side sends and the other expects — a REST/JSON API's contract, by contrast, is typically implicit, relying on separately maintained DTOs on each side (and often API documentation) staying in sync through discipline and convention rather than a single, generated, shared source of truth enforcing it.
+
+*Follow-up: What's a realistic failure mode in a REST/JSON API caused by this weaker, implicit contract that gRPC's approach would prevent by construction?* A field being renamed or removed on the server's DTO without the corresponding client-side DTO being updated to match — since nothing enforces the two staying in sync automatically, this can silently produce a runtime deserialization mismatch (a missing field defaulting to null, or an unexpected extra field being ignored) that isn't caught until it actually causes an observed bug, whereas regenerating both sides from an updated shared `.proto` file would surface such an incompatible change at build/codegen time instead.
+
+**7. Given gRPC's performance and contract advantages, why does this chapter recommend against using it as a general-purpose default?**
+The performance and strong-contract benefits come at a real cost — losing the near-universal tooling support, human-readability, and "just curl it" debuggability that make HTTP/JSON APIs easy to work with for most developers and most tooling (browsers, API testing tools, general familiarity) — and gRPC has limited native browser support, generally requiring a proxy layer (grpc-web) for any browser-based client. For the majority of typical microservices traffic, these costs outweigh the performance gains, which matter most specifically in high-volume, latency-sensitive, fully internally-controlled scenarios.
+
+*Follow-up: What's a realistic scenario within a microservices system where adopting gRPC specifically for one pair of services, while keeping REST/JSON everywhere else, would be a reasonable, targeted choice?* A very high-throughput, latency-sensitive internal communication path — for example, a real-time bidding or recommendation service being called extremely frequently by another internal service, where the payload size and serialization/deserialization overhead of JSON becomes a measurable performance bottleneck — while both services are fully owned by the same team/organization (removing the external-consumer debuggability concern) would be a reasonable, targeted case for gRPC, without needing to convert every other, less performance-critical service pair in the system to match.
+
+**8. What's the risk of not configuring an explicit timeout on an inter-service HTTP client?**
+Without an explicit timeout, a client's default behavior (which varies by client and configuration, but can effectively mean "wait indefinitely" or use an unexpectedly long default) can leave a calling thread blocked waiting on a slow or hung dependency far longer than acceptable — directly undermining the fast-failure and resource-protection goals of the Time Limiter and other resilience patterns from Chapter 27, since those patterns depend on failures actually being detected and reacted to promptly rather than the underlying client itself hanging indefinitely.
+
+*Follow-up: Should the same timeout value be used for every inter-service call across an entire system, or does it vary?* It generally should vary based on the specific dependency and operation being called — a fast, simple internal lookup might reasonably use a short timeout (a few hundred milliseconds), while a call known to involve heavier processing on the other end might justify a longer one; setting a single, uniform timeout across every call in a system risks being too aggressive for legitimately slower operations (causing unnecessary failures) or too lenient for genuinely fast ones (delaying failure detection longer than necessary).
+
+**9. Why might a service choose `WebClient` specifically when it needs to make several dependent, chained calls to other services for a single incoming request?**
+`WebClient`'s reactive composition operators (`.flatMap()`, `.zip()`, and others, covered fully in Chapter 39) allow multiple dependent or independent outbound calls to be chained and combined without each one blocking a dedicated thread while waiting — for a request that needs to call `inventory-service`, then based on that result call `pricing-service`, a reactive pipeline can express and execute this chain efficiently without tying up threads for the full duration of each sequential call.
+
+*Follow-up: Could the same multi-call chaining be achieved with `RestClient` or Feign instead, and what would the trade-off be?* Yes, functionally — the same sequence of calls could be made synchronously and sequentially with `RestClient` or Feign, simply calling one after another and blocking on each in turn; the trade-off is that the calling thread remains blocked (occupied, unable to do other work) for the entire cumulative duration of all the sequential calls combined, which is less resource-efficient under high concurrency than a non-blocking reactive chain, though it's simpler to write, read, and debug for teams not otherwise using reactive programming.
+
+**10. How does OpenFeign reduce boilerplate compared to manually writing `WebClient` or `RestClient` calls for many different endpoints?**
+Instead of writing out the URI construction, HTTP method selection, and response deserialization logic explicitly for every single endpoint being called (as shown in the `WebClient`/`RestClient` examples), Feign lets you declare the same information once, declaratively, as annotations on an interface method — Spring generates the actual implementation automatically, meaning adding a new endpoint to call is often just adding one new interface method rather than writing a full method body each time.
+
+*Follow-up: What's a downside of this reduced boilerplate, in terms of how explicit the actual HTTP interaction is to a developer reading the code?* The actual mechanics of the HTTP call (exactly how the URI is built, how errors are handled, what the underlying request/response cycle looks like) are hidden behind the interface declaration and Feign's generated implementation — a developer reading just the interface method signature has to trust that Feign is doing the right thing underneath, which is less immediately transparent than an explicitly written `WebClient`/`RestClient` call where every step of the HTTP interaction is visible directly in the code.
+
+**11. Why does this chapter emphasize that "every inter-service call is still a network call," regardless of which of these three client styles is used to make it?**
+Because it's a recurring theme across this entire chapter (and connects directly back to Chapter 27): the choice of client (`WebClient`, `RestClient`, or Feign) only affects the *programming style and ergonomics* of making the call — it doesn't change the underlying reality that the call crosses a network boundary and can fail, be slow, or behave unpredictably in ways a local method call never would, meaning the resilience patterns from Chapter 27 need to be applied consistently regardless of which client's syntax happens to be used for any particular call.
+
+*Follow-up: Does Resilience4j's `@CircuitBreaker`/`@Retry` annotation approach from Chapter 27 work identically regardless of whether the underlying call uses `WebClient`, `RestClient`, or Feign?* Largely yes for `RestClient`/`WebClient`-based calls wrapped in an annotated service method (as shown in Chapter 27's examples) — the annotations wrap the method itself, independent of what HTTP client the method body happens to use internally. Feign has its own, slightly more integrated mechanism (the `fallback` attribute shown in this chapter) that achieves a similar effect somewhat more natively as part of the `@FeignClient` declaration itself, rather than requiring a separately annotated wrapping method.
+
+**12. What's a scenario where using `.block()` on a `WebClient` call, as briefly shown earlier, might be a reasonable, deliberate choice rather than a mistake?**
+Within an otherwise fully synchronous, traditional Spring MVC application (not using WebFlux/reactive programming anywhere else), if a specific library or use case genuinely requires `WebClient` (for example, a specific client library only offers a `WebClient`-based implementation), calling `.block()` to convert its result back into a plain, synchronous value that fits naturally with the rest of the synchronous codebase can be a reasonable, pragmatic choice — as long as it's understood that this specific call site loses `WebClient`'s non-blocking benefit and behaves, for practical purposes, just like a synchronous call.
+
+*Follow-up: Why would calling `.block()` inside a method that's itself running on a reactive, non-blocking WebFlux request-handling thread be a much more serious problem than doing so in a traditional Spring MVC application?* In a reactive WebFlux application, request-handling threads are a small, limited pool specifically designed around never being blocked, since the whole reactive model's efficiency depends on threads being freed to handle other work while waiting on I/O (this is covered in depth in Chapter 39) — calling `.block()` on one of those threads defeats that entire model for the duration of the block, and doing so repeatedly under load can exhaust the small reactive thread pool far more severely than blocking would in a traditional MVC application, which already has a much larger, dedicated thread-per-request pool designed to tolerate blocking calls.
+
+**13. If a team is building two internal services that will only ever talk to each other, both fully owned by the same team, and performance under high load is a known, specific requirement — what communication approach from this chapter would be worth seriously evaluating, and why?**
+gRPC would be worth seriously evaluating specifically because this scenario matches the conditions where its trade-offs favor it: both ends are internally controlled (removing the external-consumer/browser-support concern), a specific, known performance requirement exists (where gRPC's binary format and HTTP/2 multiplexing provide genuine, measurable benefit), and the debuggability cost is more tolerable when it's an internal, well-understood pair of services rather than a widely-consumed public or partner-facing API.
+
+*Follow-up: What would change about this recommendation if one of the two services needed to also be called directly by a browser-based frontend application?* This would significantly weaken the case for gRPC for that particular service's externally-facing API, since gRPC's limited native browser support would require an additional grpc-web proxy layer specifically to support that browser client — at that point, a more balanced approach might use gRPC only for the internal, service-to-service portion of the communication while exposing a conventional REST/JSON API (via the gateway pattern from Chapter 26) for the browser-facing traffic, rather than forcing gRPC end-to-end through an added proxy layer purely to accommodate the browser client.
+
+**14. Why might a team migrating from `RestTemplate` to `RestClient` find the migration relatively straightforward compared to migrating to `WebClient` instead?**
+`RestTemplate` and `RestClient` are both synchronous APIs sharing a similar conceptual model (a request is made and a plain, directly usable result is returned), differing mainly in API style/fluency rather than programming paradigm — migrating to `WebClient` instead would mean adopting a fundamentally different, reactive programming model (`Mono`/`Flux` types, non-blocking composition) throughout the calling code, a much larger conceptual shift than simply adapting to a different but still synchronous fluent API's method names and builder style.
+
+*Follow-up: Is there ever a reason to migrate specifically to `WebClient`, given that `RestClient` is now the recommended synchronous default?* Yes — specifically if the application actually needs (or would meaningfully benefit from) non-blocking behavior, such as high-concurrency scenarios where thread-per-blocking-call resource usage has become a genuine, measured bottleneck, or if the broader application is already built on Spring WebFlux (Chapter 39) and reactive types are already the natural fit throughout the rest of the codebase — absent one of those specific reasons, `RestClient` remains the more natural, lower-friction choice for code that doesn't otherwise need reactive programming's benefits.
+
+**15. Summarize the decision process for choosing between `RestClient`, `WebClient`, OpenFeign, and gRPC for a new inter-service call.**
+Start by asking whether the call genuinely needs non-blocking, reactive behavior (high concurrency, composing multiple chained calls efficiently, or an already-reactive codebase) — if so, `WebClient`; if not, decide between `RestClient` (explicit, fluent, full control over each call) and OpenFeign (declarative, less boilerplate across many similar calls, tighter integration with service discovery and circuit-breaker fallbacks) based on how many such calls exist and how much the team values explicitness versus reduced repetition. Reach for gRPC only when there's a specific, justified performance requirement between two fully internally-controlled services, accepting the real trade-off in debuggability and tooling universality that comes with it.
+
+*Follow-up: Regardless of which option is chosen, what's the one non-negotiable practice this chapter insists on applying to every single choice?* Explicitly configuring a sensible timeout, and wrapping the call with the appropriate resilience patterns from Chapter 27 (at minimum a Time Limiter, and typically a Circuit Breaker) — because every one of these four options is still, underneath its particular programming style, a real network call subject to the same real-world failure modes, and none of them provide safe, production-ready behavior by default without that resilience layered on deliberately.

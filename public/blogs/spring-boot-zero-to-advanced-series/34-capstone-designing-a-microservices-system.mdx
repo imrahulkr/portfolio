@@ -1,0 +1,219 @@
+---
+title: "Capstone: Designing a Microservices System End to End"
+description: "Every chapter in Part 7 solved one specific problem in isolation. This chapter puts them all together — designing one coherent e-commerce order system, and showing exactly which chapter's pattern solves which piece."
+date: "2026-09-14"
+readTime: "14 min read"
+series: "spring-boot"
+part: 34
+tags: ["Spring Boot", "Microservices", "System Design", "Architecture"]
+---
+
+Eleven chapters, eleven individual problems solved. This capstone doesn't introduce anything new — it's a single, coherent walkthrough of designing a small e-commerce order system, showing exactly where each pattern from Chapters 23–33 fits and why.
+
+## The scenario
+
+A customer places an order through a web/mobile app. The system needs to: authenticate the customer, check and reserve inventory, charge payment, send a confirmation, and remain observable and secure throughout — all while the underlying services are independently deployable and owned by different teams.
+
+## Step 1: deciding the service boundaries (Chapter 23)
+
+```
+order-service        — owns orders, their lifecycle and status
+inventory-service     — owns product stock levels
+payment-service       — owns payment processing and transaction records
+notification-service  — owns sending emails/SMS
+```
+
+Each is a distinct bounded context with its own database — no shared tables between them. This is deliberately a *small* number of coarse-grained services, not twelve microscopic ones; per Chapter 23, boundaries should follow genuine business capabilities, and a small system doesn't benefit from splitting further than its actual complexity justifies.
+
+## Step 2: the request's entry point (Chapters 15, 26)
+
+```
+Mobile App ──HTTPS──▶ API Gateway ──▶ order-service
+```
+
+The gateway is the single entry point (Chapter 26), terminating TLS and validating the customer's JWT (Chapter 15) once, centrally — individual services don't each re-implement login or token validation from scratch. The gateway routes `/api/orders/**` to `order-service` via `lb://order-service`, resolved through service discovery.
+
+## Step 3: services finding each other (Chapter 24)
+
+```
+                 ┌───────────────┐
+                 │  Eureka Server  │
+                 └───────┬───────┘
+      ┌──────────────────┼──────────────────┬─────────────────┐
+      ▼                  ▼                  ▼                  ▼
+order-service    inventory-service   payment-service   notification-service
+```
+
+Every service registers with Eureka on startup. `order-service` never hardcodes `inventory-service`'s address — it asks the registry, exactly as Chapter 24 established, which is what lets every service scale independently without any other service's configuration needing to change.
+
+## Step 4: consistent configuration (Chapter 25)
+
+```
+config-repo/
+├── application.yml           — shared: logging format, common timeouts
+├── order-service.yml
+├── inventory-service.yml
+├── payment-service.yml
+└── notification-service.yml
+```
+
+A shared payment-gateway timeout, a common log level policy, and other cross-cutting values live in one place — rotating a shared value once, instead of the four-separate-files problem Chapter 25 opened with.
+
+## Step 5: placing the order (Chapters 27, 28, 32)
+
+```
+order-service.placeOrder(request)
+        │
+        ├─▶ [1] create Order (status: PENDING) — local transaction, order-service's own DB
+        │
+        ├─▶ [2] call inventory-service.reserveStock()   (Chapter 28: Feign client,
+        │        wrapped in @CircuitBreaker + @Retry      Chapter 27: resilience)
+        │
+        ├─▶ [3] call payment-service.charge()             (same pattern)
+        │
+        └─▶ [4] mark Order CONFIRMED, or trigger saga
+                 compensation if [2] or [3] failed          (Chapter 32)
+```
+
+This whole sequence is a **saga**, orchestrated (Chapter 32) directly within `order-service` since the flow has meaningful branching logic worth keeping in one readable place. Each downstream call is wrapped in Resilience4j's circuit breaker and retry (Chapter 27) via the Feign clients from Chapter 28 — a transient network blip retries automatically; a sustained `inventory-service` outage trips the circuit and triggers the saga's compensation path (restoring anything already reserved, marking the order CANCELLED) rather than hanging indefinitely.
+
+```java
+@FeignClient(name = "inventory-service", fallback = InventoryClientFallback.class)
+public interface InventoryClient {
+    @PostMapping("/api/inventory/reserve")
+    ReservationResponse reserveStock(@RequestBody ReserveStockRequest request);
+
+    @PostMapping("/api/inventory/release")
+    void releaseStock(@RequestBody ReleaseStockRequest request);   // the compensating action
+}
+```
+
+## Step 6: confirming the order asynchronously (Chapter 29)
+
+Rather than `order-service` synchronously calling `notification-service` (which would make the customer's checkout wait on an email provider — the exact motivating example from Chapter 21, now revisited at the system level), it publishes an event instead:
+
+```java
+kafkaTemplate.send("order-confirmed", new OrderConfirmedEvent(order.getId(), order.getCustomerEmail()));
+```
+
+```java
+@KafkaListener(topics = "order-confirmed", groupId = "notification-service")
+void handleOrderConfirmed(OrderConfirmedEvent event) {
+    if (alreadyProcessed(event.eventId())) return;   // idempotency — Chapter 29
+    emailService.sendConfirmation(event.customerEmail());
+}
+```
+
+This is a deliberate choice, not a default: order confirmation genuinely doesn't need `order-service` to wait for an answer, and other future consumers (an analytics pipeline, a loyalty-points service) can subscribe to the same event later with zero changes to `order-service` — exactly the decoupling benefit Chapter 29 introduced.
+
+## Step 7: securing the internal calls (Chapter 33)
+
+```
+order-service ──(propagates customer's JWT)──▶ inventory-service, payment-service
+inventory-service's scheduled restock job ──(OAuth2 Client Credentials)──▶ notification-service
+```
+
+The customer's JWT, already validated once at the gateway, is forwarded to `inventory-service` and `payment-service` so their own authorization decisions (a payment limit tied to the specific customer, for instance) have the correct user context. `inventory-service`'s unrelated scheduled low-stock-alert job (Chapter 21) has no user to propagate, so it authenticates to `notification-service` using its own service identity via Client Credentials, scoped narrowly to `notification:send`.
+
+## Step 8: seeing the whole thing (Chapter 31, and Chapters 19/22)
+
+```
+Trace: 7f3a91
+├─ Gateway routing                        (8ms)
+├─ order-service: placeOrder              (210ms)
+│  ├─ → inventory-service: reserveStock   (95ms)
+│  └─ → payment-service: charge           (88ms)
+└─ notification-service: handleOrderConfirmed  (async, 40ms — separate from the trace above,
+                                                 linked via propagated trace context in the
+                                                 Kafka message headers)
+```
+
+One trace ID ties the entire journey together, spanning the synchronous saga steps and the asynchronous notification hop alike (Chapter 31's Kafka trace propagation). Every service's logs are correlated by that same ID (Chapter 22), and Micrometer metrics (Chapter 19) expose the circuit breakers' state, request latency per service, and Kafka consumer lag — the operational visibility that makes this whole system debuggable rather than a black box.
+
+## What this system deliberately does *not* do
+
+- It doesn't split further than four services — `order-service` internally handles order-status logic that a smaller system wouldn't benefit from extracting into its own service (Chapter 23's "don't split without a genuine driver").
+- It doesn't put business logic in the gateway — routing and JWT validation only (Chapter 26's warning against a "second monolith").
+- It doesn't use Kafka for the payment call — that genuinely needs a synchronous answer before checkout can proceed (Chapter 29's distinction between events and calls needing an immediate response).
+- It doesn't skip resilience patterns on "internal, probably-fine" calls — every inter-service call is wrapped, because Chapter 27's whole premise is that network calls fail in ways local calls don't, regardless of how reliable a dependency has been so far.
+
+## Wrapping up
+
+Every pattern in Part 7 exists to solve a problem created by exactly one decision: splitting a system into independently deployable services. This capstone is what that decision looks like held together as one working, coherent, secured, and observable system — not eleven disconnected tools, but one architecture where each piece has a specific, necessary job. This closes Part 7. **Part 8** shifts to deployment and advanced runtime topics, starting with **Chapter 35**: Dockerizing and deploying a Spring Boot application.
+
+## Interview Questions
+
+**1. Why does this capstone design use only four services rather than splitting further — say, separating order-status tracking into its own service?**
+Per Chapter 23's decomposition guidance, service boundaries should follow genuine, present business-capability and team-ownership drivers, not the theoretical possibility of further splitting — order-status logic is a small, tightly related piece of `order-service`'s own responsibility with no independent scaling or team-ownership need justifying a separate service, and splitting it further would add operational overhead (a fifth service to deploy, monitor, and secure) without a corresponding, concrete benefit.
+
+*Follow-up: What concrete signal would justify eventually splitting order-status tracking into its own service later?* If order-status tracking developed independent scaling needs (say, a very high-volume, latency-sensitive status-lookup API needed by many external partners, distinct from order *creation* traffic), or if a separate team took ownership of status-tracking-related features requiring independent deployment cadence — either would be the kind of concrete, present driver Chapter 23 specifies as the actual bar for justifying a split, rather than splitting preemptively based on theoretical future need.
+
+**2. Why is the payment call in this design implemented as a direct, synchronous call (via Feign, wrapped in Resilience4j) rather than as a Kafka event?**
+Checkout genuinely cannot proceed until the system knows whether the payment succeeded or failed — the customer is waiting for an immediate answer, which is exactly the scenario Chapter 29 identified as unsuited to a "fire and eventually get processed" event-driven model; a synchronous request/response call (Chapter 28), protected by circuit breakers and retries (Chapter 27), is the correct tool specifically because an immediate answer is a hard requirement here, unlike the notification step.
+
+*Follow-up: Why is the notification step, by contrast, implemented as an event rather than a direct call?* Sending a confirmation email has no such immediate-answer requirement — the customer's checkout experience doesn't need to wait for `notification-service` to actually finish sending an email before completing, and other future consumers might reasonably want to react to the same "order confirmed" fact independently; this is precisely the profile Chapter 29 identified as well-suited to event-driven, decoupled communication rather than a direct, blocking call.
+
+**3. In Step 5's saga, why is orchestration chosen (within `order-service`) rather than a choreographed, event-based approach across all four services?**
+The order-placement flow has genuine branching logic — success and multiple distinct failure/compensation paths depending on exactly which step fails — that Chapter 32 specifically identified as a case where orchestration's centralized, readable visibility into the entire flow (including its failure handling) outweighs the additional decoupling choreography would otherwise provide; a developer debugging or reviewing this critical checkout flow can read `order-service`'s orchestration logic in one place rather than reconstructing it from several services' independent event handlers.
+
+*Follow-up: Does choosing orchestration for this specific saga prevent the rest of the system from also using choreography elsewhere, as it does for order confirmation?* No — as established in Chapter 32, a single system can reasonably mix both approaches based on each specific flow's actual complexity; this design does exactly that, using orchestration for the more complex, branching checkout saga while using simple, choreographed event publishing (via Kafka) for the comparatively straightforward "notify on order confirmed" flow, matching each coordination style to where it genuinely fits best rather than standardizing on one throughout the whole system.
+
+**4. Why does `inventory-service`'s scheduled restock job use OAuth2 Client Credentials rather than propagating a customer's JWT, as the order-placement flow does?**
+A scheduled job (Chapter 21) runs on its own independent timeline, entirely disconnected from any specific customer's request or session — there simply is no customer JWT available in that context to propagate, since no customer is actively involved in triggering a scheduled, automated process at all; Client Credentials (Chapter 33) is specifically the mechanism for exactly this scenario, establishing the calling service's own identity when no user context exists.
+
+*Follow-up: What specific, narrow scope would be appropriate for this job's Client Credentials token, following the least-privilege principle from Chapter 33?* A scope limited specifically to whatever `notification-service` capability the restock alert actually needs — something like `notification:send` (or an even more specific `notification:send-internal-alert` if the system distinguishes between customer-facing and internal-alert notification types) — deliberately not a broad, all-capabilities scope, so that if this specific job's credentials were ever compromised, the resulting access would be limited strictly to triggering notifications, not to any other capability `notification-service` might expose.
+
+**5. How does the single trace ID shown in Step 8 manage to span both the synchronous saga steps and the asynchronous Kafka-based notification step?**
+Per Chapter 31's coverage of trace propagation, Micrometer Tracing's HTTP client instrumentation automatically propagates trace context via headers across the synchronous Feign calls to `inventory-service` and `payment-service`, and its Kafka instrumentation separately propagates the same trace context by injecting it into the Kafka message's own headers when `order-service` publishes the `order-confirmed` event — `notification-service`'s listener then extracts that propagated context when consuming the message, allowing its own span to correctly join the same overall trace despite running asynchronously, in a separate process, potentially well after the original synchronous request completed.
+
+*Follow-up: If `notification-service`'s Kafka listener used a raw, low-level Kafka consumer implementation instead of Spring's standard `@KafkaListener`, what would likely happen to this trace continuity?* Exactly as Chapter 31 discussed, bypassing the standard, auto-instrumented consumer mechanism would mean the trace context propagated in the message's headers might never be correctly extracted and applied to `notification-service`'s own processing span — its handling of the event would likely appear as the start of a brand new, disconnected trace rather than a continuation of the original checkout trace, breaking the end-to-end visibility this design specifically relies on for debugging the complete order flow.
+
+**6. Why does the gateway in this design handle JWT validation centrally, rather than each of the four services independently validating the customer's token from scratch?**
+Centralizing this at the gateway (Chapter 26) avoids duplicating the same token-validation logic and identity-provider integration across every individual service, and means a change to the authentication mechanism (rotating signing keys, changing the identity provider) only needs to be correctly handled in one place rather than four — while each downstream service still independently re-validates the *propagated* token it receives (per Chapter 33's zero-trust principle) rather than blindly trusting that "the gateway already checked this."
+
+*Follow-up: Doesn't having both the gateway AND each downstream service validate the token duplicate work? Why is this duplication actually justified here?* It's a deliberate application of defense in depth (Chapter 33) rather than wasteful duplication — the gateway's validation optimizes the common case (rejecting clearly invalid/missing tokens as early and cheaply as possible, before any backend service resources are spent on them), while each downstream service's own validation ensures that even if the internal network were ever compromised or a request somehow reached a service without genuinely passing through the gateway, that service still independently enforces its own security rather than relying entirely on a single point of validation that could theoretically be bypassed.
+
+**7. What would go wrong architecturally if `order-service`'s database were shared directly with `inventory-service`, rather than each having its own database as this design specifies?**
+This would violate the database-per-service principle established in Chapter 23 — a schema change made by either service for its own internal needs could silently break the other service if it happened to read from or depend on the same shared tables, reintroducing exactly the kind of hidden coupling that undermines independent deployability; the two services would no longer be able to evolve, deploy, or scale independently without careful, ongoing coordination about the shared schema, defeating a core benefit the microservices split was meant to provide in the first place.
+
+*Follow-up: If `order-service` genuinely needs some data that conceptually "belongs" to `inventory-service` (say, a product's current display name for an order confirmation), how should it obtain that data in this architecture, given database-per-service?*  It should call `inventory-service`'s own API (via one of the mechanisms from Chapter 28) to request that data, or — if this data is needed frequently and a slight staleness is acceptable — maintain its own local, denormalized copy of just the needed fields, kept in sync via events (Chapter 29) published by `inventory-service` whenever the relevant data changes; either approach respects `inventory-service`'s exclusive ownership of its own data rather than reaching directly into its database.
+
+**8. In this design, why are the Feign clients calling `inventory-service` and `payment-service` wrapped with both `@CircuitBreaker` and `@Retry`, rather than just one or the other?**
+This directly reflects Chapter 27's guidance on combining these patterns: `@Retry` handles brief, transient failures (a momentary network blip) by attempting the call again after a short backoff, while `@CircuitBreaker` handles the sustained-failure case by tracking the aggregate failure rate over time and stopping further attempts (retried or otherwise) entirely once a dependency is clearly, persistently failing — using only `@Retry` would risk repeatedly hammering a genuinely down dependency, while using only `@CircuitBreaker` without `@Retry` would give up too quickly on failures that a brief retry could have resolved.
+
+*Follow-up: If `inventory-service`'s circuit breaker trips open during a real production incident, what would the customer-facing impact be in this design, given the `InventoryClientFallback` shown earlier?* Rather than the checkout request hanging indefinitely or failing with an unhandled exception, the fallback would execute immediately, allowing `order-service` to gracefully handle the situation — likely triggering the saga's compensation path (per Step 5) to cleanly cancel the order and inform the customer checkout couldn't be completed right now, rather than leaving them waiting on a request that was never going to succeed while `inventory-service` remains unavailable.
+
+**9. Why does this design's list of "what it deliberately does NOT do" matter as much as what it does do?**
+Because every pattern covered throughout Part 7 has a real cost (added complexity, operational overhead, or coupling of its own) alongside its benefit — a well-designed system applies each pattern specifically where its benefit is actually needed, and deliberately avoids applying it where it isn't, rather than mechanically using every available tool everywhere "just in case"; explicitly noting where a pattern was deliberately *not* applied (like keeping business logic out of the gateway, or not using Kafka for the payment call) demonstrates the same deliberate, driver-based decision-making Chapter 23 established as the right mindset for the very first decision to adopt microservices at all.
+
+*Follow-up: What's the risk of a team applying every pattern from Part 7 uniformly and maximally across a system, rather than making these kinds of deliberate, scoped choices?* This would very likely recreate several of the specific anti-patterns and pitfalls flagged throughout Part 7 — a bloated, business-logic-laden gateway (Chapter 26's "second monolith" warning), unnecessary architectural complexity from over-applying resilience patterns to calls that don't need them (Chapter 27's guidance against blanket application), or defaulting to event-driven communication even where an immediate synchronous answer is genuinely required (Chapter 29's caution against Kafka as a default replacement) — the patterns are tools for specific problems, not a checklist to maximize usage of.
+
+**10. How does this capstone's use of Config Server (Chapter 25) for a shared payment-gateway timeout value connect back to the original motivating problem from that chapter?**
+Chapter 25 opened with the exact scenario of a shared value (a payment gateway timeout) being duplicated across multiple services' individual configuration files, requiring manual updates to every copy whenever it changes — this design applies that chapter's solution directly, keeping such genuinely shared, cross-cutting values in the config repository's shared `application.yml` so that rotating or adjusting that timeout happens once, centrally, rather than needing to be found and updated separately in `order-service`, `inventory-service`, and `payment-service`'s individual configurations.
+
+*Follow-up: Would `order-service`'s own specific business logic configuration, unrelated to any other service, also belong in the shared `application.yml`, or somewhere else in the config repository?* It would belong in `order-service`'s own dedicated file (`order-service.yml`) within the config repository, not the shared `application.yml` — per Chapter 25's guidance, centralization's value comes specifically from genuinely shared or cross-cutting configuration; a value that's entirely specific to one service and never relevant to any other doesn't benefit from living in the shared file, and putting it there would just add unnecessary noise to configuration every other service also reads.
+
+**11. Why does `order-service` check `alreadyProcessed(event.eventId())` in its (implied) event-consumption pattern, mirroring the check shown for `notification-service` in Step 6?**
+This is the idempotent-consumer pattern established in Chapter 29, necessary because Kafka's at-least-once delivery guarantee means any event — including `order-confirmed` — could theoretically be redelivered under certain failure/retry scenarios; without this check, a redelivered event could cause `notification-service` to send a duplicate confirmation email to the customer, which is exactly the kind of visible, customer-facing bug that unaddressed non-idempotent event consumption produces.
+
+*Follow-up: Why is this idempotency check particularly important for this specific event (order confirmation email) compared to, say, an internal metrics-recording consumer that might tolerate occasional double-counting more easily?* A duplicate customer-facing side effect (receiving the same confirmation email twice) is directly visible and potentially confusing or concerning to the end customer, making correctness here more customer-experience-critical than, say, a slightly double-counted internal metric that might only cause a minor, likely-unnoticed statistical discrepancy — while ideally every consumer should be idempotent regardless (per Chapter 29's blanket recommendation), the customer-facing nature of this specific consumer makes getting it right especially important.
+
+**12. If this system needed to add a new "loyalty-points-service" that awards points whenever an order is confirmed, what would need to change in the existing services to support it?**
+Given the event-driven design of the order-confirmation step (Step 6), remarkably little would need to change in any *existing* service — the new `loyalty-points-service` would simply register as its own consumer group subscribing to the existing `order-confirmed` Kafka topic (exactly per Chapter 29's model of multiple independent consumer groups each receiving their own full copy of every event), register itself with Eureka (Chapter 24), and add itself to the config repository (Chapter 25) — `order-service`, the actual publisher of that event, requires zero code changes at all to support this entirely new, previously unanticipated consumer.
+
+*Follow-up: Would this same ease of extension be possible if `order-service` had instead called `notification-service` via a direct, synchronous Feign call rather than publishing an event?* No — if order confirmation had been implemented as a direct call from `order-service` to `notification-service` (as the payment step is), adding a new service that also needs to react to order confirmation would require modifying `order-service`'s own code to add an additional direct call to the new `loyalty-points-service` as well, directly coupling `order-service` to every current and future consumer of that fact; this is precisely the architectural benefit event-driven communication provides that direct synchronous calls don't, and exactly why Chapter 29 highlighted this kind of extensibility as event-driven architecture's core value.
+
+**13. How would you use the observability tooling from Step 8 to investigate a real production report of "checkout is occasionally slow"?**
+Starting with metrics (Chapter 19) to identify *that* and *when* the slowdown is occurring (perhaps a p95 latency spike on the checkout endpoint at certain times), then using distributed tracing (Chapter 31) on specific slow traces to see *where* within the multi-service saga the time is actually being spent — potentially revealing that `payment-service` calls are unusually slow during specific periods — and finally examining `payment-service`'s own correlated logs (Chapter 22) for the specific trace IDs identified as slow, to find the detailed root cause (perhaps a slow downstream call `payment-service` itself makes to an external payment processor).
+
+*Follow-up: If this investigation revealed that `payment-service`'s circuit breaker was frequently entering its HALF-OPEN state and flapping back to OPEN during these slow periods, what would that specifically suggest about the underlying issue?* This pattern (repeatedly attempting recovery via trial calls in HALF-OPEN, but failing enough of them to reopen) suggests the downstream dependency `payment-service` calls (likely an external payment processor) is experiencing a sustained, ongoing problem rather than a single brief blip — the circuit breaker's flapping behavior is itself a diagnostic signal (as discussed in Chapter 27) pointing toward investigating the health and current incident status of that specific external payment processor as the probable root cause, rather than looking for a bug within `payment-service`'s own code.
+
+**14. Why does this capstone chapter explicitly avoid introducing any new pattern or technology not already covered in Chapters 23–33?**
+The purpose of a capstone is synthesis, not expansion — demonstrating that the eleven individually-taught patterns genuinely compose together into one coherent, functioning system is the actual learning objective here, and introducing something new would dilute that focus and risk implying that real-world system design requires an ever-expanding toolkit rather than the disciplined, deliberate application of a well-understood, sufficient set of patterns to the specific problems that actually justify each one.
+
+*Follow-up: What's the risk, in a real engineering team, of treating system design as primarily about learning more new patterns and technologies, rather than deeply understanding how to apply a smaller, well-understood set well?* Teams that chase an ever-growing toolkit without deeply understanding when and why to apply each existing pattern often end up with genuinely more complex, harder-to-maintain systems that use fashionable technology inappropriately (echoing Chapter 23's "distributed monolith" and Chapter 30's "Kafka vs. RabbitMQ isn't a popularity contest" warnings) — real engineering maturity, as this capstone tries to model, comes from correctly and deliberately matching a smaller set of well-understood tools to genuine problems, not from accumulating an ever-larger collection of tools applied indiscriminately.
+
+**15. Summarize, in one coherent narrative, how the eleven chapters of Part 7 (23–33) combine to answer the single question "how do you actually build a production-grade microservices system with Spring Boot?"**
+You start by deciding, deliberately and for genuine reasons, where service boundaries should go and giving each service its own data (Chapter 23). You solve how those services find each other (Chapter 24) and share configuration consistently (Chapter 25). You give the outside world one coherent entry point that centralizes cross-cutting concerns (Chapter 26). You make every call between services resilient to the network failures a monolith never had to consider (Chapter 27), using one of several concrete client technologies to actually make those calls (Chapter 28), or bypassing direct calls entirely in favor of decoupled events where that fits better (Chapters 29–30). You accept that cross-service consistency requires a fundamentally different approach than a single database transaction, and implement it deliberately via sagas (Chapter 32). You extend security all the way through the internal call chain rather than stopping at the front door (Chapter 33). And throughout all of it, you maintain the ability to actually see what the resulting distributed system is doing (Chapter 31, building on Chapter 19) — because a system this complex that you can't observe isn't one you can actually operate with confidence.
+
+*Follow-up: If you had to identify the single most important mindset underlying all eleven chapters, what would it be, and how does it connect back to this series' very first mention of microservices in Chapter 23?* That every one of these patterns is a deliberate, costed trade-off in service of a specific, genuine need — never a default to reach for out of habit, hype, or completeness — which is precisely the framing Chapter 23 opened Part 7 with when it insisted that microservices themselves should only be adopted for a genuine, present driver rather than speculative future benefit; that same disciplined, driver-based decision-making applies recursively to every single pattern within the architecture, not just the original decision to split into services in the first place.

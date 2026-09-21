@@ -1,0 +1,171 @@
+---
+title: "Try-with-Resources & AutoCloseable"
+description: "Automatic resource management, the AutoCloseable/Closeable contract, multiple resources and closing order, and suppressed exceptions."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Exception Handling & I/O"
+chapter: 27
+totalChapters: 65
+slug: "try-with-resources-and-autocloseable"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "exceptions", "resource-management"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 11
+---
+
+## The Problem Before Java 7
+
+Manually closing resources (files, sockets, database connections) required verbose, error-prone `finally` blocks, since `close()` itself can throw.
+
+```java
+// Old, verbose, and easy to get wrong
+BufferedReader reader = null;
+try {
+    reader = new BufferedReader(new FileReader("data.txt"));
+    System.out.println(reader.readLine());
+} finally {
+    if (reader != null) {
+        try {
+            reader.close();
+        } catch (IOException e) {
+            // now what? this nested catch is easy to write wrong, or forget entirely
+        }
+    }
+}
+```
+
+## Try-with-Resources (Java 7+)
+
+Any resource implementing `AutoCloseable` can be declared directly in the `try` statement's parentheses, and it's guaranteed to be closed automatically — in reverse declaration order — once the block exits, whether normally or via an exception.
+
+```java
+try (BufferedReader reader = new BufferedReader(new FileReader("data.txt"))) {
+    System.out.println(reader.readLine());
+}
+// reader.close() is called automatically here, no finally block needed
+```
+
+This is dramatically shorter, and — critically — it's actually *correct*, handling the edge case where both the try block's code and `close()` itself throw (covered below), which hand-written cleanup code very commonly gets wrong.
+
+## `AutoCloseable` vs. `Closeable`
+
+```java
+public interface AutoCloseable {
+    void close() throws Exception;
+}
+
+public interface Closeable extends AutoCloseable {
+    void close() throws IOException;   // narrows the exception type
+}
+```
+
+`Closeable` (older, I/O-specific) narrows `close()`'s declared exception to `IOException`. `AutoCloseable` (introduced in Java 7 specifically to enable try-with-resources generally) allows any exception type, making it usable well beyond I/O — database connections, custom resource-like classes, locks, and more can all implement it.
+
+## Multiple Resources — Declaration and Closing Order
+
+```java
+try (FileInputStream in = new FileInputStream("input.txt");
+     FileOutputStream out = new FileOutputStream("output.txt")) {
+    // use both resources
+}
+// Resources are closed in REVERSE declaration order: out.close() first, then in.close()
+```
+
+Closing in reverse order mirrors typical resource dependency — if a later-declared resource depends on an earlier one (e.g., a buffered stream wrapping a raw one), it should be closed first, while the resource it depends on is still open.
+
+![Diagram: two resources declared in order (in, out) inside a try-with-resources, with a closing timeline showing out.close() executing before in.close()](/diagrams/ch27-multi-resource-closing-order.svg)
+
+## Suppressed Exceptions
+
+If the `try` block itself throws an exception, **and** closing a resource also throws during cleanup, the resource's exception doesn't replace the original — it's attached as a **suppressed exception** instead, and the original exception (from the actual code, generally the more diagnostically important one) is what propagates.
+
+```java
+try (AutoCloseable resource = () -> { throw new RuntimeException("failure during close"); }) {
+    throw new IllegalStateException("failure during business logic");
+}
+```
+
+```
+// Thrown: IllegalStateException: failure during business logic
+//   Suppressed: RuntimeException: failure during close
+```
+
+You can retrieve suppressed exceptions programmatically via `Throwable.getSuppressed()`. This is a direct, meaningful improvement over hand-written `finally` cleanup, which commonly loses the original exception entirely if `close()` in the `finally` block throws and isn't itself carefully wrapped in a nested try-catch.
+
+## Writing Your Own `AutoCloseable` Class
+
+```java
+public class DatabaseConnection implements AutoCloseable {
+    public DatabaseConnection() {
+        System.out.println("Connection opened");
+    }
+
+    public void query(String sql) {
+        System.out.println("Executing: " + sql);
+    }
+
+    @Override
+    public void close() {
+        System.out.println("Connection closed");
+    }
+}
+```
+
+```java
+try (DatabaseConnection conn = new DatabaseConnection()) {
+    conn.query("SELECT * FROM users");
+}
+// Output:
+// Connection opened
+// Executing: SELECT * FROM users
+// Connection closed
+```
+
+This pattern is exactly why Spring's `JdbcTemplate` and modern JDBC/database libraries expose `Connection`, `Statement`, and `ResultSet` as `AutoCloseable` — letting frameworks and application code alike rely on try-with-resources rather than manual, error-prone cleanup.
+
+## Key Takeaways
+
+- Any `AutoCloseable` resource can be declared in a try-with-resources statement and is closed automatically, in reverse declaration order.
+- `Closeable` is the older, I/O-specific, `IOException`-narrowed version of `AutoCloseable`.
+- If both the try block and a resource's `close()` throw, the original exception propagates and the close-time exception is attached as a suppressed exception, not discarded or overriding.
+- Implementing `AutoCloseable` on your own resource-like classes lets them participate in try-with-resources cleanly.
+
+---
+
+## Interview Questions
+
+**1. What problem does try-with-resources solve compared to manual `finally`-block cleanup?**
+Manual cleanup requires a nested `try-catch` around the `close()` call itself (since `close()` can throw), and it's easy to write this incorrectly — either forgetting the nested handling entirely, or accidentally letting an exception from `close()` silently replace and hide a more important exception that occurred in the main code. Try-with-resources automates correct cleanup (guaranteed `close()` invocation) and correctly handles the dual-exception case via suppressed exceptions, which hand-written code very commonly gets wrong.
+
+**2. What interface must a resource implement to be usable in a try-with-resources statement?**
+`AutoCloseable` (or its more specific I/O-oriented subtype, `Closeable`) — any class implementing this interface's single `close()` method can be declared as a resource directly in the try statement's parentheses.
+
+**3. What's the difference between `AutoCloseable` and `Closeable`?**
+`AutoCloseable.close()` is declared to throw any `Exception`, making the interface broadly applicable to any kind of resource (database connections, locks, custom classes). `Closeable` extends `AutoCloseable` but narrows `close()`'s declared exception specifically to `IOException`, reflecting its older, I/O-stream-focused origin (it predates `AutoCloseable`, which was introduced in Java 7 specifically to generalize the try-with-resources mechanism beyond I/O).
+
+**4. In what order are multiple resources closed when declared together in a single try-with-resources statement?**
+In reverse of their declaration order — the last-declared resource is closed first, and the first-declared resource is closed last. This mirrors typical dependency direction, where a resource declared later often wraps or depends on one declared earlier, and should therefore be torn down first while its dependency is still available.
+
+**5. What is a suppressed exception, and when does one get created?**
+It's created when both the code inside a try-with-resources block throws an exception, *and* closing one or more of its resources also throws during the automatic cleanup that follows. Rather than the close-time exception replacing the original, it's attached to the original exception's list of suppressed exceptions (retrievable via `getSuppressed()`), and the original exception is what actually propagates to the caller.
+
+**6. Why is it usually correct that the original exception (from the try block) propagates, rather than the exception from `close()`?**
+The exception from the actual business logic in the try block is generally the more diagnostically significant one — it's what caused the resource cleanup to happen in the first place, often as a direct or indirect consequence of that same underlying problem. Prioritizing it as the primary, propagating exception (with the close-time exception preserved as a suppressed exception rather than discarded) gives the most useful and complete picture for debugging.
+
+**7. Can you declare a resource in a try-with-resources statement using a variable that was initialized before the try statement (Java 9+)?**
+Yes — since Java 9, you can use "effectively final" variables already declared and initialized outside the try statement directly in the resource specification (`try (existingResource) { ... }`), rather than being required to declare and initialize the resource freshly within the try statement's own parentheses, as was strictly required in Java 7 and 8.
+
+**8. If a class you want to use with try-with-resources doesn't implement `AutoCloseable`, what are your options?**
+If you control the class's source, add `implements AutoCloseable` and a `close()` method that performs the appropriate cleanup. If you don't control it (a third-party class), you generally can't use it directly in a try-with-resources statement — you'd need to either write a wrapper class that implements `AutoCloseable` and delegates its own `close()` to whatever cleanup method the original class actually exposes, or fall back to manual try-finally cleanup for that specific resource.
+
+**9. Does try-with-resources eliminate the need for a `catch` block entirely?**
+No — try-with-resources only automates the *closing* of declared resources; it doesn't change or remove normal exception propagation from the try block's code. You can still add `catch` (and even an additional `finally`) blocks after the resource declarations exactly as with an ordinary try statement, to handle exceptions from either the main code or, if uncaught, from the resource-closing process.
+
+**10. What happens if a resource's `close()` method is called and the resource was never successfully fully initialized (e.g., its constructor partially completed before throwing)?**
+Java only calls `close()` on a resource that has been *successfully* assigned within the try-with-resources statement's parentheses — if a resource's constructor itself throws before completing, that resource was never actually acquired, so `close()` is never called on it (there being no successfully-created object to close), while any resources declared and successfully constructed *before* it in the same statement are still closed properly in reverse order.
+
+**11. How would you implement `AutoCloseable` on a custom class representing a temporary in-memory lock, and what should `close()` do?**
+Implement `AutoCloseable` with a `close()` method that releases the lock (e.g., resetting an internal held flag or notifying waiting threads), allowing code to acquire the lock and guarantee its release via try-with-resources syntax: `try (var lock = acquireLock()) { /* critical section */ }` — ensuring the lock is released even if the critical section throws, without requiring a manually written finally block at every call site that uses the lock.

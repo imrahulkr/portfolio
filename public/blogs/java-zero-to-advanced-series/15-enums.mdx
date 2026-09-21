@@ -1,0 +1,196 @@
+---
+title: "Enums in Java"
+description: "Type-safe enum constants, enums with fields/methods/constructors, abstract methods per constant, EnumMap/EnumSet, and enums implementing interfaces."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Object-Oriented Programming"
+chapter: 15
+totalChapters: 65
+slug: "enums"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "oop", "enums"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## Enums Are Full Classes, Not Just Named Constants
+
+Before enums (pre-Java 5), developers used `public static final int` constants to represent a fixed set of values — but that gave no type safety at all (any `int` could be passed where a "status code" was expected). Java's `enum` fixes this: each enum constant is a genuine, type-safe singleton instance of the enum type.
+
+```java
+public enum Status {
+    PENDING, ACTIVE, SUSPENDED, CLOSED
+}
+```
+
+```java
+Status s = Status.ACTIVE;
+// Status s = 2;  // COMPILE ERROR — an int can never substitute for a Status
+```
+
+Every enum implicitly extends `java.lang.Enum` and is implicitly `final` — you cannot extend an enum further.
+
+## Enums With Fields, Constructors, and Methods
+
+Enum constants can carry their own data, since each constant is really an instance created via a private, implicit constructor call.
+
+```java
+public enum Planet {
+    MERCURY(3.303e+23, 2.4397e6),
+    VENUS(4.869e+24, 6.0518e6),
+    EARTH(5.976e+24, 6.37814e6);
+
+    private final double mass;   // kg
+    private final double radius; // meters
+
+    Planet(double mass, double radius) {   // implicitly private constructor
+        this.mass = mass;
+        this.radius = radius;
+    }
+
+    public double surfaceGravity() {
+        final double G = 6.67300E-11;
+        return G * mass / (radius * radius);
+    }
+}
+```
+
+```java
+System.out.println(Planet.EARTH.surfaceGravity());   // 9.79...
+```
+
+Enum constructors are **always implicitly `private`** (or package-private) — you can never call `new Planet(...)` yourself; the constants themselves are the only instances that will ever exist.
+
+## Abstract Methods Per Constant
+
+Each constant can override a method individually, giving each one genuinely different behavior — a clean alternative to a `switch` statement scattered across the codebase.
+
+```java
+public enum Operation {
+    PLUS {
+        @Override public int apply(int a, int b) { return a + b; }
+    },
+    MINUS {
+        @Override public int apply(int a, int b) { return a - b; }
+    },
+    TIMES {
+        @Override public int apply(int a, int b) { return a * b; }
+    };
+
+    public abstract int apply(int a, int b);
+}
+```
+
+```java
+System.out.println(Operation.PLUS.apply(3, 4));    // 7
+System.out.println(Operation.TIMES.apply(3, 4));   // 12
+```
+
+## Built-In Methods Every Enum Gets
+
+```java
+Status s = Status.ACTIVE;
+
+s.name();       // "ACTIVE" — exact declared name
+s.ordinal();    // 1 — position in declaration order, zero-based
+
+Status.valueOf("ACTIVE");   // Status.ACTIVE — throws IllegalArgumentException if not found
+Status.values();            // Status[] of all constants, in declaration order
+```
+
+**Caution on `ordinal()`:** it's based purely on declaration order, which makes it fragile — inserting a new constant in the middle of the list shifts every subsequent constant's ordinal. Never persist `ordinal()` to a database or use it for business logic; use `name()` or an explicit field instead.
+
+## Enums in `switch`
+
+```java
+Status s = Status.ACTIVE;
+
+String message = switch (s) {
+    case PENDING -> "Waiting for approval";
+    case ACTIVE -> "Currently active";
+    case SUSPENDED -> "Temporarily suspended";
+    case CLOSED -> "Permanently closed";
+};
+```
+
+Because the compiler knows every possible enum constant at compile time, a switch over an enum that covers all constants is exhaustive without needing a `default` case.
+
+## `EnumMap` and `EnumSet`
+
+Specialized, highly efficient collection implementations designed specifically for enum keys/elements, internally backed by arrays indexed by ordinal rather than a general-purpose hash table.
+
+```java
+EnumMap<Status, String> descriptions = new EnumMap<>(Status.class);
+descriptions.put(Status.ACTIVE, "In use");
+
+EnumSet<Status> activeStates = EnumSet.of(Status.ACTIVE, Status.PENDING);
+```
+
+## Enums Implementing Interfaces
+
+An enum can implement one or more interfaces, letting you treat a fixed set of behaviors polymorphically alongside the per-constant abstract method pattern shown above.
+
+```java
+public interface Describable {
+    String describe();
+}
+
+public enum Status implements Describable {
+    ACTIVE {
+        @Override public String describe() { return "Currently active"; }
+    },
+    CLOSED {
+        @Override public String describe() { return "Permanently closed"; }
+    }
+}
+```
+
+## Key Takeaways
+
+- Enum constants are real, type-safe singleton instances, not just named integers.
+- Enum constructors are always implicitly private — you can never instantiate additional instances yourself.
+- Never rely on `ordinal()` for persisted data or business logic — it shifts if constants are reordered or inserted.
+- Per-constant method overrides are a clean alternative to scattering `switch` statements across a codebase.
+
+---
+
+## Interview Questions
+
+**1. Why are enums considered "type-safe" compared to using `public static final int` constants for the same purpose?**
+With integer constants, a method expecting a status "type" actually just accepts any `int`, so passing an unrelated or invalid integer compiles without complaint — there's no compiler enforcement that the value is one of the intended constants. With an `enum`, the parameter type is the enum type itself, so only genuine instances of that enum (i.e., one of its declared constants) can ever be passed — the compiler categorically rejects anything else.
+
+**2. Can you create a new instance of an enum type using `new`?**
+No — enum constructors are always implicitly `private` (or package-private), specifically to prevent creating any instances beyond the fixed set of constants declared in the enum body itself. The declared constants are the only instances of that type that will ever exist during the JVM's lifetime.
+
+**3. What do `name()` and `ordinal()` return, and why is relying on `ordinal()` risky?**
+`name()` returns the exact string of the constant as declared (e.g., `"ACTIVE"`), and never changes regardless of code reorganization. `ordinal()` returns the constant's zero-based position in declaration order, which is fragile — inserting, removing, or reordering constants shifts the ordinal values of everything after the change point, silently breaking any code (especially persisted data) that depended on a specific ordinal value.
+
+**4. Why should you avoid persisting an enum's `ordinal()` value to a database?**
+Because ordinal values are purely a function of declaration order in the source code, any future change to that order (adding a new constant anywhere but the very end, or reordering existing ones) will cause previously-stored ordinal values to now map to the wrong constant when read back — a data corruption bug that's easy to introduce accidentally and hard to detect until it causes incorrect behavior in production.
+
+**5. How would you safely persist an enum value to a database instead of using its ordinal?**
+Store `name()` (the constant's declared string name) and reconstruct it with `EnumType.valueOf(storedName)`, or define an explicit dedicated field (like a stable numeric or string "code" per constant, set via the enum's constructor) that's independent of declaration order and won't shift if the enum is later modified.
+
+**6. Can an enum implement an interface? Can it extend a class?**
+An enum can implement any number of interfaces, exactly like a regular class. It cannot extend any class, however, because every enum implicitly already extends `java.lang.Enum` — and since Java doesn't support multiple class inheritance, that slot is already used.
+
+**7. What is a per-constant method body in an enum, and what problem does it solve compared to a single method with a switch statement inside it?**
+It's where an individual enum constant provides its own override of an abstract (or overridable) method declared in the enum, giving that specific constant unique behavior. It solves the same problem as a `switch` on the enum type inside a shared method, but keeps each constant's logic co-located with that constant's declaration rather than scattered across a growing switch statement, and the compiler guarantees every constant provides an implementation since the method is abstract.
+
+**8. Is a switch statement/expression over an enum required to have a `default` case?**
+Not if every possible constant of that enum is explicitly covered by a case — the compiler can verify exhaustiveness at compile time since it knows the complete, fixed set of enum constants. If new constants are added later without updating the switch, a switch *statement* will simply skip silently (no matching case, no default), while a switch *expression* actually fails to compile until it's updated to remain exhaustive, which is one of the practical safety benefits of preferring switch expressions with enums.
+
+**9. What's the difference between `EnumMap`/`EnumSet` and their general-purpose counterparts `HashMap`/`HashSet`?**
+`EnumMap` and `EnumSet` are specialized implementations designed exclusively for enum keys/elements, internally backed by an array indexed directly by each constant's ordinal rather than a hash table — this makes them significantly faster and more memory-efficient than `HashMap`/`HashSet` when the keys/elements are known to be enum constants, and they also iterate in natural (declaration) order automatically.
+
+**10. Are enum values thread-safe as singletons? Why is `enum` often recommended as the best way to implement the Singleton pattern in Java?**
+Yes — the JVM guarantees enum constant instances are created exactly once, during class loading, in a thread-safe manner handled entirely by the class-loading mechanism itself, with no additional synchronization code required. This also automatically protects against subtle Singleton-breaking issues like reflection-based instantiation and deserialization creating a second instance, both of which a hand-rolled Singleton class can be vulnerable to unless specifically guarded against — an enum with a single constant sidesteps both problems for free.
+
+**11. Can an enum have abstract methods without providing an implementation directly in the enum declaration itself?**
+Yes, but only if **every** constant provides its own per-constant override of that abstract method — the enum as a whole cannot be left with an unimplemented abstract method the way a regular abstract class safely can, since every declared constant must be a fully concrete, instantiable object.
+
+**12. What does `values()` return, and is it efficient to call it repeatedly, e.g., inside a loop?**
+`values()` returns a new array containing all of the enum's constants in declaration order, generated by the compiler for every enum type automatically. It's not free to call repeatedly in a hot path since it allocates and populates a brand-new array on every single call — if you need to iterate the constants often, cache the result of one `values()` call rather than calling it inside a tight loop.

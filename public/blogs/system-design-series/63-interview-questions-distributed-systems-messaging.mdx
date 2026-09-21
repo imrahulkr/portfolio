@@ -1,0 +1,138 @@
+---
+title: "Interview Questions II — Distributed Systems & Messaging Grab-Bag"
+description: "20+ standalone system design interview questions spanning consistent hashing, consensus, rate limiting, distributed locks, and messaging patterns from Parts 4-5 of this series."
+series: "system-design"
+seriesOrder: 63
+part: "Dedicated Interview Chapters"
+partOrder: 10
+slug: "interview-questions-distributed-systems-messaging"
+tags: ["system-design", "interview-prep", "distributed-systems", "messaging"]
+readingTime: "18 min"
+publishedAt: "2026-09-15"
+updatedAt: "2026-09-15"
+---
+
+## Introduction
+
+This second dedicated interview chapter draws from Parts 4-5 — Distributed Systems Core Concepts and Messaging & Async Processing. These questions tend to come up once an interview moves past basic architecture into genuine distributed-systems depth, often as follow-ups probing whether a candidate truly understands the mechanisms behind a design choice, not just its name.
+
+---
+
+## Consistent Hashing, Quorum & Consensus
+
+### 1. Why does consistent hashing solve the rebalancing problem that `hash(key) % N` sharding suffers from, in one sentence?
+**Answer:** Because node assignment on a hash ring depends only on relative position, not on the total node count, adding or removing a node only affects the small slice of keys between it and its neighbor, instead of reshuffling nearly everything.
+
+**Follow-up:** *Why do virtual nodes matter for making this actually work well in practice?* — With too few physical points on the ring, random placement can produce very uneven load distribution; spreading each physical node across many virtual positions averages this out, similar to how sampling more points produces a more statistically even result.
+
+### 2. Explain, intuitively, why a majority quorum prevents split-brain in leader election.
+**Answer:** Any two groups that each contain more than half of the total nodes are mathematically guaranteed to overlap by at least one node — so two different candidates can never both simultaneously win a majority vote in the same term, since that would require more total votes than actually exist.
+
+**Follow-up:** *Does this guarantee hold if the cluster size changes mid-election (e.g., a node is added while voting is in progress)?* — This is exactly the kind of subtle edge case that makes hand-rolled consensus implementations dangerous — real systems like Raft have specific, carefully-designed protocols for safely changing cluster membership without breaking the majority-overlap guarantee, which is part of why using a battle-tested implementation is strongly preferred over ad hoc designs.
+
+### 3. Why is Raft generally considered easier to correctly implement than Paxos, despite both solving the same problem?
+**Answer:** Raft was explicitly designed with understandability as a primary goal, structuring the protocol around clearer, more operationally intuitive concepts (explicit terms, a clearly-defined leader for normal operation, straightforward election). Paxos's original description is more abstract and mathematically oriented, and translating it into a correct, practical implementation has historically proven more error-prone for many engineers and even researchers.
+
+**Follow-up:** *Does Raft's easier implementability mean it's theoretically more powerful than Paxos?* — No — both provide equivalent core consensus guarantees; Raft's advantage is specifically about understandability and implementation safety, not a difference in theoretical capability.
+
+### 4. What does the quorum condition `W + R > N` actually guarantee, and what happens if a system violates it?
+**Answer:** It guarantees that the set of nodes involved in any write and the set involved in any subsequent read must overlap by at least one node, ensuring a read can always find the most recent committed write. If violated (e.g., `W=1, R=1, N=5`), a read could query entirely different nodes than a write touched, potentially missing the most recent value and returning stale data with no guarantee otherwise.
+
+**Follow-up:** *If you wanted to prioritize write latency above all else, what quorum values might you choose, and what would you be trading away?* — Set W=1 (a write succeeds as soon as one node acknowledges it), trading away the guaranteed overlap this chapter's condition normally provides — accepting weaker consistency in exchange for the fastest possible write path.
+
+### 5. Why do gossip protocols scale to thousands of nodes far better than a consensus algorithm like Raft?
+**Answer:** Each node in a gossip protocol only communicates with a small, fixed number of random peers per round, regardless of total cluster size — the coordination burden per node stays constant. Consensus algorithms require coordination that scales with node count (votes, log replication to every follower), meaning the overhead of maintaining strong consistency grows as the cluster grows, in a way gossip's peer-to-peer, exponential-spread model avoids.
+
+**Follow-up:** *Why can't gossip simply replace consensus for use cases like leader election?* — Gossip only provides eventual, probabilistic consistency — it can't guarantee the kind of immediate, strict agreement (exactly one leader, right now) that leader election fundamentally requires.
+
+---
+
+## Bloom Filters, Rate Limiting & Locks
+
+### 6. Why can a Bloom filter guarantee zero false negatives but not zero false positives?
+**Answer:** When an element is genuinely added, all of its corresponding bits are explicitly set — so checking that same element later will always find all its bits set, guaranteeing a "possibly present" result. False positives happen because bits are shared across many elements — a queried element that was never added might coincidentally have all its bits already set by other, different elements.
+
+**Follow-up:** *What real system component uses Bloom filters specifically to avoid unnecessary disk reads?* — LSM Tree-based databases (like Cassandra) use a Bloom filter per SSTable to cheaply rule out files that definitely don't contain a queried key, avoiding wasted disk I/O.
+
+### 7. Compare token bucket and leaky bucket rate limiting in one sentence each, and state which one you'd pick to protect a fragile downstream dependency with a strict, constant capacity limit.
+**Answer:** Token bucket allows controlled bursts up to its capacity; leaky bucket smooths all output into a strictly constant rate regardless of input burstiness. For a fragile downstream with a strict, burst-intolerant capacity, leaky bucket is the better fit, since its defining property is exactly the constant-output-rate guarantee that dependency needs.
+
+**Follow-up:** *Why might token bucket still be the more common default choice for general-purpose public API rate limiting?* — Public APIs generally want to tolerate reasonable, occasional bursts from legitimate users (e.g., a client catching up after being briefly idle) without artificially throttling them — token bucket's burst tolerance better matches this typical, more forgiving use case than leaky bucket's stricter smoothing.
+
+### 8. Why does the sliding window counter algorithm use a weighted average rather than storing every individual request timestamp?
+**Answer:** Storing every timestamp (a sliding window log) gives perfect accuracy but memory that scales with request volume. The sliding window counter instead keeps just two counts (current and previous window) and computes a weighted estimate assuming even distribution within the previous window — trading a small amount of accuracy for constant, bounded memory usage regardless of actual traffic volume.
+
+**Follow-up:** *Under what specific traffic pattern does this weighted-average approximation become least accurate?* — When traffic within the previous window was highly uneven rather than evenly distributed — e.g., if it all arrived in a burst near the very end of that window, the assumption underlying the weighting breaks down somewhat.
+
+### 9. Why is the fencing token problem in distributed locks not fully solved just by having the lock holder check the lock's value before releasing it?
+**Answer:** The value check prevents a paused, expired lock holder from mistakenly releasing someone else's newly-acquired lock — but it does nothing to stop that same paused client from resuming and directly acting on the protected resource (writing to a file, database, etc.) without ever calling unlock at all, since it never learns its lease expired. A fencing token, verified by the resource itself, is needed to reject this specific stale write regardless of what the lock-holder client believes about its own lock status.
+
+**Follow-up:** *Why does this mean fencing shifts some responsibility onto the protected resource itself, not just the lock service?* — Because the lock service has no visibility into direct interactions between a client and the resource that happen entirely outside the lock's own API — only the resource itself, checking each write's token, can catch this specific scenario.
+
+### 10. Why is ZooKeeper's ephemeral znode mechanism generally considered more robust than a Redis TTL-based lock for handling client crashes?
+**Answer:** A Redis TTL requires guessing a fixed expiry duration upfront, which is always a trade-off between risking premature expiry for a legitimately slow operation and risking too-long a wait after an actual crash. ZooKeeper's ephemeral nodes are tied to the client's actual session liveness (via ongoing heartbeats), so release happens adaptively based on genuine connection health rather than a fixed, pre-guessed timer.
+
+**Follow-up:** *Does this mean ZooKeeper eliminates the need for any timeout configuration at all?* — No — it still relies on a configurable session timeout for how long it waits without a heartbeat before considering a session dead; it's a more adaptive, connection-health-based timeout rather than a fixed, one-shot TTL guess.
+
+### 11. Why must idempotency be considered alongside, not instead of, distributed locking when designing a "process this message exactly once" system?
+**Answer:** A distributed lock reduces the chance of two processes handling the same message truly concurrently, but it doesn't address the separate, more common scenario of a single client retrying after a timeout, unsure whether its earlier attempt succeeded. That sequential-retry ambiguity requires idempotent processing regardless of whether concurrency was ever actually an issue — the two mechanisms address genuinely different failure modes.
+
+**Follow-up:** *Which of the two would you prioritize implementing first if you could only build one initially?* — Idempotency — sequential retries from network unreliability are a far more common, everyday occurrence than genuine concurrent access races for the exact same specific operation.
+
+---
+
+## Messaging, Pub-Sub & Event-Driven Architecture
+
+### 12. Why is "exactly-once delivery" often described as practically unachievable in a fully general sense, and what do most systems actually mean when they claim to support it?
+**Answer:** True exactly-once delivery runs into the same fundamental ambiguity as idempotency in general — a lost acknowledgment makes it impossible to distinguish "never delivered" from "delivered, but confirmation lost," and any retry mechanism built to handle this risks duplication. What most systems actually provide is "effectively-once processing" — at-least-once delivery combined with idempotent consumer-side handling, achieving the same practical outcome through the composition of two more tractable guarantees.
+
+**Follow-up:** *Does Kafka's "exactly-once semantics" feature contradict this principle?* — No — it provides this guarantee specifically within Kafka's own transactional scope (producer, broker, offset management); a consumer's side effects outside that scope (like calling an external API) still need their own idempotent handling for genuinely complete end-to-end exactly-once behavior.
+
+### 13. Why does Kafka guarantee ordering only within a partition, not across an entire topic?
+**Answer:** Kafka achieves high throughput by allowing multiple partitions to be written and read in parallel — enforcing strict ordering across all partitions simultaneously would require coordination that undermines this parallelism. Ordering is instead guaranteed only within a single partition, which is written and read sequentially.
+
+**Follow-up:** *Why does this make partition key selection directly analogous to shard key selection from database sharding?* — Just as a shard key determines whether related data lands on the same shard, a partition key determines whether causally-related events land in the same partition — a poor choice in either case scatters related items across different partitions/shards, breaking either the ordering guarantee or the single-partition query efficiency.
+
+### 14. Explain the difference between "event notification" and "event-carried state transfer," and the trade-off between them.
+**Answer:** Event notification sends a minimal event (often just an ID), requiring subscribers to call back for full details — keeping events small but reintroducing a runtime dependency on the publisher's availability. Event-carried state transfer embeds all needed data directly in the event, eliminating the callback dependency at the cost of larger payloads and the risk of subscribers acting on a stale snapshot if the underlying data changes again after the event was published.
+
+**Follow-up:** *For frequently-changing data, which approach is generally preferable, and why?* — Event notification — since event-carried state transfer's embedded snapshot would likely already be outdated by the time it's processed, undermining its main benefit while still carrying its costs.
+
+### 15. Why does event-driven architecture inherently introduce eventual consistency, even when every individual event is delivered reliably and quickly?
+**Answer:** Because processing is fundamentally asynchronous — a publisher moves on immediately after publishing, without waiting for any subscriber to actually process the event. There's always some real-time gap between publication and full processing across every interested subscriber, during which different parts of the system legitimately hold different views of the world.
+
+**Follow-up:** *Does this mean event-driven architecture is fundamentally incompatible with any strong-consistency requirement?* — No — a system can apply event-driven patterns for the many operations well-suited to eventual consistency while still using direct, synchronous calls for the specific subset of operations genuinely requiring immediate consistency; the architecture applies per-operation, not as a system-wide, all-or-nothing philosophy.
+
+### 16. Why is batch processing described as achieving higher throughput efficiency than stream processing, and what's the corresponding cost?
+**Answer:** Batch processing operates on a complete, bounded dataset, allowing optimizations like sorting once, choosing an optimal execution plan based on the full known data volume, and processing large chunks together to amortize per-operation overhead. The cost is latency — results are only available once the entire batch job completes, often minutes to hours after the underlying events occurred, unlike stream processing's near-real-time results.
+
+**Follow-up:** *Why does Kappa Architecture's reliance on log replay for reprocessing require the underlying data source to have specific characteristics that a typical transient message queue lacks?* — Kappa's reprocessing model requires replaying historical events, which only works if the underlying log actually retains and can replay that history — a transient queue like RabbitMQ, which removes messages once consumed, has no historical record left to replay, unlike Kafka's persistent log.
+
+### 17. Why does a tumbling window in stream processing risk the same "boundary problem" discussed for fixed-window rate limiting?
+**Answer:** Both use fixed, non-overlapping time buckets that reset at hard boundaries — an event pattern straddling two adjacent windows (a burst right before one window ends and another right after the next begins) can be undercounted or misattributed relative to the true, continuous rate, exactly analogous to how fixed-window rate limiting can allow up to double the intended rate across a boundary.
+
+**Follow-up:** *What windowing strategy addresses this, and what does it cost in exchange?* — A sliding window, which continuously recalculates over a moving recent period rather than resetting at hard boundaries — at the cost of needing to maintain more overlapping state and recompute more frequently than a simple tumbling window.
+
+### 18. What is a "watermark" in stream processing, and why is it necessary despite adding complexity?
+**Answer:** A watermark is a declared threshold (e.g., "assume all events for a window have arrived once we've seen a timestamp 2 minutes past that window's end") that lets a stream processor finalize results after a bounded wait, rather than either waiting indefinitely for all possible late-arriving events or finalizing immediately with no tolerance for realistic network delays. It's necessary because real-world events genuinely arrive out of order due to network delays and reconnecting clients, and some practical compromise is required to balance result latency against completeness.
+
+**Follow-up:** *What happens to events that arrive even later than the watermark threshold allows for?* — They typically require a separate, explicit "late data" handling strategy — such as a correction/update emitted after the fact — rather than being silently included in or excluded from the already-finalized window result.
+
+### 19. In an interview, if asked to justify choosing a message queue over a direct synchronous API call for triggering a video-encoding job, what's the strongest single argument?
+**Answer:** Video encoding is a long-running, resource-intensive operation — a synchronous call would force the caller (e.g., an upload service) to block and hold resources for the entire encoding duration, degrading its own responsiveness and scalability for a concern that doesn't need to be resolved before the upload response itself completes. A message queue fully decouples the fast upload acknowledgment from the slower background processing.
+
+**Follow-up:** *What would you say if the interviewer specifically asked why you didn't just spin off an async thread within the same service instead of using an external queue?* — An in-process thread doesn't survive a crash of that specific service instance, doesn't allow the encoding work to be load-balanced or auto-scaled independently from the upload path, and provides none of the durability guarantees (no data loss if the encoding worker temporarily goes down) that an external, persistent queue provides.
+
+### 20. Why might a system choose the SNS+SQS "fan-out" pattern over subscribing multiple consumers directly to a single pub-sub topic?
+**Answer:** This pattern gives each individual subscriber its own dedicated, durable queue holding its copy of every message — meaning a temporarily slow or offline subscriber simply has messages accumulate safely in its own queue rather than potentially missing them (as could happen with some simpler pub-sub implementations lacking per-subscriber durability), while still preserving the core pub-sub decoupling benefit of the publisher not needing to know about any specific subscriber.
+
+**Follow-up:** *Why wouldn't this same reasoning universally apply to choosing this pattern over Kafka's consumer-group model?* — Kafka's consumer groups already provide this same per-subscriber durability and independent-pace consumption natively, via persistent, replayable partitions and per-group offsets — SNS+SQS's specific value is more relevant in an ecosystem, like AWS, where a fully-managed, simpler queue-per-subscriber model is preferred over operating a Kafka cluster.
+
+### 21. Why does the Saga pattern require every step — not just the compensating (rollback) steps — to be designed idempotently?
+**Answer:** A Saga orchestrator may need to retry any step, forward or compensating, if it's uncertain whether that step's outcome actually succeeded (the same fundamental ambiguity idempotency always addresses). If only the compensations were idempotent but the forward steps weren't, a retried forward step could still cause duplicate side effects (e.g., reserving inventory twice), undermining the Saga's overall correctness just as surely as a non-idempotent compensation would.
+
+**Follow-up:** *Why does this mean idempotency is described as a "structural requirement," not an optional enhancement, for Sagas?* — Because Sagas fundamentally rely on being able to safely retry any step whose outcome is uncertain — without idempotency, this core retry capability, which the entire pattern depends on to handle real-world network unreliability, simply isn't safe to use at all.
+
+## Summary
+
+This chapter collected 21 standalone questions spanning consistent hashing, consensus, Bloom filters, rate limiting, distributed locks, and the full range of messaging and event-driven architecture patterns from Parts 4-5. The final dedicated interview chapter turns to architecture patterns and case-study curveball questions — the kind of mid-interview pivots that test whether a candidate's design can genuinely adapt.

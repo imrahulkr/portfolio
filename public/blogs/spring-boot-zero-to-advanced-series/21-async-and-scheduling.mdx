@@ -1,0 +1,251 @@
+---
+title: "Async Programming & Scheduling: @Async, @Scheduled & Thread Pools"
+description: "Not every operation needs to block the calling thread until it finishes, and not every job needs an HTTP request to trigger it. This chapter covers running work asynchronously and on a schedule — and the thread-pool tuning both quietly depend on."
+date: "2026-09-14"
+readTime: "12 min read"
+series: "spring-boot"
+part: 21
+tags: ["Spring Boot", "Async", "Scheduling", "Concurrency"]
+---
+
+Everything so far has run synchronously: a request comes in, work happens, a response goes out, all on the same thread. This chapter covers the two common exceptions — work that shouldn't block the caller, and work that isn't triggered by a request at all.
+
+## Enabling and using `@Async`
+
+```java
+@Configuration
+@EnableAsync
+class AsyncConfig { }
+```
+
+```java
+@Service
+class NotificationService {
+
+    @Async
+    void sendWelcomeEmail(String email) {
+        // runs on a separate thread — the caller doesn't wait for this to finish
+        emailClient.send(email, "Welcome!");
+    }
+}
+```
+
+```java
+@Service
+class RegistrationService {
+
+    private final NotificationService notificationService;
+
+    void register(String email) {
+        userRepository.save(new User(email));
+        notificationService.sendWelcomeEmail(email);   // returns immediately
+        // registration completes without waiting for the email to actually send
+    }
+}
+```
+
+`@Async`, like `@Transactional` and the caching annotations before it, is implemented via an AOP proxy — calling an `@Async` method returns control to the caller immediately, while the actual method body executes on a separate thread from a thread pool. **The same self-invocation gotcha applies once again**: calling an `@Async` method from within the same class bypasses the proxy, and it runs synchronously with no warning.
+
+## Returning a result from async work
+
+```java
+@Async
+CompletableFuture<InvoiceData> fetchInvoiceData(Long orderId) {
+    InvoiceData data = externalInvoiceService.fetch(orderId);
+    return CompletableFuture.completedFuture(data);
+}
+```
+
+```java
+CompletableFuture<InvoiceData> future = invoiceService.fetchInvoiceData(orderId);
+// do other work here while it's in flight
+InvoiceData data = future.join();   // blocks only when the result is actually needed
+```
+
+`CompletableFuture` is the standard way to get a result *back* from `@Async` work — unlike the `void` example above, this lets the caller continue doing other things and only block (`join()`/`get()`) at the exact point the result becomes necessary, or compose it with `.thenApply()`/`.thenCombine()` for more complex pipelines without blocking at all.
+
+## Why the default thread pool is dangerous to leave unconfigured
+
+Spring Boot's default `SimpleAsyncTaskExecutor` (used if you don't configure your own) **creates a new thread for every single async call, with no limit and no reuse**. Under real load, this is a direct path to exhausting system resources.
+
+```java
+@Configuration
+@EnableAsync
+class AsyncConfig implements AsyncConfigurer {
+
+    @Override
+    public Executor getAsyncExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(50);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("async-task-");
+        executor.initialize();
+        return executor;
+    }
+}
+```
+
+- **`corePoolSize`** — threads kept alive even when idle.
+- **`maxPoolSize`** — the ceiling the pool can grow to under load.
+- **`queueCapacity`** — tasks wait here once `corePoolSize` threads are all busy, before the pool grows further toward `maxPoolSize`.
+
+```
+Task submitted
+     │
+     ▼
+Fewer than corePoolSize threads busy? ──yes──▶ start a new core thread
+     │no
+     ▼
+Queue has room (< queueCapacity)? ──yes──▶ enqueue the task
+     │no
+     ▼
+Fewer than maxPoolSize threads total? ──yes──▶ start a new (non-core) thread
+     │no
+     ▼
+Rejected — handled by the configured RejectedExecutionHandler
+```
+
+Sizing these correctly (Chapter 36 covers this in more depth alongside broader JVM performance tuning) depends on whether the async work is CPU-bound (roughly, pool size near the number of CPU cores) or I/O-bound (a much larger pool is reasonable, since threads spend most of their time waiting, not computing).
+
+## Scheduling recurring work with `@Scheduled`
+
+```java
+@Configuration
+@EnableScheduling
+class SchedulingConfig { }
+```
+
+```java
+@Component
+class ReportingJob {
+
+    @Scheduled(fixedRate = 3_600_000)   // every hour, measured from the start of the previous run
+    void generateHourlyReport() { }
+
+    @Scheduled(fixedDelay = 60_000)     // 60 seconds after the previous run *finishes*
+    void pollExternalQueue() { }
+
+    @Scheduled(cron = "0 0 2 * * *")    // every day at 2:00 AM
+    void runNightlyCleanup() { }
+}
+```
+
+`fixedRate` measures the interval from the *start* of each execution — if a run takes longer than the interval, the next one starts immediately after the previous one finishes rather than overlapping. `fixedDelay` measures from the *end* of the previous execution instead, guaranteeing a genuine gap regardless of how long each run takes. `cron` gives full calendar-based scheduling for cases like "every day at 2 AM" that neither fixed option can express directly.
+
+## The critical gotcha: `@Scheduled` in a multi-instance deployment
+
+**By default, `@Scheduled` runs independently on every single instance of your application.** In a single-instance deployment, this is invisible. The moment the application scales to multiple instances (which Chapter 3 noted is trivial with Spring Boot), every instance runs the same scheduled job at the same time — for a job that sends one email per user or processes a shared queue, this means duplicate work, or worse, duplicate side effects.
+
+```
+Single instance:                  Multiple instances (unguarded):
+┌──────────┐                     ┌──────────┐  ┌──────────┐  ┌──────────┐
+│ Instance  │  runs job once     │ Instance A│  │ Instance B│  │ Instance C│
+│           │  ✓ correct         │  runs job │  │  runs job │  │  runs job │
+└──────────┘                     └──────────┘  └──────────┘  └──────────┘
+                                        └── all three ran it — duplicated! ──┘
+```
+
+Fixing this requires a **distributed lock** ensuring only one instance actually executes the job body per scheduled trigger — via a database-backed lock (a `ShedLock` library entry, or a manually implemented row lock), or via Redis (`SETNX`-style locking). This isn't something `@Scheduled` handles for you; it's a decision every scheduled job needs made explicitly once more than one instance is running.
+
+## Best practices & gotchas
+
+- **Never leave the async executor at its dangerous default.** Explicitly configure a `ThreadPoolTaskExecutor` with bounded `corePoolSize`/`maxPoolSize`/`queueCapacity` — the unbounded default `SimpleAsyncTaskExecutor` is a production incident waiting to happen under real load.
+- **Add a distributed lock to any `@Scheduled` job the moment your application could run on more than one instance** — which, given Chapter 3's point about Spring Boot's trivial horizontal scaling, is essentially always eventually true.
+- **`@Async` methods must be `public` and called from outside the class**, exactly like `@Transactional`/`@Cacheable` — the proxy-based mechanism has the identical self-invocation limitation covered in Chapters 11 and 20.
+- **Handle exceptions in `@Async void` methods explicitly.** An exception thrown from a `void`-returning `@Async` method has nowhere to propagate to (the caller already moved on) and is only visible via an `AsyncUncaughtExceptionHandler` you configure — otherwise it's silently swallowed into a log line easy to miss.
+- **Choose `fixedRate` vs `fixedDelay` deliberately, not by habit.** A job whose execution time can occasionally spike should almost always use `fixedDelay`, to guarantee a real gap rather than risk overlapping runs.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| `@Async` | Runs a method on a separate thread; caller doesn't block |
+| `CompletableFuture` | Standard way to retrieve a result from async work without blocking immediately |
+| `SimpleAsyncTaskExecutor` (default) | Unbounded, one-thread-per-call — dangerous, always replace |
+| `ThreadPoolTaskExecutor` | Configurable, bounded thread pool for async work |
+| `@Scheduled(fixedRate=...)` | Interval measured from the start of each run |
+| `@Scheduled(fixedDelay=...)` | Interval measured from the end of each run |
+| `@Scheduled(cron=...)` | Full calendar-based scheduling |
+| Distributed lock | Required to prevent duplicate `@Scheduled` execution across multiple instances |
+
+## Wrapping up
+
+`@Async` and `@Scheduled` both look deceptively simple, and both have exactly one production-critical detail easy to miss on first use: an unbounded default thread pool, and unguarded duplicate execution across instances, respectively. **Chapter 22** closes out Part 6 with logging best practices — structured logging, correlation IDs, and tying everything in this part together operationally.
+
+## Interview Questions
+
+**1. What does `@Async` do, mechanically?**
+Like `@Transactional` and the caching annotations, it's implemented via an AOP proxy: a call to an `@Async`-annotated method is intercepted, submitted to a configured thread pool executor, and control returns to the caller immediately rather than waiting for the method body to actually complete on the calling thread.
+
+*Follow-up: Why must an `@Async` method be called from outside its declaring class to actually behave asynchronously?* Because the proxy that intercepts the call only sits in front of the bean as seen from outside — a call made from another method within the same class invokes the real method directly on `this`, bypassing the proxy entirely, so the method executes synchronously on the calling thread with no error or warning, exactly the same self-invocation limitation covered for `@Transactional` in Chapter 11.
+
+**2. Why is Spring Boot's default async executor (`SimpleAsyncTaskExecutor`) considered dangerous in production?**
+It creates a brand-new thread for every single async invocation, with no pooling, no reuse, and — critically — no upper bound on how many threads can be created at once. Under real production load with many concurrent async calls, this can exhaust system thread resources entirely, leading to severe performance degradation or an outright crash, rather than gracefully queuing or rejecting excess work the way a bounded pool would.
+
+*Follow-up: What specific configuration values would you set on a `ThreadPoolTaskExecutor` to replace this default safely, and what does each control?* `corePoolSize` (threads kept alive even when idle, handling steady-state load), `maxPoolSize` (the hard ceiling the pool can grow to under burst load), and `queueCapacity` (how many tasks can wait once all core threads are busy, before the pool grows toward `maxPoolSize`) — together these bound both memory/thread usage and define exactly how the executor behaves under sustained versus bursty load.
+
+**3. What's the difference between `fixedRate` and `fixedDelay` in `@Scheduled`?**
+`fixedRate` measures the interval from the *start* of one execution to the start of the next — if a run takes longer than the configured interval, the next run starts immediately after the previous one finishes, without overlapping, but with no guaranteed gap between them. `fixedDelay` measures the interval from the *end* of one execution to the start of the next, guaranteeing a genuine minimum gap regardless of how long any individual run takes.
+
+*Follow-up: For a job whose execution time is unpredictable and could occasionally take much longer than usual, which of the two would you choose, and why?* `fixedDelay` — since it measures from the *end* of the previous run, an occasional slow execution simply pushes the next run later by exactly that much extra time, rather than risking the appearance of back-to-back executions with effectively no breathing room in between, which `fixedRate` could produce if a run's duration approaches or exceeds the configured interval.
+
+**4. What does `CompletableFuture` provide that a plain `void`-returning `@Async` method doesn't?**
+It lets the caller actually retrieve a result from the asynchronous work once it completes, and compose further processing (`.thenApply()`, `.thenCombine()`) without necessarily blocking at all until a result is genuinely needed — a `void`-returning `@Async` method gives the caller no way to know when the work finished or to obtain any output from it at all.
+
+*Follow-up: What's the difference between calling `.get()` and `.join()` on a `CompletableFuture`, in terms of exception handling?* `.get()` is declared to throw checked exceptions (`InterruptedException`, `ExecutionException`), requiring the caller to handle or declare them explicitly. `.join()` behaves similarly but wraps any exception in an unchecked `CompletionException` instead, which is often more convenient in code that doesn't want to deal with checked exception handling — the underlying blocking behavior (waiting for the result) is otherwise the same for both.
+
+**5. Why does `@Scheduled` run independently on every instance by default, and why is that a problem?**
+`@Scheduled` has no built-in awareness of other instances of the same application running elsewhere — each instance's own scheduler simply triggers the annotated method according to its configured timing, with no coordination across instances at all. In a multi-instance deployment, this means every instance executes the same job at (approximately) the same time, causing duplicated work or duplicated side effects (like sending the same notification multiple times) for any job that isn't idempotent or explicitly guarded against this.
+
+*Follow-up: Why might this problem go unnoticed for a long time even after an application is scaled to multiple instances?* If the job's duplicate execution doesn't produce an obviously visible symptom — for example, a job that recomputes and overwrites the same cache or summary table idempotently — running it three times instead of once might waste some resources but produce no incorrect end result, masking the underlying coordination problem until a job with a genuinely non-idempotent side effect (like sending an email or charging a payment) is added and the duplication becomes visibly, concretely wrong.
+
+**6. What is a distributed lock, and why does it solve the multi-instance `@Scheduled` problem?**
+A distributed lock is a coordination mechanism (commonly backed by a database row, or Redis) that only one instance can successfully acquire at a time — by having each instance attempt to acquire the lock before actually executing a scheduled job's body, and only proceeding if the acquisition succeeds, only one instance ends up running the job for any given scheduled trigger, with the others safely skipping that execution.
+
+*Follow-up: Why is a database or Redis typically used for this lock rather than something purely in-memory within one of the instances?* Because the whole point is coordinating *across* separate application instances/JVMs, which don't share memory with each other at all — an in-memory lock would only be visible within the single instance holding it, providing no coordination whatsoever between separate instances; a shared, external store like a database or Redis is necessary precisely because it's visible and consistent across every instance attempting to acquire the same lock.
+
+**7. Why can't an exception thrown inside a `void`-returning `@Async` method be caught by the calling code's try/catch block?**
+Because the calling thread has already returned control immediately after submitting the async task — by the time the actual method body runs (and potentially throws) on a separate thread, the calling thread's stack frame and any surrounding try/catch it had is long gone; there's no synchronous call relationship left for a normal exception to propagate back through.
+
+*Follow-up: How would you ensure such exceptions are still visible and handled rather than silently disappearing?* Configure a custom `AsyncUncaughtExceptionHandler` via `AsyncConfigurer.getAsyncUncaughtExceptionHandler()`, which Spring invokes whenever an exception escapes an `@Async void` method — implementing it to log the exception prominently (or trigger alerting/metrics) is the standard way to make sure these failures don't disappear into an easily-missed log line with no follow-up action.
+
+**8. If an `@Async` method returns a `CompletableFuture` and the method itself throws an exception synchronously (before even reaching the async work), what happens?**
+Since `@Async` methods are typically expected to handle their own execution entirely on the async thread, an exception thrown synchronously before that (for example, in argument validation logic accidentally left outside the intended async execution) would propagate normally back to the caller through the proxy — but well-structured `@Async` methods generally ensure any exception occurring during the actual work is instead captured into the returned `CompletableFuture` (e.g., via `CompletableFuture.failedFuture(exception)`), so callers can handle it consistently through the future's own exception-handling methods rather than a mix of synchronous and asynchronous exception paths.
+
+*Follow-up: How would a caller handle an exception that occurred during the async work, captured in the returned `CompletableFuture`?* Via `.exceptionally(throwable -> ...)` or `.handle((result, throwable) -> ...)` chained onto the future, or by catching the `CompletionException` (or `ExecutionException`, depending on whether `.join()` or `.get()` was used) thrown when blocking on the future's result — either approach lets the caller respond to a failure in the async work without needing a traditional synchronous try/catch around the initial async call itself.
+
+**9. What determines whether an `@Async` thread pool should be sized closer to the number of CPU cores, versus significantly larger?**
+Whether the work is CPU-bound or I/O-bound. CPU-bound work (heavy computation) genuinely keeps a thread busy doing calculations, so having many more threads than CPU cores just causes contention for the same limited compute resources with no real throughput benefit. I/O-bound work (waiting on a network call, a database query, a file read) spends most of its time idle waiting rather than computing, so a much larger pool can be productive, since many threads can be "in flight" waiting simultaneously without competing for CPU time.
+
+*Follow-up: Is the `NotificationService.sendWelcomeEmail` example from earlier in this chapter more CPU-bound or I/O-bound, and what does that imply for its thread pool sizing?* It's I/O-bound — sending an email involves waiting on a network call to an external email service/SMTP server, during which the thread is mostly idle rather than computing. This implies its thread pool can reasonably be sized well beyond the number of CPU cores, since many such tasks can be legitimately in-flight (waiting) concurrently without meaningfully contending for actual CPU time.
+
+**10. What's a realistic reason to make a registration flow's welcome-email sending `@Async` rather than synchronous, as shown in this chapter's example?**
+The email-sending step (an external network call to an email provider) is comparatively slow and entirely non-essential to the core registration operation succeeding — making the user's registration request wait for that external call to complete before returning a response adds unnecessary latency to the user-facing request for a side effect the user isn't actually waiting to see confirmed in real time.
+
+*Follow-up: What's a trade-off or risk introduced by making it asynchronous instead of synchronous?* If the async email-sending fails (and that failure isn't properly surfaced via an `AsyncUncaughtExceptionHandler` or equivalent), the user's registration would appear to have succeeded (since the response already returned) while the welcome email silently never sent — a trade-off between faster response times and a slightly higher risk of unnoticed side-effect failures compared to a fully synchronous flow where a failure would be immediately visible in the request's response.
+
+**11. Why does `@EnableAsync` need to be explicitly added, rather than `@Async` working automatically once the annotation is present on a method?**
+`@EnableAsync` is what actually registers the AOP infrastructure (the proxy-creation mechanism and its associated advisor) needed to intercept `@Async`-annotated method calls at all — without it, `@Async` annotations are present in the code but have no active infrastructure processing them, so annotated methods would simply execute synchronously as if the annotation weren't there.
+
+*Follow-up: Is there a similar explicit "enable" annotation required for `@Scheduled` to actually take effect, and if so, which one?* Yes — `@EnableScheduling`, which registers the scheduling infrastructure responsible for actually triggering `@Scheduled`-annotated methods according to their configured timing; exactly analogous to `@EnableAsync` and `@EnableCaching` (Chapter 20), all following the same pattern of an explicit "enable" annotation activating the underlying processing infrastructure for their respective method-level annotations.
+
+**12. What happens to tasks submitted to a `ThreadPoolTaskExecutor` once both `maxPoolSize` and `queueCapacity` are exhausted?**
+By default, the task is rejected, and Spring's default rejection behavior throws a `TaskRejectedException` back to the caller (for a synchronous rejection scenario) — though this can be customized via a `RejectedExecutionHandler`, which determines the actual behavior when the pool genuinely cannot accept more work (options include discarding the task silently, discarding the oldest queued task to make room, or running the task on the caller's own thread as a backpressure mechanism).
+
+*Follow-up: Why might "running the task on the caller's own thread" (the `CallerRunsPolicy`) be a reasonable rejection strategy in some scenarios, despite temporarily defeating the purpose of async execution for that specific task?* It provides natural backpressure — forcing the calling thread to actually do the work itself (synchronously) when the pool is overwhelmed slows down the rate at which new work is submitted in the first place, since the caller is now busy rather than immediately moving on to generate even more async work; this can help a system degrade more gracefully under extreme load rather than either dropping work silently or throwing exceptions that the caller then has to specifically handle.
+
+**13. Why does a job that recomputes and overwrites a value idempotently mask the multi-instance `@Scheduled` duplication problem, while a job that sends an email does not?**
+An idempotent job produces the same correct end state no matter how many times it runs (recomputing and overwriting the same summary table three times leaves the same final result as running it once), so duplicate execution wastes some resources but causes no incorrect or user-visible outcome. A job with a genuinely non-idempotent side effect (sending an email, charging a payment) produces a different, incorrect cumulative outcome each additional time it runs — three instances each sending the same email means the user receives it three times, which is immediately, visibly wrong.
+
+*Follow-up: Could you make the email-sending job itself idempotent instead of adding a distributed lock, and would that be a better solution?* You could, for example, by having the job check a persistent record of "has this specific notification already been sent" before sending and only proceeding if it hasn't, effectively making duplicate executions harmless. This can be a perfectly valid, sometimes even preferable approach to a distributed lock — it addresses the root correctness issue directly rather than relying on coordination infrastructure — though it requires deliberately designing that idempotency check into every such job, whereas a distributed lock is a single, reusable mechanism applicable uniformly across any scheduled job regardless of whether its logic was designed to be idempotent.
+
+**14. If a `@Scheduled` job with `cron = "0 0 2 * * *"` takes over 24 hours to complete due to an unexpected data volume spike, what happens to its next scheduled trigger?**
+By default, Spring's scheduling infrastructure runs each `@Scheduled` job's executions sequentially on its own dedicated scheduling thread (unless configured with a task executor supporting concurrent execution) — if a run is still in progress when the next cron trigger time arrives, that next trigger is effectively skipped or delayed, since the previous execution hasn't finished and freed up its execution slot yet, rather than starting a second overlapping execution of the same job.
+
+*Follow-up: Is this default sequential, non-overlapping behavior always desirable, or could it cause its own problems?* It's usually desirable specifically to prevent overlapping runs of the same job from corrupting shared state or duplicating work — but it does mean a single abnormally long-running execution can cause one or more subsequent scheduled triggers to be silently missed entirely, which is worth monitoring for (via the observability practices from Chapter 19) so an unusually long run doesn't quietly cause a job to stop executing on its expected schedule without anyone noticing.
+
+**15. How would you decide whether a specific piece of work in an application belongs as an `@Async` method versus a `@Scheduled` job?**
+`@Async` is for work that's triggered by something happening in the application right now (a user registering, an order being placed) but doesn't need to block the response to the triggering request — it's reactive to an event. `@Scheduled` is for work that runs on its own independent timeline, regardless of any specific triggering user action — periodic reports, nightly cleanup, polling an external system at a fixed interval. The distinguishing question is whether the work is a side effect of a specific request (`@Async`) or an independently recurring, time-driven responsibility (`@Scheduled`).
+
+*Follow-up: Could a single piece of functionality legitimately need both — for example, being triggered on-demand sometimes and also run periodically as a safety net?* Yes — a common pattern is a core piece of business logic implemented once (e.g., "process any orders stuck in a pending state") exposed both as an `@Async`-triggered method called reactively whenever something goes wrong for a specific order, and separately wrapped by a `@Scheduled` job that periodically sweeps for and reprocesses any orders that might have been missed by the reactive path entirely — the underlying logic is shared, but it's invoked through two different triggering mechanisms serving two different purposes (immediate reaction vs. periodic safety net).

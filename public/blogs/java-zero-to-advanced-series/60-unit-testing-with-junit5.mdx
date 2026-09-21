@@ -1,0 +1,202 @@
+---
+title: "Unit Testing with JUnit 5"
+description: "JUnit 5 architecture (Platform/Jupiter/Vintage), core annotations, assertions, parameterized tests, and test lifecycle."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Testing & Build Tools"
+chapter: 60
+totalChapters: 65
+slug: "unit-testing-with-junit5"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "testing", "junit5", "unit-testing"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## JUnit 5's Three-Part Architecture
+
+JUnit 5 (Jupiter) is actually composed of three distinct sub-projects: the **Platform** (the foundation for launching testing frameworks on the JVM — the engine that discovers and runs tests, used by build tools and IDEs alike), **Jupiter** (the new JUnit 5 programming model and API most people mean when they say "JUnit 5"), and **Vintage** (a compatibility layer letting JUnit 3/4 tests keep running on the JUnit 5 Platform during migration).
+
+## A Basic Test
+
+```java
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CalculatorTest {
+
+    @Test
+    void addsTwoNumbers() {
+        Calculator calculator = new Calculator();
+        int result = calculator.add(2, 3);
+        assertEquals(5, result);
+    }
+}
+```
+
+- Test classes and methods no longer need to be `public` (package-private is sufficient and is now the conventional style) — a deliberate change from JUnit 4.
+- `@Test` marks a method as a test case; JUnit discovers and runs every `@Test`-annotated method in the class.
+
+## Core Assertions
+
+```java
+assertEquals(5, result);                          // expected, actual
+assertTrue(result > 0);
+assertFalse(list.isEmpty());
+assertNull(value);
+assertNotNull(value);
+assertThrows(IllegalArgumentException.class, () -> calculator.divide(1, 0));
+assertAll(                                          // groups multiple assertions — ALL run, even if one fails first
+    () -> assertEquals(5, result.sum()),
+    () -> assertEquals(2, result.count())
+);
+```
+
+`assertAll()` is particularly valuable: with individual sequential assertions, the *first* failure stops the test immediately, hiding whether later assertions would have also failed. `assertAll()` runs every supplied assertion and reports **all** failures together in one combined report.
+
+## Test Lifecycle Annotations
+
+```java
+class OrderServiceTest {
+
+    @BeforeAll
+    static void setUpOnce() {   // MUST be static — runs ONCE before any test in this class
+        System.out.println("Suite starting");
+    }
+
+    @BeforeEach
+    void setUp() {   // runs before EVERY test method — fresh state per test
+        this.service = new OrderService();
+    }
+
+    @Test
+    void processesValidOrder() { /* ... */ }
+
+    @Test
+    void rejectsInvalidOrder() { /* ... */ }
+
+    @AfterEach
+    void tearDown() { /* cleanup after EVERY test */ }
+
+    @AfterAll
+    static void tearDownOnce() { /* runs ONCE after all tests */ }
+}
+```
+
+![Diagram: JUnit test lifecycle showing BeforeAll running once, then BeforeEach/Test/AfterEach repeating for each test method, followed by AfterAll running once at the end](/diagrams/ch60-junit-lifecycle-order.svg)
+
+By default, JUnit creates a **new test class instance for every single test method** — this is precisely why `@BeforeEach` (not a constructor) is the idiomatic place to reset shared fields, ensuring one test's mutations to instance state can never leak into and affect another, independently-run test.
+
+## Parameterized Tests — Running the Same Test Logic Across Multiple Inputs
+
+```java
+@ParameterizedTest
+@ValueSource(ints = {2, 4, 6, 8})
+void isEven(int number) {
+    assertTrue(number % 2 == 0);
+}
+
+@ParameterizedTest
+@CsvSource({
+    "2, 3, 5",
+    "10, 20, 30",
+    "-1, 1, 0"
+})
+void addsCorrectly(int a, int b, int expectedSum) {
+    assertEquals(expectedSum, new Calculator().add(a, b));
+}
+```
+
+Parameterized tests avoid copy-pasting near-identical test methods that only differ by input values — a single test method runs once per supplied data row, each reported as its own individually-named result.
+
+## `@DisplayName` and Nested Tests
+
+```java
+@DisplayName("Order Service")
+class OrderServiceTest {
+
+    @Nested
+    @DisplayName("when order is valid")
+    class ValidOrder {
+        @Test
+        @DisplayName("should calculate correct total")
+        void calculatesTotal() { /* ... */ }
+    }
+
+    @Nested
+    @DisplayName("when order is invalid")
+    class InvalidOrder {
+        @Test
+        @DisplayName("should throw an exception")
+        void throwsException() { /* ... */ }
+    }
+}
+```
+
+`@Nested` groups related tests hierarchically, producing much more readable test reports (particularly valuable for behavior-driven-style test organization: "when X, it should Y"), and `@DisplayName` overrides the default method-name-based test report label with genuine, readable prose.
+
+## Testing Exceptions
+
+```java
+@Test
+void divideByZeroThrowsException() {
+    Calculator calculator = new Calculator();
+    IllegalArgumentException exception = assertThrows(
+        IllegalArgumentException.class,
+        () -> calculator.divide(10, 0)
+    );
+    assertEquals("Cannot divide by zero", exception.getMessage());   // also verify the message, not just the type
+}
+```
+
+Verifying both the exception's type **and** its message content is stronger than checking the type alone — it guards against a refactor accidentally changing which specific validation failed while still coincidentally throwing the same exception type for a different reason.
+
+## Key Takeaways
+
+- JUnit 5 splits into Platform (test execution engine), Jupiter (the modern API), and Vintage (JUnit 3/4 compatibility).
+- `@BeforeEach`/`@AfterEach` run per test method (fresh instance each time); `@BeforeAll`/`@AfterAll` run once per class and must be `static`.
+- `assertAll()` reports every failed assertion together, rather than stopping at the first failure like sequential assertions do.
+- `@ParameterizedTest` with `@ValueSource`/`@CsvSource` runs the same test logic across many inputs without duplicating test methods.
+
+---
+
+## Interview Questions
+
+**1. What are the three sub-projects that make up JUnit 5, and what does each one do?**
+The Platform provides the foundational test-discovery and execution engine that IDEs and build tools integrate with. Jupiter provides the modern JUnit 5 programming model and annotations (`@Test`, `@BeforeEach`, etc.) most developers directly interact with. Vintage is a compatibility layer allowing existing JUnit 3 and JUnit 4 tests to continue running unchanged on the JUnit 5 Platform during a gradual migration.
+
+**2. Why don't JUnit 5 test classes and methods need to be declared `public`, unlike JUnit 4?**
+JUnit 5 uses reflection in a way that doesn't require `public` visibility — package-private (default) access is sufficient for JUnit to discover and invoke test classes and methods, which has become the conventional modern style since there's no longer any technical reason to widen visibility purely to satisfy the testing framework.
+
+**3. What's the difference between `@BeforeEach` and `@BeforeAll`?**
+`@BeforeEach` runs before every individual test method in the class, on a fresh instance of the test class each time (by default), making it the right place for resetting shared state or creating fresh test fixtures per test. `@BeforeAll` runs exactly once, before any test method in the class runs at all, and must be declared `static` (since it runs before any instance of the test class exists) — appropriate for expensive, one-time setup shared safely across every test in the class.
+
+**4. Why must `@BeforeAll` and `@AfterAll` methods be `static`?**
+By default, JUnit creates a new instance of the test class for every individual test method, meaning there's no single shared instance across the whole class's test run. `@BeforeAll`/`@AfterAll` need to execute exactly once, before any test-specific instance exists (or after all of them have finished), so they must be tied to the class itself via `static` rather than to any one particular instance.
+
+**5. Why does JUnit create a new instance of the test class for each test method by default?**
+This ensures complete test isolation — instance field mutations made during one test cannot accidentally leak into or affect another, independently-run test, since each test method executes against its own fresh, cleanly-initialized object. This design specifically prevents a common class of flaky-test bugs caused by shared, cross-test mutable state.
+
+**6. What does `assertAll()` do differently from writing several separate, sequential `assertEquals()` calls?**
+Sequential assertions stop test execution immediately at the very first failure, silently leaving any subsequent assertions in that test unexecuted and their outcome unknown. `assertAll()` executes every one of its supplied assertions regardless of earlier failures within the group, and reports every failure that occurred together in a single, combined failure report — giving a complete picture of everything that's actually wrong in one test run, rather than requiring a fix-rerun-discover-next-failure cycle.
+
+**7. How does `assertThrows()` work, and why is it preferred over a manual try-catch block for testing that an exception is thrown?**
+`assertThrows(ExceptionType.class, executable)` executes the given lambda/method reference and asserts that it throws an exception of exactly the specified type (or a subtype), returning that caught exception for further assertions (like checking its message) — failing the test explicitly and clearly if no exception, or the wrong type, is thrown. A manual try-catch requires more verbose boilerplate to correctly fail the test if no exception occurs at all (an easy detail to get wrong or forget), which `assertThrows` handles correctly and concisely by design.
+
+**8. Why is it often valuable to assert on both an exception's type and its message, rather than just its type?**
+Checking only the exception type can pass even if the exception was thrown for an entirely different, unintended reason than the one the test is actually meant to verify — especially for broad exception types that might be thrown from multiple different validation checks within the same method. Additionally asserting the specific message ensures the test is actually verifying the *specific* failure condition it claims to be testing, catching a class of false-positive passing tests that a type-only check would miss.
+
+**9. What problem do parameterized tests (`@ParameterizedTest`) solve?**
+They eliminate the need to write several nearly-identical test methods that differ only in their specific input values and expected outputs — a single parameterized test method, combined with a data source annotation like `@ValueSource` or `@CsvSource`, runs the same test logic once for each supplied set of inputs, with each execution reported as its own distinct, individually-identifiable test result.
+
+**10. What's the difference between `@ValueSource` and `@CsvSource` for parameterized tests?**
+`@ValueSource` supplies a simple list of single values of one primitive type (or `String`) directly, appropriate when the parameterized test method takes exactly one parameter. `@CsvSource` supplies comma-separated rows of multiple values per test invocation, appropriate when the parameterized test method needs multiple correlated parameters per execution (like two inputs and an expected combined result).
+
+**11. What is the purpose of `@Nested` test classes, and what readability benefit do they provide?**
+`@Nested` lets you group related test methods into inner classes reflecting a logical hierarchy or shared context/precondition (e.g., "when the order is valid" versus "when the order is invalid"), producing much more readable, hierarchically-organized test reports than a single flat list of independently-named test methods — particularly valuable for organizing tests in a behavior-driven, "given/when/then"-style structure.
+
+**12. If a test method modifies an instance field of the test class, could that change affect a different test method run afterward, assuming JUnit 5's default per-method instance lifecycle?**
+No, not by default — since JUnit creates a brand-new instance of the test class for each individual test method, any instance field mutation made during one test method exists only on that test's own dedicated instance and has no way to be observed by a different test method, which runs against its own separate, freshly-constructed instance with its own independent copy of every instance field.

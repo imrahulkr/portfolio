@@ -1,0 +1,158 @@
+---
+title: "Exception Handling Fundamentals"
+description: "The Throwable hierarchy, checked vs unchecked exceptions, try-catch-finally mechanics, multi-catch, and why finally runs even after a return."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Exception Handling & I/O"
+chapter: 25
+totalChapters: 65
+slug: "exception-handling-fundamentals"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "exceptions"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## The `Throwable` Hierarchy
+
+```
+Throwable
+  ├── Error               (JVM-level, unrecoverable — OutOfMemoryError, StackOverflowError)
+  └── Exception
+        ├── RuntimeException (UNCHECKED — NullPointerException, IllegalArgumentException, ...)
+        └── (everything else) (CHECKED — IOException, SQLException, ...)
+```
+
+![Diagram: Throwable at root branching into Error and Exception, with Exception further branching into RuntimeException (unchecked) and other checked exception subclasses](/diagrams/ch25-throwable-hierarchy.svg)
+
+- **`Error`** — represents serious problems the JVM itself encounters that applications generally shouldn't try to catch or recover from (`OutOfMemoryError`, `StackOverflowError`).
+- **Checked exceptions** — must be either caught or declared in a method's `throws` clause; the compiler enforces this. Represent conditions a well-written program should anticipate and recover from (a missing file, a network timeout).
+- **Unchecked exceptions (`RuntimeException` and its subclasses)** — the compiler does not force you to catch or declare them. Typically represent programming errors (`NullPointerException`, `ArrayIndexOutOfBoundsException`, `IllegalArgumentException`) that ideally should be prevented rather than routinely caught.
+
+## `try-catch-finally`
+
+```java
+public void readConfig(String path) {
+    try {
+        // risky operation
+        loadFile(path);
+    } catch (FileNotFoundException e) {
+        System.out.println("Config file missing, using defaults");
+    } catch (IOException e) {
+        System.out.println("Error reading config: " + e.getMessage());
+    } finally {
+        System.out.println("Cleanup always runs here");
+    }
+}
+```
+
+- Catch blocks are checked **top to bottom**, and only the first matching one runs — order matters: a more specific exception type must be caught before a more general one (`FileNotFoundException` before `IOException`, since the former is a subtype of the latter; reversing the order is actually a compile error, since the general catch would make the specific one unreachable).
+- `finally` runs **regardless** of whether an exception was thrown, caught, or whether the `try`/`catch` block returned, `break`, or `continue`d — the only ways to prevent `finally` from running are `System.exit()` or the JVM crashing/being killed.
+
+## `finally` Runs Even After a `return`
+
+```java
+public int demo() {
+    try {
+        return 1;
+    } finally {
+        System.out.println("finally still runs before the method actually returns");
+    }
+}
+// demo() prints the message, then returns 1
+```
+
+**A dangerous gotcha:** if `finally` itself contains a `return`, it **silently overrides** any return value or even an exception from the `try`/`catch` block:
+
+```java
+public int broken() {
+    try {
+        return 1;
+    } finally {
+        return 2;   // this swallows the "return 1" entirely — broken() always returns 2
+    }
+}
+```
+
+Never put a `return` (or a `throw`) inside a `finally` block — it's a well-known anti-pattern that silently discards the original outcome.
+
+## Multi-Catch (Java 7+)
+
+```java
+try {
+    riskyOperation();
+} catch (IOException | SQLException e) {
+    log.error("Operation failed", e);
+}
+```
+
+Useful when multiple unrelated exception types warrant identical handling — avoids duplicating the catch block body. The caught variable (`e` here) is implicitly treated as the common supertype of the listed exceptions for the purposes of what methods you can call on it.
+
+## Checked vs. Unchecked — A Practical Decision Guide
+
+```java
+// Checked — caller SHOULD be forced to handle this; it's a recoverable, expected condition
+public void connect() throws IOException { ... }
+
+// Unchecked — represents a programming bug the caller shouldn't need to declare handling for
+public void withdraw(double amount) {
+    if (amount < 0) {
+        throw new IllegalArgumentException("Amount cannot be negative");
+    }
+}
+```
+
+The long-running debate over checked vs. unchecked exceptions in Java's design is itself a common interview discussion point — many modern APIs (including much of Spring) lean toward unchecked exceptions even for I/O-like failures, converting checked exceptions at their boundary, to avoid forcing every caller up the call stack to handle or declare exceptions they often can't meaningfully act on anyway.
+
+## Key Takeaways
+
+- `Error` represents unrecoverable JVM-level problems; checked exceptions represent recoverable conditions the compiler forces you to address; unchecked exceptions typically represent programming bugs.
+- `finally` always runs, except for `System.exit()` or a JVM crash — but a `return`/`throw` inside `finally` silently discards the try/catch block's original outcome, and should be avoided.
+- Catch blocks are matched top to bottom; a subtype exception must be caught before its supertype, or the compiler rejects the unreachable catch.
+- Multi-catch (`catch (A | B e)`) reduces duplication when several unrelated exception types need identical handling.
+
+---
+
+## Interview Questions
+
+**1. What's the difference between an `Error` and an `Exception`?**
+`Error` represents serious, generally unrecoverable problems originating from the JVM itself (running out of memory, stack overflow from infinite recursion) — application code typically shouldn't try to catch and "handle" these, since the JVM may be in an unstable state. `Exception` represents conditions the application itself can reasonably anticipate and potentially recover from, and is further split into checked and unchecked subtypes.
+
+**2. What's the difference between a checked and an unchecked exception?**
+A checked exception (any `Exception` subclass that isn't a `RuntimeException`) must be either caught or declared in the method's `throws` clause, enforced by the compiler — it represents an anticipated, recoverable failure condition like a missing file. An unchecked exception (`RuntimeException` and its subclasses) requires no such compiler-enforced handling, and typically signals a programming error (like passing an invalid argument) that ideally should be prevented through correct code rather than routinely caught.
+
+**3. Why does `finally` execute even if the `try` block contains a `return` statement?**
+The JVM guarantees `finally` runs as part of exiting the `try` block through any path — normal completion, an exception, or a `return`/`break`/`continue` — specifically so cleanup code (closing resources, releasing locks) is never skipped just because the method happened to return early from inside the `try`. The `return` value is computed and set aside first, `finally` runs, and only then does the method actually return that previously-computed value (unless `finally` itself overrides it, as covered next).
+
+**4. What happens if both a `try` block and its `finally` block contain a `return` statement?**
+The `finally` block's `return` wins — it completely overrides and discards the `try` block's return value (or even an in-flight, uncaught exception from the try/catch), silently swallowing it. This makes returning from within `finally` a well-known anti-pattern, since it can hide bugs and unexpected control flow that's very difficult to spot during a code review.
+
+**5. In what order are multiple `catch` blocks evaluated, and what compile error can result from the wrong order?**
+They're evaluated top to bottom, and the first matching catch block (where the thrown exception's type is assignable to the catch parameter's type) is executed, with the rest skipped entirely. If a more general exception type's catch block is placed *before* a more specific subtype's catch block (e.g., catching `IOException` before `FileNotFoundException`), the compiler reports the later, more specific catch block as unreachable, since the earlier general catch would always match first — this is a compile-time error, not a runtime surprise.
+
+**6. What is multi-catch, and what constraint applies to the exception types listed in it?**
+Introduced in Java 7, multi-catch (`catch (TypeA | TypeB e)`) lets a single catch block handle multiple, unrelated exception types identically. The listed types cannot be in a subtype/supertype relationship with each other (that would be redundant and is a compile error) — they must be genuinely distinct branches of the exception hierarchy, and the resulting caught variable is implicitly typed as their most specific common supertype.
+
+**7. Can a method's `throws` clause declare a checked exception it never actually throws?**
+Yes, syntactically this is legal — declaring `throws IOException` when no code path in the method actually throws it doesn't cause a compile error. It's poor practice, though, since it forces every caller to handle or declare an exception that can never actually occur, adding unnecessary ceremony without benefit.
+
+**8. What's the practical difference between throwing a checked exception and an unchecked exception from an API design perspective?**
+A checked exception forces every caller up the call chain to explicitly handle or re-declare it, which communicates "this failure is expected and recoverable, and callers must consciously decide how to respond." An unchecked exception imposes no such compiler-enforced obligation, which fits situations where the failure typically represents a bug (invalid input, a violated precondition) that the immediate caller usually can't meaningfully recover from — forcing every caller in the chain to handle it would just add boilerplate `catch` blocks that often just rethrow or log without any real recovery logic.
+
+**9. Why do many modern frameworks (including much of Spring) prefer unchecked exceptions even for failures that are conceptually "checked" in nature, like a database connection failure?**
+Checked exceptions in Java don't compose well through layers of abstraction — a low-level `SQLException` bubbling up through several service layers forces every intermediate method to either declare `throws SQLException` (leaking a low-level implementation detail into a higher-level API) or catch-and-rethrow it repeatedly. Wrapping such failures in an unchecked exception at the boundary avoids polluting method signatures across many layers, while callers who specifically want to handle the failure can still choose to catch that unchecked type explicitly.
+
+**10. What is the difference between `throw` and `throws`?**
+`throw` is a statement used inside a method body to actually raise a specific exception instance at that point in execution (`throw new IllegalArgumentException("bad input")`). `throws` is part of a method's signature, declaring which checked exception types that method might propagate to its caller, without itself raising anything — it's purely a compile-time declaration.
+
+**11. Can a `catch` block itself throw a new exception? What happens to the original exception in that case?**
+Yes — this is common when wrapping a low-level exception in a more meaningful higher-level one. If the new exception is constructed with the original exception passed as its "cause" (e.g., `throw new ServiceException("failed", originalException)`), the original is preserved and accessible via `getCause()`, maintaining the full causal chain for diagnostics even though a different exception type is now propagating.
+
+**12. What is a common bug related to `finally` blocks and resource cleanup that try-with-resources (Chapter 27) was introduced to fix?**
+Manually closing resources inside a `finally` block requires its own nested `try-catch` (since `close()` itself can throw), and forgetting this, or writing it incorrectly, can either mask the original exception with a new one thrown during cleanup, or leave a resource leaked if the closing code itself has a bug. Try-with-resources automates this correctly, guaranteeing `close()` is called and properly handling (via "suppressed exceptions") the case where both the try block and the close both throw.
+
+**13. Does catching `Exception` (the broad superclass) also catch unchecked `RuntimeException`s?**
+Yes — since `RuntimeException` is itself a subclass of `Exception`, a `catch (Exception e)` block matches both checked exceptions and any unchecked `RuntimeException`. This is generally considered poor practice in production code (it can silently swallow genuine bugs alongside expected recoverable conditions) unless deliberately intended as a last-resort catch-all, such as at the outermost boundary of an application to prevent a single unexpected failure from crashing an entire process.

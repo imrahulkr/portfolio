@@ -1,0 +1,144 @@
+---
+title: "NIO & NIO.2"
+description: "Path and Files for modern file handling, buffers and channels for non-blocking I/O, and memory-mapped files."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Exception Handling & I/O"
+chapter: 29
+totalChapters: 65
+slug: "nio-and-nio2"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "io", "nio"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 10
+---
+
+## Why NIO Exists Alongside `java.io`
+
+The original `java.io` (Chapter 28) is stream-oriented and blocking — a `read()` call blocks the calling thread until data is available. `java.nio` (New I/O, Java 4) introduced **buffers** and **channels** for non-blocking, higher-throughput I/O, and `java.nio.file` (NIO.2, Java 7) modernized file-system operations entirely, replacing the old, limited `java.io.File` class.
+
+## `Path` and `Files` — The Modern File API (NIO.2)
+
+```java
+import java.nio.file.*;
+
+Path path = Path.of("data", "config.txt");   // platform-independent path construction
+
+boolean exists = Files.exists(path);
+long size = Files.size(path);
+List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+
+Files.writeString(path, "Hello, NIO.2!", StandardCharsets.UTF_8);
+Files.copy(path, Path.of("backup", "config.txt"), StandardCopyOption.REPLACE_EXISTING);
+Files.delete(path);
+```
+
+Compared to the legacy `java.io.File`, `Path`/`Files` provides far richer error information (specific exceptions like `NoSuchFileException` instead of `File`'s notorious pattern of many methods just returning `false` on failure with no indication of *why*), symbolic link support, and a consistent, modern API surface.
+
+```java
+// Walking a directory tree — Java 8+ Stream-based
+try (Stream<Path> paths = Files.walk(Path.of("src"))) {
+    paths.filter(Files::isRegularFile)
+         .filter(p -> p.toString().endsWith(".java"))
+         .forEach(System.out::println);
+}
+```
+
+## Buffers — The Core NIO Data Container
+
+A `Buffer` (e.g., `ByteBuffer`, `CharBuffer`) is a fixed-size container for data, tracked by three key properties: **capacity** (total size, fixed at creation), **position** (the next index to read/write), and **limit** (the boundary beyond which no reading/writing should occur).
+
+```java
+ByteBuffer buffer = ByteBuffer.allocate(1024);
+
+buffer.put("Hello".getBytes());   // writing mode — position advances as bytes are added
+buffer.flip();                     // switches to reading mode: limit = current position, position = 0
+
+byte[] data = new byte[buffer.remaining()];
+buffer.get(data);                  // reading mode — position advances as bytes are read
+System.out.println(new String(data));   // "Hello"
+```
+
+![Diagram: ByteBuffer state transition showing position/limit/capacity markers before and after flip(), illustrating the switch from write mode to read mode](/diagrams/ch29-bytebuffer-flip.svg)
+
+Forgetting to call `flip()` before reading is one of the most common NIO bugs — without it, `position` is still wherever writing left off, and attempting to read from there (rather than from the beginning of the written data) produces empty or garbage results.
+
+## Channels — Bidirectional, Buffer-Based I/O
+
+A `Channel` (e.g., `FileChannel`, `SocketChannel`) represents an open connection to an I/O source (a file, a network socket) and reads/writes data via `Buffer` objects, unlike `java.io` streams, which read/write individual bytes or characters directly.
+
+```java
+try (FileChannel channel = FileChannel.open(Path.of("data.bin"), StandardOpenOption.READ)) {
+    ByteBuffer buffer = ByteBuffer.allocate(1024);
+    int bytesRead = channel.read(buffer);
+    buffer.flip();
+    // process buffer contents
+}
+```
+
+Channels can also be **non-blocking** (`configureBlocking(false)`) and used with a `Selector` to monitor many channels for readiness on a single thread — the foundation of high-throughput network servers that need to handle thousands of concurrent connections without one thread per connection. This selector-based model is largely what frameworks like Netty (used under the hood in reactive Spring WebFlux applications) build upon.
+
+## Memory-Mapped Files
+
+`FileChannel.map()` maps a file's contents directly into the process's virtual memory address space, letting you interact with a (potentially huge) file as if it were an in-memory array — the OS handles paging data in and out as needed, often dramatically outperforming conventional read/write calls for very large files with random-access patterns.
+
+```java
+try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+    MappedByteBuffer mappedBuffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size());
+    byte firstByte = mappedBuffer.get(0);   // direct memory access, no explicit read() call
+}
+```
+
+## `java.io` vs. NIO — When to Use Which
+
+| | `java.io` (Chapter 28) | `java.nio` |
+|---|---|---|
+| Model | Stream-oriented, blocking | Buffer/channel-oriented, can be non-blocking |
+| Typical use | Simple file reading/writing, general application code | High-throughput servers, large file handling, memory-mapped access |
+| API complexity | Simple, straightforward | More complex, more control |
+
+For everyday application file I/O, `Files`/`Path` (NIO.2) has effectively replaced `java.io.File` entirely as the modern default — but the buffer/channel/selector machinery is mostly relevant when building (or understanding the internals of) high-performance networking or file-processing systems, rather than typical application code.
+
+## Key Takeaways
+
+- `Path`/`Files` (NIO.2) is the modern replacement for `java.io.File`, with much better error reporting and a richer API.
+- A `Buffer`'s position/limit/capacity model requires calling `flip()` to switch from writing mode to reading mode — a very common source of bugs when forgotten.
+- Channels move data between buffers and I/O sources, and can operate non-blocking with a `Selector` for scalable, single-threaded management of many connections.
+- Memory-mapped files let you treat file contents as directly-addressable memory, often faster for large files with random access patterns.
+
+---
+
+## Interview Questions
+
+**1. What are the two major generations of I/O APIs in Java, and what motivated the second one?**
+`java.io` (original, stream-based, blocking) and `java.nio`/`java.nio.file` (introduced in Java 4, expanded significantly in Java 7 as "NIO.2"). NIO was motivated by the need for non-blocking, buffer-based I/O capable of scaling to many concurrent connections efficiently (important for high-throughput servers), and NIO.2 specifically modernized file-system operations, replacing the limited and poorly-diagnostic `java.io.File` API.
+
+**2. What's a key usability advantage of `Files`/`Path` (NIO.2) over the legacy `java.io.File` class?**
+`java.io.File` notoriously reports many failures by simply returning `false` from a method like `delete()` or `mkdir()`, giving no indication of *why* the operation failed. `Files` methods instead throw specific, informative exceptions (`NoSuchFileException`, `FileAlreadyExistsException`, `AccessDeniedException`, etc.), making failure diagnosis significantly easier without needing to guess or add separate existence/permission checks beforehand.
+
+**3. What are the three key properties of a `Buffer`, and what does each represent?**
+Capacity (the buffer's total, fixed size, set at allocation and never changing), position (the index of the next element to be read or written, advancing as data flows through), and limit (the index marking the boundary beyond which no more elements should be read or written — for a freshly-allocated buffer in writing mode, limit equals capacity).
+
+**4. What does `Buffer.flip()` do, and why is forgetting to call it before reading such a common bug?**
+`flip()` switches a buffer from writing mode to reading mode by setting `limit` to the current `position` (marking exactly how much data was actually written) and resetting `position` back to `0` (so reading starts from the beginning of that written data). Forgetting to call it means `position` is still wherever the last write left off, so a subsequent read starts from that point instead of the beginning — typically producing an empty result (since `position` may already equal `limit`) rather than an obvious error, which is exactly why it's such an easy, silent bug to introduce.
+
+**5. What's the fundamental difference between how a `java.io` stream and an NIO `Channel` move data?**
+A `java.io` stream reads or writes data directly, one byte/character (or a small array) at a time, from/to its source or destination. An NIO `Channel` reads data *into* a `Buffer` object, or writes data *from* a `Buffer`, meaning all I/O goes through this intermediate, reusable buffer container rather than being pulled/pushed directly into arbitrary application data structures.
+
+**6. What is a `Selector`, and what problem does it solve for network servers?**
+A `Selector` lets a single thread monitor multiple non-blocking `Channel`s simultaneously, and be notified only when a particular channel is actually ready for an operation (data available to read, ready to accept a write, etc.), rather than requiring one dedicated thread to block on each individual connection. This is what allows a server to handle a very large number of concurrent connections efficiently with a small, fixed number of threads, instead of the traditional "one thread per connection" model, which doesn't scale well to tens of thousands of connections.
+
+**7. What is a memory-mapped file, and when might it offer a performance advantage over conventional read/write I/O?**
+A memory-mapped file (via `FileChannel.map()`) maps a file's contents directly into the process's virtual address space, so the file can be accessed like an in-memory array, with the operating system's virtual memory system handling paging data in and out of physical memory as needed. It can offer significant performance advantages for very large files accessed with random (non-sequential) access patterns, since it avoids repeated explicit system calls and can let the OS's existing, highly-optimized page cache and paging mechanisms do the heavy lifting.
+
+**8. For typical application-level file reading and writing (not high-throughput networking), would you reach for `java.io` or `java.nio`/NIO.2 today?**
+`Path`/`Files` from `java.nio.file` (NIO.2) is the modern default for everyday file operations — better error handling, a cleaner API, and Stream-based directory traversal (`Files.walk`, `Files.list`) — even though it's technically part of the "NIO" package family; the lower-level buffer/channel/selector machinery is mostly relevant for specialized high-performance or networking use cases, not routine application file handling.
+
+**9. Why might using `ByteBuffer.allocateDirect()` instead of `ByteBuffer.allocate()` be beneficial for I/O-heavy code, and what's the trade-off?**
+A direct buffer is allocated outside the regular JVM heap, in memory the OS can access directly, which can avoid an extra copy step during actual I/O operations (the OS would otherwise need an intermediate native buffer to interact with a heap-based buffer). The trade-off is that direct buffer allocation and deallocation is more expensive than regular heap allocation, so it's best reserved for long-lived, frequently-reused buffers rather than allocated fresh for every small, short-lived operation.
+
+**10. Can you use try-with-resources with NIO channels and file operations? Give an example of why that matters.**
+Yes — `FileChannel` and related NIO resource classes implement `AutoCloseable` (via `Channel`), so they integrate directly with try-with-resources (Chapter 27) exactly like `java.io` streams do, guaranteeing the underlying OS file descriptor or socket is released even if an exception occurs mid-operation: `try (FileChannel channel = FileChannel.open(path)) { ... }` ensures the channel is closed automatically regardless of how the block exits.

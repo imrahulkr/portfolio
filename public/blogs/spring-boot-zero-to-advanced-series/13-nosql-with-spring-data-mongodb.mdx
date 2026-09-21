@@ -1,0 +1,190 @@
+---
+title: "NoSQL with Spring Data: MongoDB Integration"
+description: "Spring Data's repository pattern extends naturally to MongoDB — but documents aren't rows, and knowing when a document model fits better than a relational one matters more than the API syntax."
+date: "2026-09-14"
+readTime: "11 min read"
+series: "spring-boot"
+part: 13
+tags: ["Spring Boot", "MongoDB", "NoSQL"]
+---
+
+Everything in Part 3 so far has been relational. This chapter covers Spring Data MongoDB — both the practical API, which will feel familiar after Chapters 9–10, and the more important question of *when* a document database is actually the right tool.
+
+## When to reach for MongoDB over a relational database
+
+- **The data is naturally document-shaped** — a single logical object (a product catalog entry with nested variants, a user profile with nested preferences) that's almost always read and written as a whole, with few genuine cross-entity relational queries.
+- **Schema flexibility matters** — different documents in the same collection can have different fields, useful when the shape of the data genuinely varies or evolves quickly.
+- **Horizontal scale for high write/read volume** matters more than strong relational consistency guarantees.
+
+Reach for relational (Part 3's earlier chapters) when data has many genuine relationships that need to be queried and joined flexibly, and when strong transactional consistency across multiple related entities is a hard requirement — MongoDB supports multi-document transactions, but they're not as central to its design as they are in a relational database, and the natural mode of use is denormalized, self-contained documents.
+
+## Setup
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-mongodb</artifactId>
+</dependency>
+```
+
+```yaml
+spring:
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/mydb
+```
+
+## Defining a document
+
+```java
+@Document(collection = "products")
+public class Product {
+
+    @Id
+    private String id;   // MongoDB's ObjectId, typically represented as a String
+
+    private String name;
+    private BigDecimal price;
+    private List<String> tags;
+    private Map<String, String> attributes;   // schema-flexible key/value data
+
+    public Product(String name, BigDecimal price) {
+        this.name = name;
+        this.price = price;
+    }
+
+    // getters omitted
+}
+```
+
+`@Document` is MongoDB's equivalent of `@Entity` — it marks a class as mapped to a collection. Notice the natural fit for a `Map<String, String>` field (`attributes`) here: this is exactly the kind of flexible, varying-shape data that's awkward to model relationally (it would typically need a separate key-value table) but maps directly onto a document.
+
+## The repository pattern, unchanged
+
+```java
+public interface ProductRepository extends MongoRepository<Product, String> {
+
+    List<Product> findByTagsContaining(String tag);
+
+    List<Product> findByPriceLessThan(BigDecimal maxPrice);
+
+    Optional<Product> findByName(String name);
+}
+```
+
+This is deliberately almost identical to `JpaRepository` from Chapter 9 — Spring Data's repository abstraction is shared across its relational and NoSQL modules, so derived query methods, `save()`, `findById()`, and pagination via `Pageable` all work the same way. The underlying implementation translates method names into MongoDB queries instead of JPQL/SQL, but the programming model your service layer sees is unchanged.
+
+## `@Query` with MongoDB query syntax
+
+```java
+public interface ProductRepository extends MongoRepository<Product, String> {
+
+    @Query("{ 'price': { $gte: ?0, $lte: ?1 } }")
+    List<Product> findByPriceRange(BigDecimal min, BigDecimal max);
+}
+```
+
+Where JPA's `@Query` takes JPQL, MongoDB's `@Query` takes MongoDB's own JSON-based query syntax directly — the same language you'd use in the Mongo shell or Compass, with `?0`, `?1` as positional placeholders for method parameters.
+
+## Embedding vs referencing
+
+```java
+// Embedded — the common, idiomatic MongoDB pattern for data that's always accessed together
+@Document(collection = "orders")
+public class Order {
+    @Id
+    private String id;
+    private String customerName;
+    private List<OrderItem> items;   // stored directly inside the order document, not a separate collection
+}
+
+public class OrderItem {   // not a @Document — just an embedded, nested object
+    private String productId;
+    private int quantity;
+}
+```
+
+```
+Relational (Chapter 9)              MongoDB (embedded)
+┌─────────┐    ┌───────────┐        ┌─────────────────────┐
+│  orders  │    │order_items│        │   orders collection   │
+├─────────┤    ├───────────┤        ├─────────────────────┤
+│ id       │◀──│ order_id  │        │ { id, customerName,  │
+│ customer │   │ product_id│        │   items: [           │
+└─────────┘    │ quantity  │        │     {productId, qty} │
+               └───────────┘        │   ]                   │
+                                     │ }                      │
+                                     └─────────────────────┘
+```
+
+Embedding avoids the join `order_items` requires relationally — the whole order, items included, is fetched in a single document read. This is the idiomatic MongoDB pattern *specifically because* orders and their items are always read and written together; data that's independently queried or shared across many parent documents (a `Customer` referenced by many `Order`s) is instead referenced by ID, similar to a relational foreign key, and fetched separately.
+
+## Best practices & gotchas
+
+- **Don't model MongoDB documents the way you'd model relational tables.** Normalizing everything into separate collections and manually "joining" via application code (`@DBRef`, largely discouraged) throws away MongoDB's main strength — denormalized, self-contained documents that are fast to read as a whole.
+- **Embed data that's always read together; reference data that's large, independently queried, or shared across many parents.** A `Customer`'s full order history shouldn't be embedded inside the `Customer` document if orders are also queried independently and could grow unbounded.
+- **MongoDB documents have a 16MB size limit.** An ever-growing embedded array (unbounded order history embedded directly in a customer document, for instance) is a real, practical reason to reference instead of embed.
+- **Multi-document transactions exist in MongoDB but aren't the default mode of use.** Reach for them when genuinely needed, but the idiomatic MongoDB design goal is usually to model data so that a single document write is enough — sidestepping the need for a cross-document transaction in the first place.
+- **Don't choose MongoDB just because "NoSQL is more scalable."** The right choice depends on whether your actual data and access patterns are genuinely document-shaped — a relational database with good indexing handles far more scale than most projects will ever need.
+
+## Quick reference
+
+| Concept | Relational equivalent |
+|---|---|
+| `@Document` | `@Entity` |
+| Collection | Table |
+| Document | Row (but far more flexible in shape) |
+| `MongoRepository<T, ID>` | `JpaRepository<T, ID>` — same programming model |
+| Embedding | Denormalization — data duplicated/nested to avoid a join |
+| Referencing | Foreign key — a separate lookup, similar to a relational join |
+
+## Wrapping up
+
+Spring Data's repository abstraction means switching between relational and document databases barely changes how your service layer looks — but the *data modeling* decisions (embed vs. reference) are genuinely different from relational normalization, and getting that right matters more than the specific API syntax. This closes Part 3. **Part 4** starts next, with **Chapter 14** covering Spring Security fundamentals — the filter chain referenced back in Chapter 8, now covered in full.
+
+## Interview Questions
+
+**1. When is MongoDB (or a document database generally) a better fit than a relational database?**
+When data is naturally document-shaped — a self-contained object that's almost always read and written as a whole (a product with nested variants, a user profile with nested preferences) — and when schema flexibility across documents in the same collection, or high horizontal write/read scale, matters more than strong relational consistency and flexible ad-hoc joins across many related entities.
+
+**2. What is the MongoDB equivalent of `@Entity`?**
+`@Document` — it marks a class as mapped to a MongoDB collection, analogous to how `@Entity` marks a class as mapped to a relational table.
+
+**3. How similar is the Spring Data MongoDB repository programming model to Spring Data JPA?**
+Deliberately almost identical — both extend a common Spring Data repository abstraction, so `save()`, `findById()`, derived query methods, and `Pageable`-based pagination all work the same way syntactically. The underlying implementation differs (translating to MongoDB query syntax instead of JPQL/SQL), but the service layer code calling the repository looks the same either way.
+
+**4. What's the fundamental modeling difference between embedding and referencing in MongoDB?**
+Embedding stores related data directly nested inside the parent document (e.g., `OrderItem`s stored as an array field inside the `Order` document itself) so it's fetched in a single read with no join. Referencing stores just an ID pointing to a separate document (similar to a relational foreign key), used when the related data is large, independently queried, or shared/reused across many different parent documents.
+
+**5. Why is embedding generally preferred in MongoDB over the relational instinct to normalize everything?**
+MongoDB's core performance advantage comes from being able to fetch a complete, self-contained document in a single read with no join. Normalizing data into many separate collections and manually correlating them via application-level lookups (or `@DBRef`) discards that advantage and reintroduces relational-style join complexity without a relational database's actual join support and consistency guarantees.
+
+**6. What's a concrete reason to choose referencing over embedding for a specific relationship, even in MongoDB?**
+When the related data is large and unbounded (e.g., a customer's entire order history, which could grow indefinitely) or independently queried and shared across many parent documents. MongoDB documents have a hard 16MB size limit, so an ever-growing embedded array is both a practical size risk and typically a sign the data isn't a good fit for embedding in the first place.
+
+**7. How does `@Query` differ between Spring Data JPA and Spring Data MongoDB?**
+Spring Data JPA's `@Query` takes JPQL (queries against the entity model, portable across relational databases). Spring Data MongoDB's `@Query` takes MongoDB's own native JSON-based query syntax directly — the same query language used in the Mongo shell — with positional placeholders (`?0`, `?1`) for method parameters.
+
+**8. Does MongoDB support transactions across multiple documents?**
+Yes, multi-document ACID transactions have been supported since MongoDB 4.0, but they aren't the primary, idiomatic mode of use the way single-document atomicity is. The idiomatic MongoDB design approach is generally to model data (often via embedding) so that a single document write is sufficient for most operations, reducing the need to reach for multi-document transactions in the first place.
+
+**9. What's a practical example of data that's naturally suited to a schema-flexible field like a `Map<String, String>` in MongoDB, and why is it awkward relationally?**
+Arbitrary product attributes that vary significantly by product category (e.g., "screen size" for a monitor, "page count" for a book) map naturally onto a flexible key-value field in a document. Modeling the same thing relationally typically requires either a separate key-value attributes table (an extra join for every attribute lookup) or a rigid, sparse table with many nullable columns — both noticeably more awkward than a single flexible field.
+
+**10. Why shouldn't a team pick MongoDB purely because "NoSQL scales better"?**
+Scalability depends on actual data volume, access patterns, and indexing strategy — a well-indexed relational database handles the read/write scale of the vast majority of applications without issue. Choosing MongoDB should be driven by whether the data and access patterns are genuinely document-shaped and benefit from schema flexibility, not by a general belief that NoSQL is inherently more scalable than relational databases.
+
+**11. In the embedded `Order`/`OrderItem` example, why isn't `OrderItem` itself annotated `@Document`?**
+Because it isn't stored as its own top-level document in its own collection — it only exists nested inside an `Order` document as part of that document's structure. `@Document` is reserved for classes that map to an actual MongoDB collection; embedded nested objects are just plain classes referenced as a field type.
+
+**12. What does `MongoRepository<Product, String>` provide, and why is the ID type `String` rather than `Long`?**
+It provides the same baseline CRUD operations as `JpaRepository` — `save()`, `findById()`, `findAll()`, `deleteById()`, and more. The ID type is typically `String` because MongoDB's native `_id` field is usually an `ObjectId`, which Spring Data MongoDB commonly maps to and from a `String` representation in the Java domain model.
+
+**13. How would you decide whether a `Customer`'s orders should be embedded in the `Customer` document or stored as separate `Order` documents referencing the customer?**
+Consider whether orders are always accessed together with the customer (favoring embedding) versus independently queried, updated, or potentially unbounded in number (favoring separate documents referenced by customer ID). Since orders are typically queried independently (by order ID, by status, across all customers for reporting) and can grow without bound over a customer's lifetime, separate `Order` documents referencing the customer by ID is generally the better fit here, despite the earlier order-item embedding example being appropriate at the item level.
+
+**14. What happens to Spring Data JPA's derived query method conventions when applied to MongoDB — do they work the same way?**
+Yes, the same method-name parsing conventions (`findBy`, `Containing`, `LessThan`, `OrderBy`, and so on) apply, and Spring Data MongoDB translates the parsed method name into the equivalent MongoDB query instead of JPQL/SQL. This is a direct consequence of both modules sharing the same underlying Spring Data repository query-derivation mechanism.
+
+**15. If a team's data is genuinely relational (many real foreign-key relationships, frequent multi-entity joins, strict consistency requirements), what's the risk of using MongoDB anyway?**
+The application ends up either manually re-implementing relational-style joins and multi-document consistency logic in application code (which a relational database and its query planner already do correctly and efficiently), or accepting weaker consistency guarantees than the data actually requires. In that scenario, a relational database with Spring Data JPA (Chapters 9–12) is very likely the better-fitting tool, and reaching for MongoDB would be solving a problem the data doesn't actually have.

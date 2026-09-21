@@ -1,0 +1,208 @@
+---
+title: "Advanced Spring Data JPA: @Query, Specifications, Projections & Pagination"
+description: "Once derived query method names stop being readable, these are the tools for expressive, efficient querying — JPQL and native queries, dynamic Specifications, projections, and pagination."
+date: "2026-09-14"
+readTime: "14 min read"
+series: "spring-boot"
+part: 10
+tags: ["Spring Boot", "Spring Data JPA", "JPQL"]
+---
+
+Chapter 9 covered CRUD and derived query methods. This chapter covers everything for when those aren't enough: explicit queries, dynamic filtering, returning only the fields you need, and paging through large result sets correctly.
+
+## `@Query` with JPQL
+
+JPQL (Jakarta Persistence Query Language) queries against your **entity model**, not raw database tables — it's portable across databases and lets Hibernate handle the SQL translation.
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long> {
+
+    @Query("SELECT o FROM Order o WHERE o.status = :status AND o.total > :minTotal")
+    List<Order> findHighValueOrders(@Param("status") OrderStatus status,
+                                     @Param("minTotal") BigDecimal minTotal);
+
+    @Modifying
+    @Query("UPDATE Order o SET o.status = :status WHERE o.id = :id")
+    int updateStatus(@Param("id") Long id, @Param("status") OrderStatus status);
+}
+```
+
+`@Param` binds named parameters explicitly — always prefer this over positional (`?1`) parameters for readability and safety as queries grow. `@Modifying` is required on any `@Query` that isn't a plain `SELECT` (an `UPDATE` or `DELETE`), and such methods must run inside a transaction (Chapter 11).
+
+## Native SQL when JPQL isn't enough
+
+```java
+@Query(value = """
+    SELECT o.* FROM orders o
+    WHERE o.total > :minTotal
+    ORDER BY o.total DESC
+    LIMIT 10
+    """, nativeQuery = true)
+List<Order> findTop10ByTotal(@Param("minTotal") BigDecimal minTotal);
+```
+
+Native queries drop down to real database SQL — necessary for database-specific features (window functions, specific index hints) JPQL can't express, at the cost of portability across database vendors.
+
+## Pagination and sorting
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long> {
+    Page<Order> findByStatus(OrderStatus status, Pageable pageable);
+}
+```
+
+```java
+Pageable pageable = PageRequest.of(0, 20, Sort.by("createdAt").descending());
+Page<Order> page = orderRepository.findByStatus(OrderStatus.SHIPPED, pageable);
+
+page.getContent();        // the actual List<Order> for this page
+page.getTotalElements();  // total matching rows across all pages
+page.getTotalPages();
+page.hasNext();
+```
+
+`JpaRepository` methods accepting a `Pageable` parameter automatically paginate — Spring Data runs both the paged query and a `COUNT` query to populate `getTotalElements()`. **Never load an entire large table into memory to paginate it yourself in Java** — this is precisely the mistake `Pageable` exists to prevent, pushing the `LIMIT`/`OFFSET` logic down into the database.
+
+## Projections: fetching only what you need
+
+Loading a full `Order` entity (and its lazy associations) when a caller only needs the customer name and total is wasteful. Projections fetch exactly the fields required.
+
+```java
+// Interface-based projection
+public interface OrderSummary {
+    Long getId();
+    String getCustomerName();
+    BigDecimal getTotal();
+}
+
+public interface OrderRepository extends JpaRepository<Order, Long> {
+    List<OrderSummary> findByStatus(OrderStatus status);
+}
+```
+
+```java
+// DTO (class-based) projection — via constructor expression in JPQL
+public record OrderSummaryDto(Long id, String customerName, BigDecimal total) { }
+
+@Query("SELECT new com.example.demo.OrderSummaryDto(o.id, o.customerName, o.total) FROM Order o WHERE o.status = :status")
+List<OrderSummaryDto> findSummariesByStatus(@Param("status") OrderStatus status);
+```
+
+Interface projections are simpler to declare; DTO projections (using a JPQL constructor expression) generate SQL that selects *only* the listed columns — the more efficient option when the entity has many columns or expensive-to-fetch relationships you don't need for this particular query.
+
+## Dynamic queries with Specifications
+
+When filter criteria are optional and combined at runtime (a search endpoint where any subset of `customerName`, `status`, and a date range might be provided), building one derived method or `@Query` per combination doesn't scale. `Specification` builds the `WHERE` clause programmatically:
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long>, JpaSpecificationExecutor<Order> {
+}
+
+public class OrderSpecifications {
+
+    public static Specification<Order> hasStatus(OrderStatus status) {
+        return (root, query, cb) -> status == null ? null : cb.equal(root.get("status"), status);
+    }
+
+    public static Specification<Order> customerNameContains(String namePart) {
+        return (root, query, cb) -> namePart == null ? null
+            : cb.like(cb.lower(root.get("customerName")), "%" + namePart.toLowerCase() + "%");
+    }
+}
+```
+
+```java
+Specification<Order> spec = Specification
+    .where(OrderSpecifications.hasStatus(filter.status()))
+    .and(OrderSpecifications.customerNameContains(filter.customerName()));
+
+List<Order> results = orderRepository.findAll(spec);
+```
+
+Each `Specification` returning `null` for an absent filter is the standard idiom — Spring Data simply omits a `null` predicate from the final query, so only the filters actually provided end up in the generated `WHERE` clause.
+
+```
+              filter.status = "SHIPPED"     filter.customerName = null
+                        │                              │
+                        ▼                              ▼
+              hasStatus(...) → predicate    customerNameContains(...) → null (skipped)
+                        │
+                        ▼
+              WHERE o.status = 'SHIPPED'     ← only the provided filter appears
+```
+
+## Best practices & gotchas
+
+- **Always paginate list endpoints that could return unbounded results.** An "orders by status" endpoint that could match tens of thousands of rows must accept a `Pageable`, not return a bare `List`.
+- **Prefer DTO/interface projections over full entities for read-heavy, list-style endpoints.** Fetching only needed columns reduces both query cost and payload size, especially once entities accumulate many fields and relationships.
+- **`@Modifying` queries bypass the persistence context.** Entities already loaded in memory before a `@Modifying` update won't automatically reflect the change — call `entityManager.clear()` or reload if consistency within the same transaction matters, or better, avoid mixing bulk updates with entity-based logic in the same transaction.
+- **Native queries lose database portability and type safety.** Reach for them only when JPQL genuinely can't express what's needed (vendor-specific SQL features), not as a default.
+- **Watch the N+1 query problem with `@OneToMany`/`@ManyToOne` when iterating results.** Loading 50 orders and then accessing `order.getItems()` on each, lazily, triggers 50 additional queries. `@EntityGraph` or a JOIN FETCH in `@Query` solves this by loading the association eagerly, in the same query, when you know you'll need it.
+
+## Quick reference
+
+| Tool | Use when |
+|---|---|
+| Derived query methods | Simple, 1–2 condition queries |
+| `@Query` (JPQL) | More complex conditions, still portable across databases |
+| `@Query(nativeQuery = true)` | Database-specific SQL features |
+| `Pageable`/`Page<T>` | Any list endpoint with potentially large result sets |
+| Interface/DTO projections | Fetching a subset of fields, avoiding full entity load cost |
+| `Specification` | Dynamic, optional, composable filter criteria |
+| `@EntityGraph` / `JOIN FETCH` | Avoiding N+1 queries on known-needed associations |
+
+## Wrapping up
+
+Between derived methods, `@Query`, Specifications, and projections, you can now express nearly any querying requirement precisely and efficiently, without ever writing raw JDBC. Everything covered so far assumes a single database operation succeeds or fails atomically — **Chapter 11** makes that explicit with a deep dive into `@Transactional`, propagation, and isolation.
+
+## Interview Questions
+
+**1. When would you use `@Query` instead of a derived query method?**
+Once the required condition logic is complex enough that the method-name convention becomes long and hard to read, involves joins or aggregations the naming convention can't express cleanly, or requires an `UPDATE`/`DELETE` (which derived methods don't support at all) — `@Query` with explicit JPQL is the clearer, more maintainable choice.
+
+**2. What's the difference between JPQL and a native query?**
+JPQL queries against the entity model (class and field names, not table/column names) and is translated to the appropriate SQL for whatever database is configured, making it portable across database vendors. A native query (`@Query(nativeQuery = true)`) is real, database-specific SQL, required for vendor-specific features JPQL can't express, at the cost of that portability.
+
+**3. Why must `@Modifying` be added to a `@Query` that performs an `UPDATE` or `DELETE`?**
+Spring Data JPA needs to know the query isn't a `SELECT` in order to execute it correctly against the `EntityManager` (via `executeUpdate()` rather than a query that returns a result list), and to correctly interpret the return value as an affected-row count rather than a result set. Without `@Modifying`, Spring Data would attempt to treat it as a query returning entities, which fails for a non-`SELECT` statement.
+
+**4. Why is it important that `@Modifying` queries run inside a transaction?**
+Data-modifying statements need to be part of an atomic unit of work — either fully applied or fully rolled back together with any other operations in the same logical action. Without an active transaction, a `@Modifying` query would typically fail outright or behave inconsistently depending on the JPA provider's default transaction handling.
+
+**5. What is the N+1 query problem, and how does it happen with `@OneToMany`?**
+It happens when a query for N parent entities is followed by N additional queries — one per parent — to lazily fetch a related collection, instead of one combined query. For example, fetching 50 `Order` entities and then calling `order.getItems()` on each (with `items` lazily fetched) triggers 1 query for the orders plus 50 more, one per order, for their items — 51 queries total instead of 1 or 2.
+
+**6. How do you avoid the N+1 problem when you know you'll need an association for every result?**
+Use `@EntityGraph` on the repository method to specify the association should be eagerly fetched for that specific query, or write an explicit `JOIN FETCH` in a `@Query`:
+```java
+@Query("SELECT o FROM Order o JOIN FETCH o.items WHERE o.status = :status")
+List<Order> findByStatusWithItems(@Param("status") OrderStatus status);
+```
+Both approaches load the association in the same query as the parent entities, avoiding the extra per-row round trips.
+
+**7. What's the difference between an interface-based projection and a DTO (class-based) projection?**
+An interface projection declares getter methods matching the fields you want; Spring Data generates a proxy implementation and, in the common "closed projection" case (methods matching entity property names exactly), can optimize the underlying query to select only those columns. A DTO projection uses an explicit JPQL constructor expression (`SELECT new com.example.OrderSummaryDto(...)`) to construct a plain Java object (ideally a record) directly from selected columns — more explicit and predictable about exactly what's selected, at the cost of listing the constructor expression by hand.
+
+**8. Why should list endpoints that could return large result sets always be paginated?**
+Returning an unbounded list risks large response payloads, excessive memory usage on both server and client, and slow queries as the underlying table grows — problems that don't show up in development with a small dataset but become serious in production. `Pageable`/`Page<T>` pushes the `LIMIT`/`OFFSET` logic down to the database, so only the requested page's worth of rows is ever loaded.
+
+**9. What does `Page<T>` provide beyond a plain `List<T>`?**
+Beyond the page's actual content (`getContent()`), it provides `getTotalElements()` and `getTotalPages()` (from an automatically-run `COUNT` query), along with `hasNext()`/`hasPrevious()` and the current page/sort metadata — everything a paginated UI or API response typically needs to describe where the current page sits within the full result set.
+
+**10. What is a `Specification`, and what problem does it solve?**
+A `Specification<T>` is a composable, programmatic way to build a JPA `Predicate` (a `WHERE` clause condition) at runtime. It solves the problem of dynamic, optional filter combinations — a search endpoint where any subset of several possible filters might be provided — without needing a separate derived method or `@Query` for every possible combination of filters.
+
+**11. In the Specification pattern, why does each specification method return `null` when its filter isn't provided?**
+Spring Data's `Specification.where(...).and(...)` composition is written to treat a `null` predicate as "no condition to add" and simply omit it from the final combined query, rather than throwing an error. This lets each individual specification stay simple (return a real predicate, or `null` if that filter wasn't supplied) while the combination logic handles building only the conditions that actually apply.
+
+**12. What interface must a repository extend to support `Specification`-based queries, in addition to `JpaRepository`?**
+`JpaSpecificationExecutor<T>` — it adds methods like `findAll(Specification<T>)` and `findAll(Specification<T>, Pageable)` to the repository, on top of the standard CRUD operations from `JpaRepository`.
+
+**13. Can `Specification` and `Pageable` be combined?**
+Yes — `JpaSpecificationExecutor` provides an overload accepting both: `Page<Order> findAll(Specification<Order> spec, Pageable pageable)`, letting you combine dynamic, optional filtering with proper pagination in a single call, which is the standard shape for a real-world search/filter API endpoint.
+
+**14. Why might native queries be necessary despite the portability trade-off?**
+Some database features simply have no JPQL equivalent — window functions, full-text search functions, database-specific indexing hints, or vendor-specific JSON/array column operations. When a query genuinely needs one of these, a native query is the only option; the portability loss is an accepted trade-off in exchange for capability JPQL doesn't offer.
+
+**15. How would you design a repository method for a search endpoint where a user can optionally filter orders by customer name, status, and a date range — all optional, in any combination?**
+Extend `JpaSpecificationExecutor<Order>` on the repository, define a `Specification` factory method per filter (each returning `null` when that filter's value is absent), compose them with `Specification.where(...).and(...)` based on which values were actually provided in the request, and call `findAll(spec, pageable)` to get a properly paginated, dynamically filtered result — avoiding a combinatorial explosion of derived query methods or hand-written conditional JPQL.

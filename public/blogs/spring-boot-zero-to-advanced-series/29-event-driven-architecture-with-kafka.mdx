@@ -1,0 +1,208 @@
+---
+title: "Event-Driven Architecture with Kafka"
+description: "Every inter-service call covered so far has been synchronous request/response — one service waiting on another. Kafka introduces a fundamentally different model: services that never call each other directly at all."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 29
+tags: ["Spring Boot", "Kafka", "Event-Driven Architecture", "Microservices"]
+---
+
+Chapter 28 covered three ways for `order-service` to directly call `inventory-service`. This chapter covers a genuinely different model: `order-service` publishes "an order was created," and any number of other services — `inventory-service`, `notification-service`, an analytics pipeline not even built yet — react to it, without `order-service` knowing or caring who's listening.
+
+## Request/response vs. event-driven
+
+```
+Request/Response (Chapter 28):              Event-Driven (this chapter):
+order-service ──calls──▶ inventory-service   order-service ──publishes──▶ [Kafka topic]
+    (waits for the response,                                                    │
+     tightly coupled to inventory-service     ┌──────────────┬────────────────┘
+     being available right now)               ▼              ▼
+                                        inventory-service  notification-service
+                                        (subscribes)        (subscribes)
+```
+
+With request/response, `order-service` is coupled to `inventory-service` being available *at the moment of the call* — Chapter 27's entire premise. With events, `order-service` publishes once and moves on; it has no idea whether zero, one, or five services are listening, and doesn't need `inventory-service` to be online at the exact instant the order was placed for the event to eventually be processed.
+
+## Kafka's core concepts
+
+```
+Producer ──▶ Topic: "order-events" ──▶ Consumer Group A (inventory-service)
+                  │                 └─▶ Consumer Group B (notification-service)
+                  ▼
+           Partition 0: [msg1, msg2, msg3...]
+           Partition 1: [msg4, msg5, msg6...]
+           Partition 2: [msg7, msg8, msg9...]
+```
+
+- **Topic** — a named stream of events (`order-events`), analogous to a table, but append-only and ordered.
+- **Partition** — a topic is split into partitions for parallelism; messages within one partition are strictly ordered, but ordering across different partitions isn't guaranteed.
+- **Producer** — publishes messages to a topic.
+- **Consumer Group** — a set of consumer instances sharing the work of reading a topic; **each message is delivered to only one consumer within a group**, but every separate group gets its own independent copy of every message. This is exactly what lets both `inventory-service` and `notification-service` independently process every order event without competing with each other.
+
+## Producing events
+
+```xml
+<dependency>
+    <groupId>org.springframework.kafka</groupId>
+    <artifactId>spring-kafka</artifactId>
+</dependency>
+```
+
+```java
+@Service
+class OrderEventPublisher {
+
+    private final KafkaTemplate<String, OrderCreatedEvent> kafkaTemplate;
+
+    void publishOrderCreated(Order order) {
+        OrderCreatedEvent event = new OrderCreatedEvent(order.getId(), order.getCustomerName(), order.getTotal());
+        kafkaTemplate.send("order-events", order.getId().toString(), event);   // key, then value
+    }
+}
+```
+
+The **key** (`order.getId().toString()` here) determines which partition a message lands in — messages with the same key always go to the same partition, which is exactly how you guarantee ordering for events that must be processed in sequence (all events for order `42` land in the same partition and are consumed in the order they were produced).
+
+## Consuming events
+
+```java
+@Component
+class InventoryEventListener {
+
+    @KafkaListener(topics = "order-events", groupId = "inventory-service")
+    void handleOrderCreated(OrderCreatedEvent event) {
+        inventoryService.decrementStock(event.orderId());
+    }
+}
+```
+
+```java
+@Component
+class NotificationEventListener {
+
+    @KafkaListener(topics = "order-events", groupId = "notification-service")
+    void handleOrderCreated(OrderCreatedEvent event) {
+        emailService.sendOrderConfirmation(event.customerName());
+    }
+}
+```
+
+Two entirely separate services, each with their own `groupId`, both independently receive and process every event on `order-events` — neither knows the other exists, and `order-service` (the producer) doesn't know either of them exist either. This decoupling is the entire architectural point.
+
+## Delivery guarantees and idempotency — the part that actually matters
+
+Kafka commonly provides **at-least-once delivery** by default: under certain failure/retry scenarios (a consumer crashes after processing a message but before committing that it was processed), a message can be delivered and processed **more than once**.
+
+```java
+@KafkaListener(topics = "order-events", groupId = "inventory-service")
+void handleOrderCreated(OrderCreatedEvent event) {
+    if (processedEventRepository.existsById(event.eventId())) {
+        return;   // already handled — this is a redelivery, skip it
+    }
+    inventoryService.decrementStock(event.orderId());
+    processedEventRepository.save(new ProcessedEvent(event.eventId()));
+}
+```
+
+This is exactly the same idempotency concern Chapter 27 raised for retried API calls, applied to event consumption — **every consumer needs to be written assuming it might receive the same event more than once**, and design its processing to be safely repeatable (checking whether an event's ID has already been processed, exactly as shown here) rather than assuming each event arrives exactly once.
+
+## Best practices & gotchas
+
+- **Design every consumer to be idempotent, without exception.** At-least-once delivery isn't an edge case to defensively code around — it's the normal, expected operating behavior of the system, and a consumer that isn't idempotent *will* eventually double-process a message.
+- **Choose partition keys deliberately based on what ordering guarantee you actually need.** Using the order ID as the key (as shown) guarantees all of one order's events are processed in sequence; using no key (or a random one) means no ordering guarantee at all across the topic, which is fine for genuinely independent, order-agnostic events.
+- **A topic's consumers are decoupled from the producer, but not from the event's schema.** Changing an event's structure (renaming or removing a field) can break every consumer relying on the old shape — event schemas need the same careful, backward-compatible evolution discipline as a public API contract.
+- **Events represent facts that already happened ("OrderCreated"), not commands ("CreateOrder").** This distinction keeps the architecture genuinely decoupled — a command implies the sender expects a specific action to be taken by a specific receiver, which reintroduces the coupling events are meant to avoid.
+- **Don't reach for Kafka as a default replacement for synchronous calls.** It's the right tool when genuine decoupling, multiple independent consumers, or an audit-worthy event log are needed — not for a case where a service genuinely needs an immediate, synchronous answer before it can proceed (Chapter 28's clients remain the right tool there).
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| Topic | A named, ordered, append-only stream of events |
+| Partition | A topic subdivision enabling parallelism; ordering guaranteed only within one partition |
+| Producer | Publishes events to a topic |
+| Consumer Group | A set of consumers sharing a topic's work; each group gets an independent full copy of every message |
+| Partition key | Determines which partition a message lands in — same key, same partition, guaranteed order |
+| At-least-once delivery | A message can be redelivered — every consumer must be idempotent |
+
+## Wrapping up
+
+Event-driven architecture trades the tight, synchronous coupling of Chapter 28's direct calls for genuine independence between producer and consumers — at the cost of needing to design every consumer for repeatable, idempotent processing. **Chapter 30** covers RabbitMQ, a different messaging model with different trade-offs, particularly suited to scenarios Kafka's log-based design fits less naturally.
+
+## Interview Questions
+
+**1. What's the fundamental architectural difference between the request/response communication from Chapter 28 and the event-driven model in this chapter?**
+Request/response directly couples the calling service to the specific service it's calling being available and responsive at the moment of the call. Event-driven communication decouples the producer entirely from any specific consumer — the producer publishes an event once, with no knowledge of who (if anyone) is listening, and consumers process events independently and asynchronously, without the producer needing them to be available at the exact moment the event was published.
+
+*Follow-up: Does moving to an event-driven model eliminate the need for the resilience patterns covered in Chapter 27?* No — it shifts where those concerns apply rather than eliminating them; a consumer processing an event might still need to call other services or handle its own failures gracefully, and the messaging infrastructure itself (Kafka) has its own failure modes (broker unavailability, consumer lag) that need to be handled thoughtfully, so resilience thinking remains necessary, just applied differently than in a direct request/response call.
+
+**2. What is a Kafka topic, and how does it relate to a partition?**
+A topic is a named, logical stream of events (analogous to a table, but append-only and ordered) — internally, a topic is divided into one or more partitions to enable parallel processing; messages within a single partition are strictly ordered, but there's no ordering guarantee across different partitions of the same topic.
+
+*Follow-up: Why does splitting a topic into multiple partitions improve throughput?* Different partitions can be consumed in parallel by different consumer instances within the same consumer group (each partition is only ever read by one consumer instance within a given group at a time), so having more partitions allows more consumer instances to process a topic's messages simultaneously — a topic with only one partition can only ever be processed by one consumer instance within a group at a time, regardless of how many instances that group actually has running.
+
+**3. What determines which partition a given message is written to?**
+The message's key (if one is provided) is hashed to consistently determine its partition — messages published with the same key always land in the same partition. If no key is provided, messages are distributed across partitions using a round-robin or similar strategy, with no guaranteed grouping or ordering relationship between messages.
+
+*Follow-up: Why would you deliberately choose to key messages by an order ID, as shown in this chapter's example, rather than leaving them unkeyed?* Keying by order ID guarantees that every event related to a specific order lands in the same partition, and therefore is processed strictly in the order it was produced by any consumer reading that partition — this matters whenever the relative order of events for the same logical entity is important (e.g., an "OrderCreated" event must be processed before a later "OrderCancelled" event for the same order), a guarantee that would be lost if the events were scattered unpredictably across different partitions.
+
+**4. What is a consumer group, and what does it mean that "each message is delivered to only one consumer within a group"?**
+A consumer group is a set of one or more consumer instances that share the work of reading a topic — Kafka ensures that within a single group, each individual message is processed by exactly one member of that group (typically distributed across group members by partition), so multiple instances in the same group effectively divide the topic's total workload among themselves rather than each processing every message.
+
+*Follow-up: If `inventory-service` and `notification-service` are each their own separate consumer group both subscribed to `order-events`, does adding more instances to `inventory-service`'s deployment affect how many messages `notification-service` receives?* No — each consumer group receives its own complete, independent copy of every message on the topic, regardless of how many instances exist within any other group; scaling `inventory-service`'s instance count only affects how that group's own share of the workload is distributed among its own members, and has no effect whatsoever on `notification-service`'s separate, independent consumption of the same topic.
+
+**5. What does "at-least-once delivery" mean, and why is it Kafka's common default behavior?**
+It means a message is guaranteed to be delivered to a consumer at least once, but under certain failure and retry scenarios (a consumer processes a message successfully but crashes or loses connectivity before it can commit/acknowledge that processing), the same message can be redelivered and processed again — Kafka favors this over potentially losing messages entirely (as a "at-most-once" guarantee might, if an unacknowledged message were simply discarded after a failure) since data loss is typically far worse for most use cases than occasional, safely-handled duplicate processing.
+
+*Follow-up: What alternative delivery guarantee exists, and why isn't it the default choice for most use cases despite seemingly being more convenient?* Exactly-once delivery/processing semantics exist (Kafka does support configurations approaching this for certain scenarios), but achieving true exactly-once semantics across a distributed system is significantly more complex and comes with real performance and architectural trade-offs — for most use cases, it's simpler and more practical to accept at-least-once delivery and handle the resulting duplicate-processing possibility explicitly through idempotent consumer design (as this chapter emphasizes), rather than taking on the added complexity of trying to guarantee exactly-once semantics throughout the system.
+
+**6. Why must every Kafka consumer be designed to handle receiving the same message more than once?**
+Because at-least-once delivery means duplicate delivery is a normal, expected part of the system's behavior under certain failure scenarios — not a rare edge case — a consumer that assumes each message arrives exactly once will eventually, inevitably process some message twice at some point in the system's operation, and if that processing isn't safely repeatable (idempotent), it will produce an incorrect result (like decrementing inventory stock twice for what should have been treated as a single logical order event).
+
+*Follow-up: How does the idempotency check shown in this chapter's example (checking `processedEventRepository.existsById(event.eventId())`) achieve this safely?* By persisting a record of every event ID that has already been successfully processed, and checking that record before performing the actual processing logic, the consumer can reliably recognize a redelivered message it has already handled and skip reprocessing it — making the overall handling of any given event safely repeatable regardless of how many times Kafka might actually deliver that same message to the consumer.
+
+**7. Why does this chapter distinguish between an "event" (a fact that already happened, like "OrderCreated") and a "command" (an instruction, like "CreateOrder")?**
+An event describes something that has already occurred, with no expectation about what, if anything, any particular consumer does in response — this keeps the producer and consumers genuinely decoupled, since the producer doesn't need or expect any specific reaction. A command implies the sender expects a specific action to be taken, typically by a specific intended recipient — which reintroduces a form of coupling (the sender caring about a particular outcome from a particular receiver) that undermines the genuine independence event-driven architecture is meant to provide.
+
+*Follow-up: What would be lost architecturally if `order-service` published an event actually named "DecrementInventory" instead of "OrderCreated"?* Naming and framing the event as a specific instruction ("DecrementInventory") implicitly couples `order-service` to knowing that inventory decrementing is a required downstream action and to a specific expected consumer performing it — if a new consumer needed to react to order creation for a completely different reason (say, triggering fraud analysis), the event's name and framing wouldn't naturally accommodate that additional, unrelated use case, whereas a more neutral "OrderCreated" fact-based event naturally supports any number of unanticipated future consumers reacting to it in their own way.
+
+**8. Why is it important to think about event schema evolution carefully, even though producers and consumers are otherwise decoupled?**
+While producers and consumers don't need to know about each other's existence or internal implementation, they still implicitly share a contract: the structure of the event itself. Changing that structure — renaming a field, removing one a consumer relies on, or changing a field's type — can silently break every consumer depending on the old shape, even though the producer has no direct visibility into who those consumers are or how many of them exist.
+
+*Follow-up: What's a safer way to evolve an event's schema than simply renaming or removing an existing field outright?* Following additive, backward-compatible changes where possible — adding new optional fields rather than repurposing or removing existing ones, and if a field genuinely must be removed or fundamentally changed, doing so gradually (publishing both the old and new field for a transition period, giving consumers time to migrate to the new field before the old one is eventually removed) — treating the event schema with the same careful, backward-compatibility discipline as a versioned public API contract, since breaking it can silently affect an unknown number of downstream consumers.
+
+**9. In what scenario would request/response communication (Chapter 28) still be the correct choice over an event-driven approach, even in a system that otherwise makes heavy use of Kafka?**
+When a service genuinely needs an immediate answer before it can proceed with its own logic — for example, `order-service` needing to know, synchronously, whether a specific product currently has sufficient stock before it can decide whether to accept an order at all — an event-driven, "fire and eventually get processed" model doesn't fit this need, since the calling code can't simply move on without knowing the answer; a direct, synchronous request/response call (Chapter 28) remains the appropriate tool for this kind of immediate-answer-required interaction.
+
+*Follow-up: Could this same stock-check scenario be redesigned to fit an event-driven model instead, and what would the trade-off be?* It's possible to redesign it — for example, having `order-service` publish an "OrderPlaced" event optimistically and having `inventory-service` publish a follow-up "StockConfirmed" or "StockInsufficient" event that `order-service` then reacts to — but this trades the simplicity of an immediate, synchronous answer for a more complex, asynchronous multi-step workflow (essentially a small saga, previewed further in Chapter 32) that requires additional design and handling for the "waiting for and reacting to a follow-up event" logic, which isn't always worth the added complexity if a simple synchronous check would suffice.
+
+**10. What does the `groupId` in `@KafkaListener(topics = "order-events", groupId = "inventory-service")` actually control?**
+It identifies which consumer group this particular listener instance belongs to — Kafka uses this identifier to determine work distribution (multiple instances sharing the same `groupId` divide the topic's messages among themselves) and to track that group's independent consumption progress (its own committed offset) separately from any other group's progress on the same topic.
+
+*Follow-up: What would happen if `notification-service` were mistakenly configured with the same `groupId` as `inventory-service`?* Kafka would treat them as members of the same consumer group, meaning they'd share and divide the topic's messages between themselves rather than each independently receiving every message — `notification-service` would then only see a subset of the order events (whichever ones happened to be assigned to it as a group member) instead of every single one, silently breaking its intended behavior of reacting to every order creation event, which is exactly why distinct services needing independent, full access to the same topic must use distinct `groupId` values.
+
+**11. Why is Kafka often described as well-suited for scenarios needing an "audit-worthy event log," beyond just enabling decoupled communication?**
+Kafka topics are append-only and durable, typically retaining events for a configured retention period (potentially quite long, or indefinitely for certain use cases) — this means the topic itself functions as a persistent, ordered historical record of everything that happened, which can be replayed, reprocessed by a new consumer added later, or used for audit/compliance purposes, in addition to simply enabling real-time, decoupled communication between currently-running consumers.
+
+*Follow-up: What's a practical benefit of being able to "replay" a topic's history for a newly added consumer that didn't exist when earlier events were originally published?* A newly added service (say, a new analytics or reporting service added months after `order-service` first started publishing order events) can be configured to start consuming from the beginning of the topic's retained history rather than only from "now" — letting it build up its own complete, correct view of all historical order events without needing `order-service` or any other system to specially replay or backfill that data through some separate mechanism, since Kafka's durable log already contains the full history natively.
+
+**12. What's a potential downside of making every service communicate exclusively through events, with no direct synchronous calls anywhere in the system?**
+Purely event-driven, fully asynchronous flows can make it significantly harder to reason about and trace the overall sequence of what happens in response to a single triggering action, especially across many services and multiple hops of "this event triggers that service to publish another event, which triggers a third service," compared to a more direct, traceable chain of synchronous calls — debugging "why didn't X eventually happen after Y occurred" can become considerably more involved in a fully asynchronous, multi-hop event chain.
+
+*Follow-up: How does the distributed tracing infrastructure from Chapter 19/31 help address this specific difficulty?* Extending correlation/trace IDs (Chapter 22) to propagate through event metadata (not just HTTP headers) allows a single logical business transaction's full journey — even across multiple asynchronous event hops and several different services — to still be reconstructed and traced end-to-end using the same trace ID, directly addressing the increased tracing difficulty that a purely event-driven, multi-hop architecture would otherwise introduce compared to a simpler, directly-traceable synchronous call chain.
+
+**13. Why does this chapter caution against reaching for Kafka "as a default replacement for synchronous calls"?**
+Kafka and event-driven architecture solve a specific set of problems well — genuine decoupling, multiple independent consumers, durable event history — but introduce their own real complexity: idempotent consumer design, schema evolution discipline, and generally harder-to-trace asynchronous flows (as the previous question covered). Using it by default for every inter-service interaction, including ones that genuinely need an immediate synchronous answer, adds this complexity without a corresponding benefit, and can make simple interactions unnecessarily convoluted.
+
+*Follow-up: What's a reasonable heuristic for deciding, for a specific new inter-service interaction, whether it should be event-driven or synchronous request/response?* Ask whether the calling service genuinely needs an immediate answer before it can proceed (favoring synchronous request/response, Chapter 28), or whether it's simply announcing that something has happened with zero or more unknown, independent parties potentially caring about it, with no need to wait for or know about their reactions (favoring an event-driven approach) — the deciding factor is usually whether there's a genuine, blocking need for an immediate response versus a "fire and let interested parties react independently, whenever they get to it" relationship between the services involved.
+
+**14. How does the concept of a consumer group's "offset" relate to how Kafka tracks a consumer's progress through a topic?**
+An offset is a per-partition position marker indicating how far a specific consumer group has progressed through that partition's messages — Kafka (or the consumer, depending on configuration) tracks and periodically commits this offset, so that if a consumer instance restarts, it can resume reading from where it last left off rather than starting over from the very beginning or losing track of its progress entirely.
+
+*Follow-up: What would happen if a consumer processed a message successfully but crashed before its offset commit for that message was recorded?* Since the offset commit — the record of "I've successfully processed up through this point" — never happened, upon restart (or another instance in the group taking over that partition), Kafka would consider that message as not yet fully processed and redeliver it, which is precisely the mechanism behind the at-least-once delivery guarantee discussed earlier — the message is redelivered specifically because its successful processing was never durably confirmed via a committed offset, even though it may have actually already been processed once before the crash.
+
+**15. Summarize how event-driven architecture with Kafka changes the trade-offs compared to everything covered in Chapters 24–28 for direct service-to-service communication.**
+Chapters 24–28 focused on making direct, synchronous service-to-service calls (discoverable via Eureka, routed through a gateway, made resilient via Resilience4j, executed via WebClient/RestClient/Feign/gRPC) as reliable as possible despite the inherent unreliability of a network call. This chapter introduces an alternative model that sidesteps much of that direct-coupling problem entirely by having services communicate through durable, asynchronous events instead — trading immediate, synchronous responses and simpler request-tracing for genuine decoupling, independent scalability of consumers, and a durable historical record, at the cost of needing idempotent consumer design and more careful reasoning about asynchronous, multi-hop flows.
+
+*Follow-up: Given these trade-offs, would a well-designed microservices system typically use exclusively one approach or the other, or a mix of both?* Typically a deliberate mix — using direct, synchronous calls (Chapter 28, protected by Chapter 27's resilience patterns) for interactions genuinely requiring an immediate answer, and event-driven communication (this chapter, and RabbitMQ in Chapter 30) for interactions that are naturally about announcing facts to potentially multiple, independent, decoupled consumers — choosing the right tool per specific interaction based on the heuristic discussed earlier, rather than committing a whole system exclusively to just one communication style throughout.

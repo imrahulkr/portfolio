@@ -1,0 +1,95 @@
+---
+title: "Chapter 86: Case Study — Computer Vision Pipeline"
+description: "An end-to-end image classification and object detection pipeline: data augmentation, model architecture trade-offs, edge versus cloud inference, and evaluation beyond accuracy for imbalanced visual data."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 14
+partTitle: "Applied Case Studies"
+chapter: 86
+totalChapters: 96
+tags: ["ai-system-design", "computer-vision", "edge-inference", "case-study", "interview-prep"]
+---
+
+## Introduction
+
+This chapter examines a classical computer vision pipeline — image classification and object detection — synthesizing Chapter 16's distributed training material, Chapter 26's serving architecture, and a new consideration this series hasn't directly addressed: **edge versus cloud inference**, where the deployment target itself (a mobile device versus a data center) fundamentally reshapes the model-architecture decision.
+
+## Data Augmentation: Addressing Limited Labeled Data Cheaply
+
+Directly extending Chapter 9's data pipeline and Chapter 20's transfer-learning material — labeled image data is expensive to collect, making data augmentation (random crops, rotations, color jitter) a standard technique for artificially expanding effective training data volume without additional labeling cost.
+
+```python
+def augment_training_batch(images, augmentation_pipeline) -> list:
+    # Directly extends Ch. 20's "cheap alternative to expensive
+    # additional labeled data" principle — augmentation increases
+    # effective dataset diversity without new labeling cost
+    return [augmentation_pipeline.apply(img) for img in images]
+```
+
+**Why augmentation must be validated, not assumed universally beneficial**: directly extending Chapter 21's evaluation discipline — an augmentation appropriate for one domain (rotation invariance for natural photos) can be actively harmful for another (rotating a medical scan may destroy diagnostically meaningful orientation information), requiring domain-specific validation of which augmentations genuinely improve held-out performance rather than applying a generic augmentation pipeline unconditionally.
+
+## Model Architecture: Edge vs. Cloud Inference Trade-offs
+
+Directly extending Chapter 26's serving-architecture material with a genuinely new dimension: a cloud-deployed model can use a large, accurate architecture with generous compute available, while an edge-deployed model (running on a phone or embedded device) faces hard constraints on model size, memory, and compute that force a fundamentally different point on the accuracy-efficiency trade-off curve.
+
+```python
+def choose_architecture_for_deployment_target(deployment_target: str) -> str:
+    """
+    Directly extends Ch. 26's serving trade-offs with a NEW
+    dimension Ch. 26's cloud-focused material didn't need to
+    address: the deployment environment's OWN hard resource limits.
+    """
+    if deployment_target == "edge_mobile":
+        return "quantized_mobilenet"  # small, fast, lower accuracy —
+                                         # the device's own hard
+                                         # memory/compute ceiling
+                                         # FORCES this trade-off
+    return "resnet_or_larger"  # cloud's more generous compute budget
+                                  # allows favoring accuracy more heavily
+```
+
+**Why this is a genuinely different trade-off than Chapter 51's cascade or Chapter 27's latency-budget discussion**: those chapters optimized cost and latency within a data center's flexible, provisionable compute; edge deployment faces a *fixed, non-negotiable* hardware ceiling (a specific phone's RAM and processor) that cannot be scaled up by provisioning more resources, making techniques like quantization and model distillation (Chapter 45's PEFT-adjacent compression concepts) not optimizations but hard requirements for the model to run at all.
+
+## Object Detection: A Genuinely Different Evaluation Metric
+
+Directly extending Chapter 21's evaluation discipline — object detection requires localizing objects (bounding boxes) in addition to classifying them, requiring **mean Average Precision (mAP)**, which jointly accounts for classification correctness and localization accuracy (measured via Intersection over Union), a metric with no direct analog in this series' earlier, classification-only evaluation discussions.
+
+## Handling Class Imbalance in Visual Data
+
+Directly extending Chapter 82's class-imbalance discussion to computer vision specifically — rare object classes (a specific defect type in a manufacturing quality-control system) face the identical "accuracy is misleading under imbalance" concern, requiring the same precision-recall framework rather than raw accuracy, now applied to per-class detection performance rather than a binary fraud/not-fraud decision.
+
+## Key Takeaways
+
+- Data augmentation cheaply expands effective training data without new labeling cost, but must be validated per-domain, since an augmentation appropriate for one visual domain can be actively harmful for another.
+- Edge deployment introduces a hard, non-negotiable hardware ceiling that forces a fundamentally different accuracy-efficiency trade-off than cloud deployment's more flexible, provisionable compute — making compression techniques a requirement rather than an optimization.
+- Object detection requires mean Average Precision, jointly measuring classification and localization accuracy — a genuinely different metric than this series' earlier classification-only evaluation discussions.
+- Class imbalance in visual data requires the same precision-recall framework Chapter 82 established for fraud, since raw accuracy remains misleading whenever rare classes matter disproportionately.
+
+---
+
+## Interview Questions
+
+**1. Why must data augmentation be validated per-domain rather than applied as a universal, generic pipeline?**
+An augmentation's validity depends entirely on whether the transformation preserves the label's meaning for that specific domain — rotation invariance is reasonable for natural photographs (a rotated cat is still a cat) but can destroy diagnostically meaningful information for a medical scan (orientation may carry clinical significance), meaning an unvalidated, generic augmentation pipeline risks training on systematically corrupted labels for domains where its assumptions don't hold.
+*Follow-up: How would you empirically validate whether a specific augmentation is beneficial for a new domain, rather than assuming based on intuition alone?*
+Train models with and without the specific augmentation, comparing held-out validation performance directly — following this series' consistent empirical-validation discipline rather than assuming an augmentation's appropriateness based on general intuition about the domain.
+
+**2. Why does edge deployment's hardware ceiling represent a "hard requirement" rather than merely another point on a cost-latency trade-off curve?**
+A cloud deployment's compute can always be scaled up by provisioning more resources at increased cost, keeping accuracy-versus-cost a genuine, continuously-adjustable trade-off; an edge device's memory and compute are physically fixed at the hardware level, meaning a model exceeding this ceiling simply cannot run at all, regardless of how much a team might be willing to pay — transforming what would be a cost trade-off in the cloud into a binary feasibility constraint on the edge.
+*Follow-up: How would you validate that a quantized or distilled model still meets the application's accuracy requirements before committing to edge deployment?*
+Run the compressed model through the same evaluation suite (Chapter 21's methodology) used for the full-size model, directly comparing accuracy degradation against the deployment target's minimum acceptable threshold, ensuring the compression's accuracy cost is validated empirically rather than assumed to be acceptable.
+
+**3. Why does object detection require mean Average Precision rather than the classification accuracy metrics this series has used elsewhere?**
+Object detection involves two joint sub-tasks — correctly classifying an object AND correctly localizing it with a bounding box — mAP specifically accounts for both, using Intersection over Union to measure localization quality alongside classification correctness, since a model could classify an object correctly while drawing a wildly inaccurate bounding box, a failure classification accuracy alone would completely miss.
+*Follow-up: What would a HIGH mAP but poor real-world user experience suggest about a potential evaluation-metric gap, connecting to this series' recurring "metric doesn't fully capture what matters" theme?*
+This could suggest the IoU threshold used to compute mAP is too lenient for the application's actual needs — a bounding box technically meeting the IoU threshold might still be visually imprecise enough to feel wrong to an end user, directly the same "the metric you optimize doesn't automatically capture the full, real-world quality bar" concern this series has raised repeatedly, warranting a stricter IoU threshold or supplementary human evaluation.
+
+**4. Why does class imbalance in a manufacturing defect-detection system require the same precision-recall framework Chapter 82 established for fraud, rather than raw accuracy?**
+A defect type occurring in a small fraction of manufactured items faces the identical base-rate problem Chapter 82 established — a model predicting "no defect" unconditionally could achieve very high accuracy while catching zero actual defects, meaning precision and recall at a business-calibrated threshold (balancing the cost of a missed defect against the cost of unnecessary manual inspection) is the appropriate evaluation framework, not raw accuracy.
+*Follow-up: How would the appropriate precision-recall threshold differ for a safety-critical defect versus a cosmetic one?*
+A safety-critical defect warrants a lower threshold (higher recall, more false positives tolerated) since a missed defect carries severe consequences, while a purely cosmetic defect might reasonably tolerate a higher threshold (fewer false positives, some missed cosmetic defects accepted) since the cost asymmetry between these two error types is far less severe — directly the same business-calibrated threshold discipline Chapter 82 established for fraud, now applied to defect severity.
+
+**5. How would you diagnose whether a computer vision model's poor edge-device performance stems from the compression technique (quantization) versus the underlying base model architecture, extending this series' diagnostic discipline?**
+Compare the FULL-PRECISION model's own accuracy (before any compression) against the application's requirements first — if the full-precision model itself doesn't meet requirements, the architecture itself is the problem, unrelated to compression; if the full-precision model meets requirements but the QUANTIZED version doesn't, this isolates the compression step specifically as the responsible cause, directly the same "isolate the specific responsible component before remediating" discipline this series has applied consistently.
+*Follow-up: What remediation would each of these two diagnoses point toward?*
+A base-architecture problem points toward choosing a more capable (though still edge-feasible) architecture or additional training data/fine-tuning; a compression-specific problem points toward a less aggressive quantization level or a different compression technique (knowledge distillation instead of pure quantization) — two genuinely different remediation paths this diagnostic separation correctly distinguishes.

@@ -1,0 +1,161 @@
+---
+title: "The Object Class: equals, hashCode, toString, clone"
+description: "The methods every Java class inherits from Object, the equals/hashCode contract, why overriding one without the other breaks hash-based collections, and shallow vs deep cloning."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Object-Oriented Programming"
+chapter: 13
+totalChapters: 65
+slug: "the-object-class"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "oop", "object-class", "equals-hashcode"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## Every Class Inherits from `Object`
+
+Since every class in Java implicitly extends `java.lang.Object` if it doesn't extend anything else, every object automatically has access to a set of baseline methods: `equals()`, `hashCode()`, `toString()`, `clone()`, `getClass()`, and the threading-related `wait()`/`notify()`/`notifyAll()`.
+
+## `toString()`
+
+The default `toString()` returns `ClassName@hexHashCode`, which is rarely useful. Override it to provide a meaningful string representation.
+
+```java
+public class Point {
+    private final int x, y;
+
+    public Point(int x, int y) { this.x = x; this.y = y; }
+
+    @Override
+    public String toString() {
+        return "Point(" + x + ", " + y + ")";
+    }
+}
+
+System.out.println(new Point(3, 4));   // Point(3, 4) instead of Point@1b6d3586
+```
+
+## `equals()` — Object Equality vs. Reference Equality
+
+The default `equals()` inherited from `Object` is identical to `==` — it checks whether two references point to the exact same object. Override it when you want **logical equality** (same field values) instead.
+
+```java
+public class Point {
+    private final int x, y;
+
+    @Override
+    public boolean equals(Object obj) {
+        if (this == obj) return true;                      // same reference — fast path
+        if (obj == null || getClass() != obj.getClass()) return false;
+        Point other = (Point) obj;
+        return x == other.x && y == other.y;
+    }
+}
+```
+
+## `hashCode()` and the `equals`/`hashCode` Contract
+
+**The contract:** if two objects are equal according to `equals()`, they **must** return the same `hashCode()`. The reverse is not required — unequal objects *may* share a hash code (a "collision"), but equal objects must never have different hash codes.
+
+```java
+@Override
+public int hashCode() {
+    return Objects.hash(x, y);   // combines both fields into one hash
+}
+```
+
+**Why this matters concretely:** `HashMap`, `HashSet`, and `Hashtable` use `hashCode()` to pick which bucket an object goes into, then use `equals()` to find the exact match within that bucket. If you override `equals()` but forget `hashCode()`, two "equal" objects can land in *different* buckets — a `HashSet.contains()` check can return `false` for an object that's logically identical to one already in the set.
+
+```java
+Set<Point> points = new HashSet<>();
+points.add(new Point(1, 2));
+System.out.println(points.contains(new Point(1, 2)));
+// true only if hashCode() is overridden consistently with equals() — false otherwise, silently
+```
+
+![Diagram: HashMap buckets showing two equal objects landing in different buckets because hashCode was not overridden alongside equals, causing a failed lookup](/diagrams/ch13-broken-hashcode-contract.svg)
+
+**Rule of thumb: always override `equals()` and `hashCode()` together, never just one.**
+
+## `getClass()`
+
+Returns the object's actual runtime `Class` object, used for reflection (Chapter 45 territory) and for the common `equals()` pattern `getClass() != obj.getClass()`, which is stricter than `instanceof` — it rejects subclass instances as unequal, which matters for maintaining the symmetry requirement of the `equals()` contract when subclasses might add fields.
+
+## `clone()` — Shallow vs. Deep Copy
+
+`Object.clone()` performs a **shallow copy**: primitive fields are copied by value, but reference-type fields are copied by reference — both the original and the clone end up pointing to the *same* nested mutable objects.
+
+```java
+public class Team implements Cloneable {
+    private List<String> members = new ArrayList<>();
+
+    @Override
+    public Team clone() throws CloneNotSupportedException {
+        Team copy = (Team) super.clone();          // shallow copy
+        copy.members = new ArrayList<>(this.members); // manual deep copy of the list
+        return copy;
+    }
+}
+```
+
+Without the manual list copy, `original.clone().members` and `original.members` would reference the exact same `ArrayList` — mutating one would silently mutate the other. Because of this rough edge (and the checked-exception, marker-interface awkwardness of `Cloneable`), most modern Java code prefers copy constructors or static factory methods over `clone()`.
+
+```java
+public Team(Team other) {   // copy constructor — clearer than Cloneable
+    this.members = new ArrayList<>(other.members);
+}
+```
+
+## Key Takeaways
+
+- `equals()` defaults to reference equality (`==`); override it for logical/value equality.
+- If you override `equals()`, you must override `hashCode()` consistently, or hash-based collections silently misbehave.
+- `Object.clone()` is a shallow copy by default — mutable reference fields need manual deep copying.
+- Copy constructors are generally a cleaner alternative to `Cloneable`/`clone()` in modern Java code.
+
+---
+
+## Interview Questions
+
+**1. What is the `equals()`/`hashCode()` contract, and what specifically does it require?**
+It requires that if two objects are equal according to `equals()`, they must produce the identical `hashCode()` value. It does *not* require the converse — two unequal objects are allowed to share the same hash code (a collision is legal, just less efficient), but two equal objects must never report different hash codes.
+
+**2. What concretely goes wrong if you override `equals()` but not `hashCode()`?**
+Hash-based collections (`HashMap`, `HashSet`, `Hashtable`) use `hashCode()` to determine which internal bucket an object belongs in before ever calling `equals()` to confirm a match within that bucket. If two logically-equal objects (per your `equals()`) produce different default hash codes (since the inherited `Object.hashCode()` is typically based on identity/memory address), they can land in different buckets — a `set.contains(logicallyEqualObject)` call can incorrectly return `false` even though an "equal" object is already present, because the lookup never even checks the right bucket.
+
+**3. What does `Object`'s default `equals()` implementation actually do?**
+It's equivalent to `==` — it returns `true` only if both references point to the exact same object in memory, with no comparison of field values at all. Overriding `equals()` is necessary any time you want two distinct objects with the same logical content to be considered equal.
+
+**4. Why does a well-written `equals()` implementation typically check `this == obj` first?**
+It's a fast-path optimization — if the two references are literally the same object, they're trivially equal without needing to inspect or compare any fields, which is especially useful when `equals()` is called frequently or when field comparison is expensive.
+
+**5. What's the difference between using `instanceof` and `getClass() != obj.getClass()` inside an `equals()` implementation?**
+`instanceof` returns true for both the exact class and any subclass, which can make `equals()` non-symmetric if a subclass adds new fields relevant to equality (an instance of the subclass might equal a superclass instance from one direction but not the other). `getClass()` comparison requires an exact class match, avoiding that asymmetry, at the cost of a superclass instance never being able to equal a subclass instance even if all relevant fields match.
+
+**6. Is it required to override `toString()`? What happens if you don't?**
+It's not required — if you don't, the inherited `Object.toString()` produces `fully.qualified.ClassName@hexHashCode`, which compiles and runs fine but is essentially useless for debugging or logging. Overriding it to return meaningful field values is a strong convention for almost every non-trivial class, since it directly improves log output and IDE debugger displays.
+
+**7. What does `Object.clone()` do by default, and why is this often called a "shallow copy"?**
+It creates a new object of the same class and copies each field's value directly — for primitive fields, this copies the actual value; for reference-type fields, it copies the *reference itself*, not the object it points to. That means the original and the clone end up sharing the same underlying mutable objects (like a `List` field), which is why it's "shallow" — only the top-level object is duplicated, not the full object graph beneath it.
+
+**8. How would you implement a proper deep copy for a class with a mutable `List` field, using `clone()`?**
+Call `super.clone()` first to get the shallow-copied object with correctly copied primitive fields, then explicitly replace each mutable reference field with a fresh copy of its contents — e.g., `copy.members = new ArrayList<>(this.members);` — before returning the clone, ensuring the original and the clone no longer share the same nested `ArrayList` instance.
+
+**9. Why do many Java style guides recommend avoiding `Cloneable`/`clone()` in favor of copy constructors?**
+`Cloneable` is an unusual marker interface with no methods of its own, `clone()` throws a checked `CloneNotSupportedException` for classes that don't implement `Cloneable`, and the whole mechanism doesn't interact well with `final` fields or complex inheritance hierarchies. A copy constructor (`public Team(Team other) { ... }`) or a static factory method achieves the same goal with a plain, explicit, more flexible constructor call that's far easier for other developers to reason about.
+
+**10. What does `Objects.hash(x, y, z)` do, and why is it commonly used inside `hashCode()` implementations?**
+It's a convenience utility that combines multiple field values into a single well-distributed hash code (internally similar to `Arrays.hashCode` on an array of the boxed arguments), sparing you from manually writing the classic `31 * result + field.hashCode()` accumulation pattern by hand for every class.
+
+**11. Can two unequal objects have the same `hashCode()`? Is this a bug?**
+Yes, and it's not a bug — it's called a hash collision, and it's explicitly allowed by the `equals()`/`hashCode()` contract (only equal objects are *required* to share a hash code; the reverse isn't mandated). Hash-based collections are designed to handle collisions correctly via `equals()` comparisons within the same bucket; frequent collisions just reduce performance, they don't cause incorrect behavior.
+
+**12. If you don't override `equals()` and `hashCode()` at all, what determines whether two objects of your class are considered equal in a `HashSet`?**
+The inherited defaults from `Object` are used — `equals()` falls back to reference identity (`==`) and `hashCode()` is typically derived from the object's identity (often related to its memory location, though the JVM doesn't guarantee a specific algorithm). This means two separately-constructed objects with identical field values are treated as different entries in a `HashSet` unless `equals()`/`hashCode()` are explicitly overridden.
+
+**13. What role does `getClass()` play beyond use inside `equals()`?**
+`getClass()` returns the `Class<?>` object representing the object's actual runtime type, which is the entry point into Java's reflection API — used to inspect a class's fields, methods, and annotations at runtime, dynamically instantiate objects, and is heavily used internally by frameworks like Spring for dependency injection and by JSON/serialization libraries to determine how to (de)serialize an object.

@@ -1,0 +1,97 @@
+---
+title: "Chapter 89: Case Study — AI Customer Support Agent"
+description: "A production agentic customer support system: escalation to humans, tool-use for account actions, confirmation gating for refunds, and the full Part 12-13 safety stack applied to a consequential, tool-using agent."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 14
+partTitle: "Applied Case Studies"
+chapter: 89
+totalChapters: 96
+tags: ["ai-system-design", "customer-support", "agentic-ai", "confirmation-gating", "case-study", "interview-prep"]
+---
+
+## Introduction
+
+Chapter 87 built a RAG-based Q&A assistant that only generates text. This chapter builds the natural next step Chapter 68 used as its running example throughout Part 12: a customer support agent with real tool access — order lookups, refund processing — making it the first case study where Part 12's agentic architecture and Part 13's safety architecture must both operate together at full strength, since this system can take consequential, real-world action.
+
+## Architecture: RAG Grounding Plus Tool-Using Agent
+
+Directly combining Chapter 87's RAG pipeline with Chapter 72's tool-using agent architecture: the agent first retrieves relevant policy documentation (Chapter 87's pipeline) to ground its understanding of the situation, then reasons (Chapter 67's ReAct loop) about whether a tool call — an order lookup or a refund — is needed to resolve the customer's request.
+
+```python
+def support_agent_turn(customer_message: str, agent: ToolUsingAgent, rag_pipeline) -> str:
+    """
+    Directly combines Ch. 87's RAG grounding with Ch. 72's
+    ToolUsingAgent — the agent's reasoning is grounded in retrieved
+    POLICY (Ch. 62's hybrid search), while its ACTIONS route
+    through Ch. 68's validated, confirmation-gated tool execution.
+    """
+    relevant_policy = rag_pipeline.retrieve_and_rerank(customer_message)
+    goal = f"Customer says: {customer_message}\nRelevant policy: {relevant_policy}"
+    return agent.run(goal)  # Ch. 72's full architecture: validation,
+                              # confirmation gating, working memory
+```
+
+## Escalation to Human Agents: A Structural, Not Instructional, Boundary
+
+Directly extending Chapter 68's confirmation-gating principle to a genuinely new decision: rather than only gating individual tool calls, this agent needs an explicit **escalation condition** — situations (a distressed customer, a request outside the agent's defined scope, a repeated failed resolution attempt) where the agent should hand off to a human entirely, not merely gate one action.
+
+```python
+def should_escalate_to_human(conversation_state, agent_confidence: float) -> bool:
+    """
+    Directly extends Ch. 68's structural-safety principle to a
+    COARSER decision than a single tool call — escalation is a
+    RULE-BASED, STRUCTURAL check (not left to the agent's own
+    judgment alone), for exactly the same reason Ch. 68 preferred
+    structural constraints over purely instructional ones.
+    """
+    return (
+        conversation_state.turn_count > 5 and not conversation_state.resolved
+    ) or agent_confidence < 0.4 or conversation_state.sentiment_score < -0.5
+```
+
+**Why escalation criteria should be rule-based rather than left entirely to the agent's own self-assessment**: directly extending Chapter 68's core argument — an agent's own judgment about "should I escalate this" is itself a piece of LLM reasoning subject to the same reliability limitations as any other decision it makes; an explicit, rule-based escalation trigger (turn count, sentiment, confidence threshold) provides a structural backstop that fires even if the agent's own self-assessment fails to recognize it should hand off.
+
+## Refunds as the Canonical Confirmation-Gated Action
+
+Directly reusing Chapter 68's and Chapter 72's confirmation-gating architecture exactly as designed: a refund tool call, being state-changing and financially consequential, requires explicit approval before execution — but for a customer support context specifically, this confirmation might route to a human *supervisor* reviewing the agent's proposed action, rather than the customer themselves approving their own refund.
+
+## Evaluation: Task Completion Rate as the Primary Business Metric
+
+Directly extending Chapter 72's `AgentEvaluationGate` methodology with a business-relevant framing: the key metric isn't generic "quality" but *resolution rate without escalation* — the fraction of customer issues the agent successfully resolves within its own scope, directly measurable and directly tied to the system's actual cost-saving business purpose.
+
+## Key Takeaways
+
+- A production support agent combines Chapter 87's RAG grounding (for policy knowledge) with Chapter 72's tool-using agent architecture (for taking action), requiring both pipelines to work together rather than treating them as alternatives.
+- Escalation to a human should be a structural, rule-based trigger (turn count, sentiment, confidence) rather than left entirely to the agent's own self-assessment, directly extending Chapter 68's structural-over-instructional safety principle to a coarser, conversation-level decision.
+- Refund and other state-changing actions remain confirmation-gated exactly per Chapter 68's architecture, though the confirming party may be a human supervisor rather than the customer themselves.
+- The primary business evaluation metric is resolution rate without escalation, directly extending Chapter 72's evaluation-gate methodology with a business-relevant framing tied to the system's actual cost-saving purpose.
+
+---
+
+## Interview Questions
+
+**1. Why should escalation-to-human criteria be rule-based rather than determined entirely by the agent's own self-assessment of whether it needs help?**
+The agent's self-assessment is itself a piece of LLM reasoning, subject to the same reliability limitations (Chapter 67's core concern) as any other decision it makes — an agent confidently but incorrectly believing it has resolved an issue would never trigger a self-assessed escalation, exactly the failure mode a structural, rule-based backstop (turn count, sentiment score, explicit confidence threshold) is designed to catch regardless of the agent's own potentially-flawed self-assessment.
+*Follow-up: What risk does an OVERLY aggressive rule-based escalation threshold introduce, and how would you calibrate it?*
+An overly aggressive threshold would escalate genuinely resolvable issues unnecessarily, undermining the system's cost-saving business purpose (this chapter's evaluation-metric discussion) — I'd calibrate the threshold empirically against a labeled set of past conversations, measuring the trade-off between escalation rate and actual resolution quality at varying thresholds, directly following this series' consistent empirical-calibration discipline rather than setting an arbitrary cutoff.
+
+**2. Why does a refund tool call in this specific context potentially route to a human SUPERVISOR rather than the customer confirming their own refund, unlike Chapter 68's more generic confirmation-gate framing?**
+The customer has an inherent incentive to approve any refund proposed on their behalf, meaning customer confirmation provides no genuine, independent check on whether the refund is actually appropriate per company policy — a supervisor confirmation provides the genuinely independent human judgment Chapter 68's confirmation gate is designed to provide, directly the same "independent reviewer, not the party with a stake in the outcome" principle Chapter 84's appeal-handling discussion established for content-moderation appeals.
+*Follow-up: What would justify allowing customer self-confirmation for a DIFFERENT, lower-stakes state-changing action, like updating their own shipping address?*
+Directly extending Chapter 68's risk-calibration discussion — a lower-consequence, easily-reversible action like a shipping-address update doesn't carry the same risk of the customer having a misaligned incentive relative to the company's interests, making customer self-confirmation a reasonably calibrated choice for this specific, lower-stakes action even while a refund's genuine misalignment risk warrants supervisor-level, independent confirmation instead.
+
+**3. Why does this chapter combine RAG grounding with tool-use agent architecture rather than choosing one or the other?**
+These two architectures address genuinely different needs — RAG grounding (Chapter 87) provides the agent with accurate, up-to-date POLICY KNOWLEDGE to reason from, while tool use (Chapter 72) provides the ability to actually TAKE ACTION on the customer's behalf; a support agent needing both accurate knowledge AND the ability to act genuinely requires both architectures working together, directly the same "complementary techniques addressing different needs, not competing alternatives" pattern this series has established repeatedly (Chapter 62's hybrid search, Chapter 75's multi-component evaluation suite).
+*Follow-up: What specific failure would result from using ONLY the tool-use agent architecture without RAG grounding?*
+Without RAG grounding, the agent would rely solely on its parametric knowledge (Chapter 36's inherent limitation) for company-specific policy details, risking hallucinated or outdated policy claims (Chapter 36's original concern) even while its tool-use mechanics for actually executing a refund remain technically correct — illustrating that tool-use reliability alone doesn't guarantee the REASONING leading to that tool call is grounded in accurate information.
+
+**4. Why is "resolution rate without escalation" a more appropriate primary business metric than a generic LLM-as-judge quality score (Chapter 75) for this specific system?**
+This system's actual business purpose is reducing the cost of human support agent time by successfully resolving issues autonomously — resolution rate without escalation directly measures this specific business goal, while a generic quality score (how well-written or helpful a response sounds) doesn't directly capture whether the underlying issue was actually resolved without requiring human intervention, directly extending Chapter 75's "match the metric to the actual business question" discipline to this specific application's actual cost-saving purpose.
+*Follow-up: Why would you still want to track Chapter 75's other evaluation components (faithfulness, red-team results) ALONGSIDE this primary business metric, rather than relying on resolution rate alone?*
+A high resolution rate achieved through unfaithful, hallucinated policy claims or through an agent vulnerable to adversarial manipulation (Chapter 74) would represent a genuinely dangerous, misleading success — Chapter 75's full evaluation suite catches these underlying quality and safety problems that a purely outcome-focused metric like resolution rate could mask entirely, directly the same "no single metric substitutes for the others" principle Chapter 75 established for its full evaluation portfolio.
+
+**5. How would you diagnose whether a declining resolution rate stems from a genuine agent-capability regression versus an increase in genuinely difficult, out-of-scope customer requests, extending this Part's diagnostic discipline?**
+Directly extending this series' consistent input-versus-generation-stage diagnostic distinction (Chapter 73, Chapter 77) — check whether the DISTRIBUTION of incoming customer requests has shifted (more genuinely complex or out-of-scope issues arriving, an input-side change) versus whether the agent's resolution rate has declined specifically for the SAME category of requests it previously handled well (a generation-side regression, perhaps from a model or tool-schema change, per Chapter 68's and Chapter 71's regression-testing discipline).
+*Follow-up: What remediation would each of these two diagnoses point toward?*
+A genuine shift toward harder incoming requests points toward either expanding the agent's tool set and scope (Chapter 67's evidence-based escalation) or accepting a higher escalation rate as an appropriate, correct response to genuinely harder requests; a generation-side regression points toward auditing recent model or tool-schema changes and potentially rolling back to a previously-validated configuration — two entirely different remediation paths this diagnostic separation is necessary to correctly distinguish between.

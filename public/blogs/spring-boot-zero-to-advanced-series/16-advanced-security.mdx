@@ -1,0 +1,228 @@
+---
+title: "Advanced Security: Method-Level Security, CORS, CSRF & RBAC/ABAC"
+description: "Endpoint-level security rules aren't always granular enough. This chapter covers securing individual methods, the browser-specific threats CORS and CSRF actually defend against, and two authorization models beyond simple roles."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 16
+tags: ["Spring Boot", "Spring Security", "CORS", "CSRF"]
+---
+
+Chapters 14–15 covered authenticating a request and authorizing it at the endpoint level. This chapter covers finer-grained authorization, and finally explains CORS and CSRF properly — two mechanisms that get confused with each other constantly, despite defending against completely different things.
+
+## Method-level security
+
+`authorizeHttpRequests` (Chapter 14) secures by URL pattern. Sometimes the authorization decision genuinely depends on the specific data involved — "a user can update *their own* order, but not anyone else's" isn't expressible as a URL pattern at all.
+
+```java
+@Configuration
+@EnableMethodSecurity   // required to activate @PreAuthorize/@PostAuthorize/@Secured
+class MethodSecurityConfig { }
+```
+
+```java
+@Service
+class OrderService {
+
+    @PreAuthorize("hasRole('ADMIN')")
+    void cancelAnyOrder(Long orderId) { }
+
+    @PreAuthorize("#orderId == authentication.principal.id or hasRole('ADMIN')")
+    OrderResponse getOrder(Long orderId) { }
+
+    @PostAuthorize("returnObject.customerName == authentication.name")
+    OrderResponse getOrderStrict(Long orderId) { }
+}
+```
+
+`@PreAuthorize` evaluates its SpEL expression *before* the method runs — a failed check throws `AccessDeniedException` immediately, and the method body never executes. `@PostAuthorize` evaluates *after* the method returns, with access to the actual return value (`returnObject`) — useful specifically when the authorization decision depends on data only available once the object has been loaded, at the cost of doing the work first even if access is ultimately denied.
+
+```
+Controller calls orderService.getOrder(42)
+             │
+             ▼
+   @PreAuthorize expression evaluated
+   (has access to method arguments,
+    NOT the return value yet)
+             │
+      ┌──────┴──────┐
+   passes         fails
+      │              │
+      ▼              ▼
+ method runs    AccessDeniedException
+      │          (method body never runs)
+      ▼
+  returns OrderResponse
+```
+
+## CORS: a browser-only same-origin relaxation
+
+**CORS (Cross-Origin Resource Sharing)** exists because browsers, by default, block a page loaded from one origin (`https://app.example.com`) from making requests to a different origin (`https://api.example.com`) via JavaScript — the "same-origin policy." CORS is the mechanism a *server* uses to explicitly tell browsers "requests from this other specific origin are allowed."
+
+```java
+@Configuration
+public class CorsConfig {
+
+    @Bean
+    CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration config = new CorsConfiguration();
+        config.setAllowedOrigins(List.of("https://app.example.com"));
+        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE"));
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type"));
+        config.setAllowCredentials(true);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/api/**", config);
+        return source;
+    }
+}
+```
+
+```java
+http.cors(Customizer.withDefaults());   // wire the CorsConfigurationSource bean into the security filter chain
+```
+
+**Critical distinction: CORS is enforced by the browser, not the server.** The server's job is only to send the right `Access-Control-Allow-*` response headers; a non-browser client (`curl`, a mobile app, another server) is completely unaffected by CORS either way, since there's no browser there to enforce anything. CORS protects browser users from a malicious website silently calling your API using their existing cookies/credentials — it is *not* a general-purpose API access-control mechanism, and never a substitute for real authentication.
+
+## CSRF: a session-cookie-specific attack
+
+**CSRF (Cross-Site Request Forgery)** is a completely different threat: a malicious site tricks a logged-in user's browser into making a request to your application that the browser automatically attaches valid session cookies to — the request looks legitimate to your server because the cookie is genuinely valid, even though the user never intended to make it.
+
+```
+1. User logs into bank.com — browser stores a session cookie
+2. User visits evil.com in the same browser (different tab)
+3. evil.com's page auto-submits a form to bank.com/transfer-funds
+4. Browser automatically attaches bank.com's session cookie to that request
+5. bank.com sees a validly-cookied request and processes the transfer — CSRF
+```
+
+Spring Security's CSRF protection defends against this by requiring a second, unpredictable token (not stored in a cookie the attacker's page can access) to accompany any state-changing request — `evil.com` has no way to know or supply that token.
+
+## Why Chapters 14–15 disabled CSRF, and why that's correct there
+
+CSRF is specifically an attack on **cookie-based session authentication**. A stateless API using `Authorization: Bearer <token>` headers (Chapter 15) has no session cookie for a browser to automatically attach on the attacker's behalf — the attacker's forged request would need to somehow also know and attach the bearer token itself, which it has no way to obtain. This is precisely why `csrf(AbstractHttpConfigurer::disable)` was correct for the JWT-based setup in Chapter 15, and would be incorrect for a traditional session-cookie-authenticated application.
+
+| | CORS | CSRF |
+|---|---|---|
+| Enforced by | The browser | The server (via a token check) |
+| Protects against | A malicious site reading responses from your API via a victim's browser | A malicious site triggering unwanted *actions* using a victim's existing session |
+| Relevant for | Browser-based clients calling your API from a different origin | Cookie/session-based authentication specifically |
+| Irrelevant for | Non-browser clients (mobile apps, server-to-server calls) | Stateless, header-token-authenticated APIs |
+
+## RBAC vs ABAC
+
+**Role-Based Access Control (RBAC)** — everything used so far (`hasRole('ADMIN')`) — grants permissions based on a user's assigned role(s). Simple, and sufficient for most applications.
+
+**Attribute-Based Access Control (ABAC)** makes decisions based on *attributes* of the user, resource, and context together — "a manager can approve an expense report, but only for their own department, and only if the amount is under their approval limit." This can't be expressed as a single role check.
+
+```java
+@PreAuthorize("hasRole('MANAGER') and #expense.department == authentication.principal.department and #expense.amount <= authentication.principal.approvalLimit")
+void approveExpense(Expense expense) { }
+```
+
+RBAC is simpler to reason about and sufficient when permissions genuinely map cleanly onto a small set of roles. ABAC is more expressive and scales better as authorization rules grow context-dependent, at the cost of complexity — each rule becomes its own small piece of logic rather than a simple role lookup.
+
+## Best practices & gotchas
+
+- **Don't rely on CORS as a security boundary.** It only constrains browser-originated JavaScript calls — anything else (curl, Postman, a server, a mobile app) bypasses it entirely. Real authorization must happen server-side regardless of CORS configuration.
+- **Never set `allowedOrigins` to `*` when `allowCredentials` is `true`.** Browsers actually reject this combination outright (and it would be a serious security hole if they didn't) — list specific, trusted origins explicitly instead.
+- **Don't disable CSRF reflexively.** It's correct for stateless, bearer-token APIs; it's a real vulnerability if disabled on an application using cookie-based session authentication.
+- **Prefer `@PreAuthorize` over `@PostAuthorize` when the check doesn't need the return value.** `@PostAuthorize` still executes the full method body before checking access, which is wasted work (and, depending on the method, an unwanted side effect) if the check ultimately fails.
+- **Keep SpEL expressions in `@PreAuthorize` readable.** A complex ABAC-style expression is often clearer extracted into a named Spring bean method: `@PreAuthorize("@expenseAuthorizer.canApprove(#expense, authentication)")`.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| `@PreAuthorize` | Checked before method execution; has access to method arguments |
+| `@PostAuthorize` | Checked after method execution; has access to the return value |
+| CORS | Browser-enforced; controls which origins may call your API from JavaScript |
+| CSRF | Server-enforced token check; defends session-cookie auth against forged actions |
+| RBAC | Authorization based on assigned roles |
+| ABAC | Authorization based on attributes of user, resource, and context together |
+
+## Wrapping up
+
+Part 4 is complete: authentication (Chapter 14), token-based and delegated identity (Chapter 15), and fine-grained, attribute-aware authorization plus the browser-specific mechanisms that get confused with general API security (this chapter). **Part 5** starts next — Chapter 17 covers unit testing everything built so far with JUnit 5, Mockito, and MockMvc.
+
+## Interview Questions
+
+**1. What's the difference between `@PreAuthorize` and `@PostAuthorize`?**
+`@PreAuthorize` evaluates its expression before the method executes, with access only to the method's arguments — a failed check prevents the method body from ever running. `@PostAuthorize` evaluates after the method has already executed, with access to the actual return value via `returnObject`, at the cost of the method's work having already been done even if access is ultimately denied.
+
+*Follow-up: Can both be used on the same method, and when would that make sense?* Yes — a cheap, argument-based `@PreAuthorize` check can gate whether the caller has any business calling the method at all (e.g., a baseline role), while a `@PostAuthorize` check afterward verifies something only knowable from the loaded result (e.g., that the returned resource actually belongs to the caller). This layers a fast rejection path in front of a more expensive, data-dependent one.
+
+**2. What annotation is required to activate `@PreAuthorize`/`@PostAuthorize` in a Spring Boot application?**
+`@EnableMethodSecurity`, placed on a `@Configuration` class. Without it, method-security annotations are present but inert — no AOP advice is applied to enforce them.
+
+*Follow-up: The older equivalent was `@EnableGlobalMethodSecurity` — what changed with the newer `@EnableMethodSecurity`?* `@EnableMethodSecurity` enables Spring Security's own `@PreAuthorize`/`@PostAuthorize` annotations by default, without needing an explicit `prePostEnabled = true` attribute the older, now-deprecated `@EnableGlobalMethodSecurity` required. It's also built on the more modern, composable `AuthorizationManager` infrastructure rather than the older interceptor-based mechanism.
+
+**3. What does CORS actually protect against, and who enforces it?**
+CORS is enforced entirely by the browser, not the server. It protects browser users by preventing JavaScript running on one origin from making credentialed requests to a different origin unless that origin explicitly allows it via response headers — defending against a malicious website silently using a victim's browser (and any cookies it holds) to call another site's API.
+
+*Follow-up: If a company wants to prevent other websites from embedding their site inside an iframe (clickjacking), is that also handled by CORS?* No — that's an entirely separate browser security mechanism, controlled via the `X-Frame-Options` header or the `frame-ancestors` directive in a `Content-Security-Policy` header, unrelated to CORS's cross-origin request rules.
+
+**4. Is a curl request or a mobile app's HTTP call affected by CORS configuration?**
+No. CORS is a browser-enforced restriction on JavaScript running within a web page — non-browser clients have no such enforcement mechanism at all and can call an API regardless of its CORS configuration. This is exactly why CORS should never be treated as an actual access-control or security mechanism.
+
+*Follow-up: Given that CORS doesn't protect non-browser clients at all, what's actually stopping an attacker from just calling your API directly with a script instead of going through a victim's browser?* Nothing about CORS — that's precisely the point. Real protection against unauthorized access has to come from authentication and authorization enforced server-side (Chapters 14–15), which apply regardless of what kind of client is calling. CORS only closes one specific browser-mediated avenue of misuse; it was never meant to be, and isn't, a substitute for actual access control.
+
+**5. What is CSRF, and what kind of authentication is it specifically an attack against?**
+CSRF (Cross-Site Request Forgery) tricks a victim's browser into making a state-changing request to an application the victim is already logged into, relying on the browser automatically attaching the victim's valid session cookie to that forged request. It's specifically an attack against cookie/session-based authentication — the browser's automatic cookie attachment is the exact mechanism it exploits.
+
+*Follow-up: Does marking the session cookie `HttpOnly` prevent CSRF? Why or why not?* No — `HttpOnly` only prevents JavaScript (including malicious injected scripts, i.e. XSS) from *reading* the cookie's value. It does nothing to stop the browser from still automatically *attaching* that cookie to a cross-site request, which is exactly the behavior CSRF exploits. `HttpOnly` and CSRF protection defend against two different threats (cookie theft via XSS vs. forged actions via automatic cookie attachment) and neither substitutes for the other.
+
+**6. Why is it correct to disable CSRF protection for a stateless, JWT-authenticated REST API?**
+Because CSRF's attack relies on the browser automatically attaching credentials (a session cookie) to a forged request with no attacker action required. A bearer-token-authenticated API requires the token to be explicitly included in an `Authorization` header by the calling code — a forged cross-site request has no way to obtain or automatically attach that token, so the underlying attack vector CSRF protection defends against doesn't exist in that architecture.
+
+*Follow-up: If that same stateless API also accepted an optional session cookie for convenience in some flows, would disabling CSRF still be safe?* No — in that mixed scenario, CSRF protection would matter again specifically for the cookie-authenticated paths, since those requests would once again be vulnerable to the browser's automatic cookie attachment. The "safe to disable" reasoning only holds cleanly when cookies play no role in authentication anywhere in the application, not just for the primary flow.
+
+**7. What would happen if you disabled CSRF protection on a traditional, cookie-session-authenticated web application?**
+It would reopen exactly the vulnerability CSRF protection exists to close: a malicious external site could trigger state-changing requests (fund transfers, password changes, purchases) on behalf of a logged-in victim, since the browser would still automatically attach the victim's valid session cookie to the forged request with nothing checking for a legitimate, unpredictable CSRF token.
+
+*Follow-up: Besides re-enabling CSRF token checks, what's another complementary browser-level defense against this same style of attack?* The `SameSite` cookie attribute (set to `Lax` or `Strict`) instructs the browser itself not to send the cookie along with cross-site requests in the first place — an additional, complementary layer alongside token-based CSRF protection rather than a full replacement for it.
+
+**8. Why can't `allowedOrigins("*")` be combined with `allowCredentials(true)` in CORS configuration?**
+Allowing literally any origin to make credentialed requests (carrying cookies or authorization headers) would defeat the entire purpose of CORS's origin restriction — any malicious site could then make authenticated requests on a victim's behalf. Browsers themselves enforce this restriction and will reject the combination, so specific, explicitly trusted origins must be listed instead whenever credentials are involved.
+
+*Follow-up: If an application needs to support many dynamic subdomains (e.g., `tenant1.app.com`, `tenant2.app.com`) as allowed origins, how would you configure that without listing every one individually?* Use `setAllowedOriginPatterns(...)` with a wildcard subdomain pattern (e.g., `https://*.app.com`) instead of a literal, exhaustive list or a bare `*` — Spring's CORS configuration supports pattern-based origin matching specifically to handle this case while still working correctly alongside `allowCredentials(true)`.
+
+**9. What is RBAC, and what's its main limitation?**
+Role-Based Access Control grants permissions based on a user's assigned role(s) — simple to reason about and implement (`hasRole('ADMIN')`). Its limitation is that it can't express authorization decisions that depend on specific attributes of the resource or context beyond the role itself — for example, "a user can edit their own profile but not someone else's" isn't a role distinction at all.
+
+*Follow-up: Could you simulate ABAC-like behavior using only RBAC, and what's the drawback of doing so?* You could create increasingly fine-grained, specific roles (e.g., `EDIT_OWN_PROFILE_ONLY`) to approximate contextual rules, but this leads to "role explosion" as more contextual combinations need representing — the number of roles grows rapidly and becomes hard to manage and reason about, which is exactly the scaling problem ABAC is designed to avoid by evaluating attributes directly instead.
+
+**10. What is ABAC, and how does it address RBAC's limitation?**
+Attribute-Based Access Control makes authorization decisions based on attributes of the user, the resource being accessed, and the surrounding context together — evaluated as a rule/expression rather than a static role lookup. This lets it express context-dependent decisions RBAC can't, like "a manager can approve an expense only within their own department and up to their personal approval limit," at the cost of each rule being more complex than a simple role check.
+
+*Follow-up: What's a real trade-off teams encounter when adopting ABAC broadly across a large system?* Authorization logic becomes distributed across many individual, context-specific rules rather than living in one centrally reviewable role table, making it harder to audit holistically ("who can actually do X, across every rule that might grant it") and harder to test exhaustively, since every meaningful combination of attributes needs its own consideration.
+
+**11. How would you express "a user can view their own order, but an admin can view any order" using method security?**
+```java
+@PreAuthorize("#orderId == authentication.principal.id or hasRole('ADMIN')")
+OrderResponse getOrder(Long orderId) { }
+```
+This combines a resource-ownership check (comparing the requested ID against the authenticated principal's own ID) with a role-based override for admins, within a single SpEL expression evaluated before the method runs.
+
+*Follow-up: How would you unit test this `@PreAuthorize` expression without needing a real HTTP request?* Use Spring Security Test's `@WithMockUser` (or a manually constructed `Authentication`/`SecurityContext`) inside a test that loads the relevant Spring context, then call `orderService.getOrder(...)` directly with different combinations of mock user identity and requested ID — asserting that a mismatched, non-admin combination throws `AccessDeniedException` and that a matching ID or an admin role succeeds.
+
+**12. Why might extracting a complex `@PreAuthorize` SpEL expression into a named Spring bean method be a good idea?**
+Complex authorization logic embedded directly as a SpEL string becomes hard to read, test, and refactor as it grows — extracting it into a plain Java method on a Spring bean (referenced via `@expenseAuthorizer.canApprove(...)`) makes the logic a normal, unit-testable piece of code with proper IDE support, while the annotation itself stays short and readable.
+
+*Follow-up: Are there any meaningful performance differences between an inline SpEL expression and delegating to a bean method?* Negligible in practice — both ultimately resolve to a method invocation through SpEL's method-call syntax, evaluated once per call. The benefit of extracting to a bean is purely maintainability and testability, not performance.
+
+**13. Can `@PreAuthorize` be used on a `@RestController` method as well as a `@Service` method?**
+Yes — method security annotations work on any Spring-managed bean's method, including controllers. In practice, many teams prefer enforcing fine-grained, data-dependent authorization at the service layer rather than the controller layer, so the same protected logic is enforced consistently regardless of which caller (a controller, a scheduled job, a messaging listener) ends up invoking it.
+
+*Follow-up: If a check is only enforced at the controller layer, what's a concrete way it could end up bypassed within the same application?* Any other code path that calls the same underlying service method directly — a scheduled batch job, an internal admin tool, a messaging listener, or simply a second controller added later that also happens to call that service — would skip the controller's check entirely, since the enforcement never lived on the shared method those callers actually invoke.
+
+**14. What's a security risk of relying solely on `@PostAuthorize` for an operation that also has side effects (like sending an email or writing an audit log) inside the method body?**
+Since `@PostAuthorize` only checks access *after* the method body has already fully executed, any side effects the method performs happen regardless of whether the authorization check ultimately passes or fails — an unauthorized caller could still trigger those side effects even though the final result is withheld from them. `@PreAuthorize` is the safer choice whenever the check can be expressed using only the method's input arguments, precisely to avoid this.
+
+*Follow-up: How would you refactor such a method so `@PreAuthorize` becomes viable instead?* Split the method into a cheap, read-only lookup used purely to establish the resource's ownership/attributes (evaluated separately or passed in as an argument), so the `@PreAuthorize` expression can check that data upfront using only the method's arguments — with the side-effecting logic only executing after that check has already passed, rather than being entangled with the data-loading step the original `@PostAuthorize` version depended on.
+
+**15. If a frontend team reports "our browser app gets a CORS error calling our new API, but the backend team says the endpoint works fine in Postman" — what's actually going on, and how would you fix it?**
+This is expected and not a contradiction: Postman isn't a browser and isn't subject to CORS enforcement at all, so it will succeed regardless of the server's CORS configuration, while the browser correctly blocks the JavaScript call because the server hasn't sent the appropriate `Access-Control-Allow-Origin` header for the frontend's origin. The fix is adding a `CorsConfigurationSource` (or equivalent per-endpoint CORS configuration) on the backend that explicitly allows the frontend's actual origin, then wiring it into the `SecurityFilterChain` via `http.cors(...)`.
+
+*Follow-up: After fixing the CORS configuration, the browser request still fails specifically for `POST` requests with a JSON body, even though simple `GET` requests now work — what's still missing?* This points to a failing **CORS preflight**: browsers send an automatic `OPTIONS` request ahead of "non-simple" requests (a custom header like `Content-Type: application/json`, or methods beyond `GET`/`HEAD`/simple `POST`), and the server must respond to that `OPTIONS` preflight with the correct allowed methods and headers or the browser will block the actual request — this preflight step doesn't happen for simple `GET` requests, which is why they can appear to work while `POST` still fails.
+

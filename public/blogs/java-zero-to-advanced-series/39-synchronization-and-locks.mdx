@@ -1,0 +1,180 @@
+---
+title: "Synchronization & Locks"
+description: "Race conditions, the synchronized keyword, intrinsic locks/monitors, volatile and the Java Memory Model, and explicit ReentrantLock."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Concurrency & Multithreading"
+chapter: 39
+totalChapters: 65
+slug: "synchronization-and-locks"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "concurrency", "synchronization", "volatile"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 14
+---
+
+## Race Conditions — Why Synchronization Is Necessary
+
+A race condition occurs when multiple threads access and modify shared mutable state concurrently, and the final result depends unpredictably on the exact timing/interleaving of their operations.
+
+```java
+public class Counter {
+    private int count = 0;
+    public void increment() { count++; }   // NOT atomic! Looks like one operation, isn't.
+}
+```
+
+`count++` is actually three separate steps: **read** the current value, **increment** it, **write** it back. If two threads interleave these steps, an increment can be lost entirely:
+
+```
+Thread A reads count = 5
+Thread B reads count = 5
+Thread A computes 5 + 1 = 6, writes count = 6
+Thread B computes 5 + 1 = 6, writes count = 6   <- Thread A's increment is LOST; count should be 7
+```
+
+![Diagram: timeline showing two threads interleaving read-increment-write steps on a shared counter, resulting in a lost update where the final count is one less than expected](/diagrams/ch39-race-condition-lost-update.svg)
+
+## `synchronized` — Java's Built-In Mutual Exclusion
+
+Every Java object has an intrinsic **monitor lock**. `synchronized` ensures only one thread can hold a given object's lock at a time, forcing other threads to wait.
+
+```java
+public class Counter {
+    private int count = 0;
+
+    public synchronized void increment() {   // acquires "this" object's monitor lock
+        count++;
+    }
+}
+```
+
+```java
+// Synchronized block — locks on an explicit object, narrower scope than a whole method
+private final Object lock = new Object();
+
+public void increment() {
+    synchronized (lock) {
+        count++;
+    }
+}
+```
+
+`synchronized` on an **instance method** locks on `this`; on a **static method**, it locks on the `Class` object itself (shared across all instances). Narrowing the synchronized scope to just the critical section (rather than the entire method) reduces contention when a method does other, non-shared-state work alongside the critical part.
+
+## `volatile` — Visibility, Not Atomicity
+
+```java
+private volatile boolean running = true;
+
+public void stop() { running = false; }   // written by one thread
+
+public void run() {
+    while (running) { /* work */ }        // read by another thread — GUARANTEED to see the update
+}
+```
+
+Without `volatile`, the JVM/CPU is permitted to cache `running`'s value in a thread-local register or CPU cache, meaning one thread's write might never become visible to another thread reading it — the reading thread could loop forever, never seeing `running` become `false`. `volatile` forces every read to go to main memory and every write to be immediately flushed to main memory, guaranteeing **visibility** across threads.
+
+**Critically, `volatile` does NOT provide atomicity** — `volatileCount++` is still three separate steps and still racy, even with `volatile`. `volatile` is appropriate for simple flags and single-write/multi-read scenarios, not for compound operations like increment.
+
+## The Java Memory Model and `happens-before`
+
+The Java Memory Model (JMM) defines exactly when one thread's writes to memory are guaranteed to be visible to another thread's reads — formalized as the **happens-before** relationship. Key happens-before guarantees:
+
+- A write to a `volatile` field happens-before every subsequent read of that same field.
+- Unlocking a `synchronized` block happens-before a subsequent thread locking the *same* monitor.
+- All actions in a thread happen-before that thread's `Thread.join()` returns in another thread.
+- All actions before calling `Thread.start()` happen-before any action in the started thread.
+
+Without an established happens-before relationship, the JMM makes **no guarantee** that one thread will ever observe another thread's writes in a timely (or even eventual) manner — this is precisely why unsynchronized access to shared mutable state is undefined/unpredictable behavior, not just "probably fine most of the time."
+
+## `ReentrantLock` — Explicit, More Flexible Locking
+
+```java
+private final ReentrantLock lock = new ReentrantLock();
+
+public void increment() {
+    lock.lock();
+    try {
+        count++;
+    } finally {
+        lock.unlock();   // MUST be in a finally block — unlike synchronized, nothing unlocks automatically
+    }
+}
+```
+
+`ReentrantLock` (in `java.util.concurrent.locks`) offers capabilities `synchronized` doesn't:
+
+- **`tryLock()`** — attempt to acquire the lock without blocking indefinitely, optionally with a timeout, letting a thread give up and do something else if the lock isn't available.
+- **Fairness** — an optional constructor flag (`new ReentrantLock(true)`) that grants the lock to the longest-waiting thread first, avoiding thread starvation (at some throughput cost).
+- **Multiple condition variables** via `newCondition()`, allowing more fine-grained wait/notify coordination than the single implicit condition every `synchronized` monitor provides.
+
+The cost: `ReentrantLock` requires manual, disciplined `unlock()` in a `finally` block — forgetting it (unlike `synchronized`, which releases its lock automatically even if an exception is thrown) leaves the lock permanently held, deadlocking any other thread waiting for it.
+
+## "Reentrant" — What It Actually Means
+
+Both `synchronized` and `ReentrantLock` are **reentrant**: a thread that already holds a lock can acquire it again (e.g., calling another `synchronized` method on the same object from within a `synchronized` method) without deadlocking itself.
+
+```java
+public synchronized void outer() {
+    inner();   // no deadlock — the SAME thread already holds this object's lock, and can re-acquire it
+}
+public synchronized void inner() { /* ... */ }
+```
+
+## Key Takeaways
+
+- A race condition arises from unsynchronized concurrent access to shared mutable state — even innocuous-looking operations like `count++` are not atomic.
+- `synchronized` provides mutual exclusion (only one thread at a time) and, via the JMM, visibility guarantees for everything done under the same lock.
+- `volatile` guarantees visibility for a single field but not atomicity — never use it alone for compound operations like increment.
+- `ReentrantLock` offers `tryLock()`, fairness, and multiple conditions at the cost of requiring manual, disciplined unlocking in a `finally` block.
+
+---
+
+## Interview Questions
+
+**1. What is a race condition, and why is `count++` not a safe operation to run concurrently from multiple threads without synchronization?**
+A race condition occurs when the correctness of a program depends on the unpredictable relative timing of multiple threads accessing shared mutable state. `count++` is not a single atomic operation — it's three distinct steps (read the current value, compute the incremented value, write it back), and if two threads interleave these steps, one thread's update can be silently overwritten by the other, resulting in a "lost update" where the final count is lower than the correct total number of increments performed.
+
+**2. What does `synchronized` actually do at the JVM level?**
+It causes the executing thread to acquire the intrinsic monitor lock associated with a specific object (either `this` for a synchronized instance method, the `Class` object for a synchronized static method, or an explicitly specified object for a synchronized block) before entering the protected code, and automatically release that lock upon exiting the block — whether normally or via an exception — ensuring only one thread can execute code protected by that same lock at any given time.
+
+**3. What's the difference between synchronizing on an instance method versus a static method?**
+A synchronized instance method locks on `this` — the specific object instance the method was called on — so different instances of the class don't block each other. A synchronized static method locks on the `Class` object itself, which is a single, shared lock across every instance of that class, meaning even calls on different objects of that class will block each other if they both invoke synchronized static methods.
+
+**4. What guarantee does `volatile` provide, and what guarantee does it explicitly NOT provide?**
+`volatile` guarantees visibility — a write to a volatile field by one thread is guaranteed to be immediately visible to any subsequent read of that same field by another thread, since reads/writes bypass CPU-local caching and go directly to main memory. It does NOT guarantee atomicity for compound operations — `volatileField++` is still three separate steps and remains just as racy as a non-volatile field for that kind of operation; `volatile` alone is only safe for simple, single-step reads and writes, like a boolean flag.
+
+**5. Why can a thread loop forever checking a non-volatile boolean flag, even after another thread has set it to a different value?**
+Without `volatile` (or other synchronization establishing a happens-before relationship), the JVM and underlying CPU are permitted to cache the flag's value in a thread-local register or cache line for performance, meaning the reading thread may keep observing a stale, cached copy of the value indefinitely rather than ever re-reading the actual, updated value from main memory — there's no language guarantee that the write ever becomes visible to that thread in any bounded time.
+
+**6. What is the Java Memory Model's "happens-before" relationship, and why does it matter for concurrent code correctness?**
+It's a formal set of rules defining exactly which memory writes by one thread are guaranteed to be visible to which reads by another thread, given a particular sequence of synchronization actions (like acquiring/releasing the same lock, or reading/writing the same volatile field). Without an established happens-before relationship between a write and a subsequent read across threads, there's simply no guarantee about visibility or ordering at all — this is why unsynchronized access to shared mutable state across threads is genuinely undefined behavior according to the language specification, not just an unlikely-but-harmless risk.
+
+**7. What does "reentrant" mean in the context of `synchronized` and `ReentrantLock`?**
+It means a thread that already holds a particular lock can acquire that same lock again (typically by calling another synchronized method or block guarded by the same lock, from code already executing within the first synchronized block) without deadlocking itself — the JVM/lock implementation tracks how many times the current holding thread has acquired the lock and only fully releases it once that count returns to zero.
+
+**8. What are two capabilities `ReentrantLock` provides that plain `synchronized` does not?**
+`tryLock()` (with an optional timeout), letting a thread attempt to acquire the lock without blocking indefinitely and take an alternative action if it can't be acquired promptly; and optional fairness ordering (`new ReentrantLock(true)`), which grants the lock to whichever waiting thread has been waiting longest, reducing the risk of thread starvation that can otherwise occur under `synchronized`'s unspecified lock-granting order.
+
+**9. Why must `ReentrantLock.unlock()` always be called inside a `finally` block?**
+Unlike `synchronized`, which automatically and unconditionally releases its lock when the protected block exits — even via an uncaught exception — `ReentrantLock` requires an explicit `unlock()` call with no automatic safety net. If an exception is thrown between `lock()` and `unlock()` and `unlock()` isn't in a `finally` block, the lock remains held forever, permanently blocking any other thread waiting to acquire it — a serious, hard-to-diagnose deadlock bug.
+
+**10. Can two different threads execute two different synchronized methods on two different, unrelated objects at the same time?**
+Yes — synchronization only prevents concurrent access to code guarded by the *same* lock object. Two threads operating on entirely separate object instances (with separate monitor locks) can execute synchronized methods on their respective objects fully in parallel, with no blocking between them at all, since they're contending for different locks.
+
+**11. What happens if a thread calls `wait()` on an object without first holding that object's monitor lock (i.e., not inside a `synchronized` block on that object)?**
+It throws `IllegalMonitorStateException` — `Object.wait()`, `notify()`, and `notifyAll()` (covered further in Chapter 40) require the calling thread to already hold the target object's intrinsic lock, since they're designed to safely and atomically release that lock while waiting, which only makes sense if the thread genuinely holds it in the first place.
+
+**12. Does making a class's fields `private` protect it from race conditions?**
+No — access modifiers control *which code* can reference a field, not whether concurrent, unsynchronized access from multiple threads to a field that's already accessible (even just from within the class's own methods, called from multiple threads) is safe. Thread safety requires actual synchronization (locks, `volatile`, or thread-safe data structures) around access to shared mutable state, entirely independent of the field's visibility modifier.
+
+**13. Why might excessive, overly broad synchronization (locking an entire large method when only a small part touches shared state) hurt performance?**
+Holding a lock for longer than strictly necessary increases **contention** — the amount of time other threads spend blocked waiting to acquire that same lock — even for portions of the method that don't actually touch any shared mutable state and could safely run concurrently. Narrowing the synchronized scope to just the genuinely shared, mutable portion of the code (a "critical section") reduces how long the lock is held, letting more work proceed in parallel.
+
+**14. If a class's fields are all effectively immutable (set once in the constructor and never changed afterward), does it need synchronization for thread-safe access?**
+Generally no — genuinely immutable objects (all fields `final`, fully initialized during construction with no way to modify them afterward, and no reference to `this` escaping the constructor before it completes) are inherently thread-safe, since there's no mutable shared state for concurrent access to race over; multiple threads can safely read the same immutable object concurrently with no synchronization required at all, which is one of the strongest arguments for favoring immutability in concurrent code design.

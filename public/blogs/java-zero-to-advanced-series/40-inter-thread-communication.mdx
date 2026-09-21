@@ -1,0 +1,155 @@
+---
+title: "Inter-thread Communication"
+description: "wait/notify/notifyAll mechanics, the producer-consumer pattern, spurious wakeups, and why wait() must always be called in a loop."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Concurrency & Multithreading"
+chapter: 40
+totalChapters: 65
+slug: "inter-thread-communication"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "concurrency", "wait-notify", "producer-consumer"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 11
+---
+
+## Why Threads Need to Communicate, Not Just Lock
+
+Synchronization (Chapter 39) prevents threads from corrupting shared state, but many real coordination problems need more: a thread needs to **wait** until some condition becomes true, and another thread needs to **signal** when it does — for example, a consumer thread waiting for a producer to add an item to a shared queue.
+
+## `wait()`, `notify()`, `notifyAll()`
+
+These are methods on `Object` itself (not `Thread`), and must be called from within a `synchronized` block on the object being waited/notified on.
+
+```java
+public class SharedBuffer {
+    private final Object lock = new Object();
+    private int value;
+    private boolean hasValue = false;
+
+    public void produce(int newValue) {
+        synchronized (lock) {
+            while (hasValue) {                 // wait while a value is already present
+                try {
+                    lock.wait();                // releases the lock, sleeps until notified
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            value = newValue;
+            hasValue = true;
+            lock.notifyAll();                   // wake up any waiting consumers
+        }
+    }
+
+    public int consume() {
+        synchronized (lock) {
+            while (!hasValue) {                 // wait while no value is available
+                try {
+                    lock.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            hasValue = false;
+            lock.notifyAll();                   // wake up any waiting producers
+            return value;
+        }
+    }
+}
+```
+
+- **`wait()`** — releases the held lock and puts the thread to sleep until another thread calls `notify()`/`notifyAll()` on the same object (or the optional timeout elapses).
+- **`notify()`** — wakes up **one** arbitrary thread waiting on the object (no guarantee which one).
+- **`notifyAll()`** — wakes up **all** threads waiting on the object; each then re-acquires the lock and re-checks its wait condition, one at a time.
+
+![Diagram: producer thread calling wait() and releasing the lock, then consumer thread acquiring the lock and calling notifyAll(), waking the producer which re-acquires the lock and continues](/diagrams/ch40-wait-notify-handoff.svg)
+
+## Why `wait()` Must Always Be Called Inside a `while` Loop, Never an `if`
+
+```java
+// WRONG — if, not while
+synchronized (lock) {
+    if (!hasValue) {
+        lock.wait();
+    }
+    // BUG: proceeds here assuming hasValue is now true, but that's not guaranteed!
+}
+
+// CORRECT — while
+synchronized (lock) {
+    while (!hasValue) {
+        lock.wait();
+    }
+    // guaranteed hasValue is true here — the loop re-checks after every wakeup
+}
+```
+
+Two reasons this matters:
+
+1. **Spurious wakeups** — the JVM specification explicitly permits a thread to wake up from `wait()` occasionally with no corresponding `notify()` call at all (a rare artifact of underlying OS thread-scheduling implementations). Code must never assume a wakeup means the condition is actually true.
+2. **`notifyAll()` wakes multiple waiters, but only one can proceed at a time** — if multiple consumers are all waiting and a single `notifyAll()` fires, only one thread re-acquires the lock first, consumes the value, and resets `hasValue` to `false` — every other woken thread must re-check the condition (now false again) and go back to waiting, rather than incorrectly assuming the condition it originally waited for still holds.
+
+## `notify()` vs. `notifyAll()` — Why `notifyAll()` Is Usually Safer
+
+`notify()` wakes only one arbitrary waiting thread — if multiple different conditions are being waited on by different threads sharing the same lock, `notify()` might wake the "wrong" thread (one whose condition still isn't satisfied), while a thread that actually could proceed remains asleep indefinitely. `notifyAll()` avoids this by waking every waiter, letting each one re-check its own condition in the required `while` loop — at some cost in efficiency (unnecessary wakeups for threads whose condition still isn't met), but with much stronger correctness guarantees. **Default to `notifyAll()` unless you've specifically verified `notify()`'s single-wakeup semantics are safe for your exact scenario.**
+
+## Higher-Level Alternatives — Prefer Them When Possible
+
+Raw `wait()`/`notify()` is notoriously easy to get subtly wrong. Modern Java code generally prefers higher-level abstractions:
+
+```java
+// BlockingQueue handles all the wait/notify machinery internally
+BlockingQueue<Integer> queue = new LinkedBlockingQueue<>(capacity);
+queue.put(value);       // blocks if full, instead of manual wait()
+int value = queue.take();  // blocks if empty, instead of manual wait()
+```
+
+`BlockingQueue` implementations (`ArrayBlockingQueue`, `LinkedBlockingQueue`) are the standard, well-tested way to implement producer-consumer patterns in real code — reserving raw `wait()`/`notify()` mostly for understanding what such higher-level tools are doing internally, or for genuinely custom coordination logic that doesn't fit an existing utility.
+
+## Key Takeaways
+
+- `wait()`/`notify()`/`notifyAll()` are `Object` methods requiring the calling thread to hold that object's monitor lock, used to coordinate threads waiting on a changing condition.
+- Always call `wait()` inside a `while` loop re-checking the condition, never a plain `if` — spurious wakeups and multiple woken waiters both require re-verification.
+- Prefer `notifyAll()` over `notify()` unless you've specifically confirmed single-thread wakeup semantics are safe for your case.
+- For real production code, prefer `BlockingQueue` and other `java.util.concurrent` utilities over hand-rolled `wait()`/`notify()` logic.
+
+---
+
+## Interview Questions
+
+**1. Why must `wait()`, `notify()`, and `notifyAll()` be called from within a `synchronized` block on the object they're invoked on?**
+These methods coordinate access to shared state guarded by that object's monitor lock — `wait()` needs to atomically release the lock and suspend the thread (so no other thread's state change can be missed in the gap between checking a condition and actually waiting), and `notify()`/`notifyAll()` need the lock held to safely signal waiting threads without a race between the notification and another thread's own wait-condition check. Calling any of them without holding the lock throws `IllegalMonitorStateException`.
+
+**2. What does `wait()` do to the lock the calling thread holds?**
+It releases the lock entirely (even if the thread held it via nested/reentrant synchronized calls, all levels are released) and puts the thread to sleep, allowing other threads to acquire that same lock and make progress — critically, the waiting thread does not hold the lock while suspended, or no other thread could ever acquire it to eventually call `notify()`/`notifyAll()`.
+
+**3. What's the difference between `notify()` and `notifyAll()`?**
+`notify()` wakes exactly one arbitrary thread currently waiting on the object (with no control or guarantee over which one). `notifyAll()` wakes every thread currently waiting on the object; each woken thread must then re-acquire the lock (one at a time, since only one thread can hold the lock at once) before continuing execution from where it called `wait()`.
+
+**4. What is a spurious wakeup, and why does its possibility matter for how `wait()` should be used?**
+A spurious wakeup is when a thread wakes from `wait()` without any corresponding `notify()`/`notifyAll()` call having occurred — explicitly permitted (though rare in practice) by the JVM specification, largely as an artifact of underlying native thread-scheduling implementations. Because of this possibility, code must never assume that waking from `wait()` means the awaited condition is now actually true — it must always re-check the condition explicitly after waking.
+
+**5. Why must `wait()` always be called inside a `while` loop rather than an `if` statement?**
+Both because of spurious wakeups (a wakeup with no real state change at all) and because `notifyAll()` can wake multiple waiting threads simultaneously for a condition only one of them can actually act on (e.g., only one consumer can take the single available item) — after being woken, each thread must re-verify its specific wait condition itself, since it can't assume the condition it originally waited for is still true by the time it actually gets to run.
+
+**6. If multiple consumer threads are all waiting on the same object and a producer calls `notifyAll()` after producing exactly one item, what happens?**
+All waiting consumer threads wake up, but only one at a time can actually re-acquire the lock and proceed past its `while` loop check. The first one to acquire the lock finds the condition satisfied, consumes the item, and typically resets the shared state (e.g., setting a flag back to indicating "no value available"). Every other woken consumer, upon eventually acquiring the lock, re-checks its `while` condition, finds it's now false again (someone else already consumed the item), and goes back to waiting — this is exactly the correctness scenario the mandatory `while` loop protects against.
+
+**7. Why is `notifyAll()` generally recommended over `notify()`, despite `notifyAll()` being less efficient (waking more threads than may be necessary)?**
+`notify()` picks an arbitrary waiting thread with no way to control or guarantee it's a thread whose condition can actually now be satisfied — if multiple different conditions are being waited on using the same lock/object, `notify()` risks waking a thread that still can't proceed while a thread that genuinely could make progress remains asleep, potentially indefinitely. `notifyAll()` avoids this correctness risk entirely by waking every waiter and letting each one's own `while`-loop condition check determine whether it should actually proceed or go back to waiting, at the cost of some wasted wakeup/re-check overhead.
+
+**8. What is `BlockingQueue`, and why is it generally preferred over hand-writing `wait()`/`notify()` logic for a producer-consumer scenario?**
+`BlockingQueue` (like `ArrayBlockingQueue` or `LinkedBlockingQueue`) is a thread-safe queue interface where `put()` blocks automatically if the queue is full and `take()` blocks automatically if it's empty, with all the necessary internal locking and wait/notify-equivalent coordination already correctly implemented and thoroughly tested. Hand-writing equivalent logic with raw `wait()`/`notify()` is notoriously easy to get subtly wrong (missed notifications, incorrect condition checks, deadlocks from forgotten unlocks), so using the well-established, battle-tested `BlockingQueue` implementation is almost always the better engineering choice for real production code.
+
+**9. What happens if a thread calls `notify()` but no other thread is currently waiting on that object?**
+Nothing happens — the notification is simply lost with no effect and no error; `notify()`/`notifyAll()` don't "queue up" a pending signal for a thread that might call `wait()` later. This is exactly why the shared state itself (like the `hasValue` boolean flag in the producer-consumer example) must be checked in a loop rather than relying purely on the notification signal to indicate the current state.
+
+**10. Can `InterruptedException` occur while a thread is blocked in `wait()`, and how should it typically be handled?**
+Yes — if another thread calls `interrupt()` on a thread that's currently blocked in `wait()`, the waiting thread wakes immediately with an `InterruptedException` thrown, rather than waiting for an actual `notify()`. The typical, correct handling is to either propagate the interruption (re-throw, if the calling method's signature allows it) or, if it must be caught and swallowed, to at minimum call `Thread.currentThread().interrupt()` to restore the interrupted status flag — silently swallowing an `InterruptedException` with no action at all is considered a serious anti-pattern, since it discards information other code further up the call stack may need in order to respond to the interruption correctly.
+
+**11. Why is directly using `wait()`/`notify()` becoming increasingly rare in modern Java codebases?**
+Higher-level concurrency utilities introduced in `java.util.concurrent` since Java 5 — `BlockingQueue`, `CountDownLatch`, `Semaphore`, `CompletableFuture` (Chapter 42), and the Executor framework (Chapter 41) — cover the overwhelming majority of real-world coordination needs with far less error-prone, well-tested, purpose-built APIs. Raw `wait()`/`notify()` remains valuable to understand conceptually (and is still occasionally the right tool for genuinely custom, low-level coordination logic that doesn't map cleanly onto an existing utility), but reaching for it by default in new code is now generally considered a sign that a more appropriate, higher-level utility should be used instead.

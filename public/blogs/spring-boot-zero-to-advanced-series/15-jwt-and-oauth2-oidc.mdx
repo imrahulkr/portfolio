@@ -1,0 +1,258 @@
+---
+title: "Securing REST APIs with JWT and OAuth2/OIDC"
+description: "HTTP Basic doesn't scale past a demo. This chapter covers how stateless token authentication actually works, how to implement JWT auth yourself, and when to instead delegate to an OAuth2/OIDC provider."
+date: "2026-09-14"
+readTime: "14 min read"
+series: "spring-boot"
+part: 15
+tags: ["Spring Boot", "JWT", "OAuth2", "Spring Security"]
+---
+
+Chapter 14 ended on why HTTP Basic doesn't scale to production: raw credentials sent on every request, no expiration, no revocation. This chapter covers the two dominant real-world alternatives — JWT-based authentication you implement yourself, and delegating entirely to an OAuth2/OIDC provider.
+
+## JWT, conceptually
+
+A JWT (JSON Web Token) is a compact, self-contained token consisting of three Base64-encoded parts separated by dots: `header.payload.signature`.
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqYW5lIiwicm9sZXMiOlsiVVNFUiJdfQ.4f8a2c...
+└──────header──────┘ └───────────payload───────────┘ └─signature─┘
+```
+
+The **payload** ("claims") holds data like the subject (`sub`, typically the username), roles, and an expiration (`exp`). The **signature** is generated using a secret key the server holds — anyone can *read* a JWT's payload (it's just Base64, not encrypted), but only the server can produce a valid signature for it, which is what makes the token tamper-proof: change one character of the payload, and the signature no longer matches.
+
+```
+Login                                    Subsequent requests
+┌────────┐  1. credentials  ┌────────┐  ┌────────┐  3. JWT in header  ┌────────┐
+│ Client  │─────────────────▶│ Server  │  │ Client  │────────────────────▶│ Server  │
+│         │◀─────────────────│         │  │         │◀────────────────────│         │
+└────────┘  2. JWT issued   └────────┘  └────────┘  4. verify signature, └────────┘
+                                                          extract identity,
+                                                          no DB lookup needed
+```
+
+This is what "stateless" means here: the server doesn't need to store session state anywhere to validate a request — the token itself carries everything needed, verified by recomputing the signature. This is exactly why JWT auth scales cleanly across many server instances with no shared session store.
+
+## Implementing JWT authentication
+
+**Issuing a token on login:**
+
+```java
+@Service
+class JwtService {
+
+    private final SecretKey key = Keys.hmacShaKeyFor(secretBytes);   // loaded from configuration, not hardcoded
+
+    String generateToken(UserDetails user) {
+        return Jwts.builder()
+            .subject(user.getUsername())
+            .claim("roles", user.getAuthorities().stream().map(GrantedAuthority::getAuthority).toList())
+            .issuedAt(new Date())
+            .expiration(new Date(System.currentTimeMillis() + 3_600_000))   // 1 hour
+            .signWith(key)
+            .compact();
+    }
+}
+```
+
+```java
+@RestController
+class AuthController {
+
+    private final AuthenticationManager authenticationManager;
+    private final JwtService jwtService;
+
+    @PostMapping("/api/auth/login")
+    TokenResponse login(@RequestBody LoginRequest request) {
+        Authentication auth = authenticationManager.authenticate(
+            new UsernamePasswordAuthenticationToken(request.username(), request.password()));
+        return new TokenResponse(jwtService.generateToken((UserDetails) auth.getPrincipal()));
+    }
+}
+```
+
+**Validating the token on every subsequent request**, via a custom filter inserted into the chain from Chapter 14:
+
+```java
+@Component
+class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final JwtService jwtService;
+    private final UserDetailsService userDetailsService;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+                                     FilterChain chain) throws ServletException, IOException {
+        String header = request.getHeader("Authorization");
+        if (header != null && header.startsWith("Bearer ")) {
+            String token = header.substring(7);
+            String username = jwtService.extractUsername(token);   // verifies signature internally
+
+            if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+                UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+                if (jwtService.isValid(token, userDetails)) {
+                    UsernamePasswordAuthenticationToken authToken =
+                        new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
+                    SecurityContextHolder.getContext().setAuthentication(authToken);
+                }
+            }
+        }
+        chain.doFilter(request, response);
+    }
+}
+```
+
+```java
+@Bean
+SecurityFilterChain filterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter) throws Exception {
+    http
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers("/api/auth/**").permitAll()
+            .anyRequest().authenticated())
+        .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+        .csrf(AbstractHttpConfigurer::disable);
+    return http.build();
+}
+```
+
+`SessionCreationPolicy.STATELESS` tells Spring Security to never create or use an `HttpSession` — every request must carry its own proof of identity (the JWT), consistent with the stateless model. `addFilterBefore` inserts the custom filter at a specific point in the chain from Chapter 14's diagram, ahead of Spring Security's own username/password filter.
+
+## When to build this yourself vs. use OAuth2/OIDC
+
+Hand-rolled JWT auth (above) is reasonable when your application *is* the identity provider — you own user registration, login, and issuing tokens. It becomes the wrong tool once you need any of:
+
+- **"Log in with Google/GitHub/Microsoft"** — delegating authentication to a third party
+- **Single sign-on** across multiple internal applications
+- **Standardized, interoperable tokens** other systems/vendors can validate without custom code
+
+That's what **OAuth2** (an authorization framework) and **OIDC** (OpenID Connect, an identity layer built on top of OAuth2) solve — and Spring Boot has first-class support for acting as an OAuth2 **client** (delegating login to an external provider) or as a **resource server** (validating tokens issued by an external provider).
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+</dependency>
+```
+
+```yaml
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: https://your-auth-provider.com/
+```
+
+```java
+@Bean
+SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    http
+        .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+        .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
+    return http.build();
+}
+```
+
+With this configuration, Spring Security automatically fetches the provider's public keys, validates incoming JWTs' signatures against them, and checks standard claims (`exp`, `iss`) — you write almost no custom validation code at all, in contrast to the hand-rolled `JwtAuthenticationFilter` above. This is the pattern you'll use again in Chapter 33 for service-to-service authentication in a microservices architecture.
+
+## Best practices & gotchas
+
+- **Never put sensitive data in a JWT payload.** It's Base64-encoded, not encrypted — anyone holding the token can read its claims. Store only what's needed for authorization decisions (user ID, roles), never passwords or personal data.
+- **Keep JWT expiration short, and use a refresh token for renewal.** A long-lived JWT that's stolen is valid for its entire remaining lifetime with no way to revoke it individually — short expirations (minutes to a couple of hours) plus a separate, revocable refresh token mechanism limits that exposure window.
+- **Prefer a maintained OAuth2/OIDC provider (Auth0, Okta, Keycloak, or a cloud provider's identity service) over hand-rolling authentication whenever external identity or SSO is genuinely needed.** Correctly implementing token issuance, rotation, and revocation securely is a substantial, easy-to-get-wrong undertaking best left to a dedicated, audited system.
+- **`SessionCreationPolicy.STATELESS` and CSRF-disabling go together deliberately.** CSRF protection defends against a browser automatically attaching session cookies to a forged cross-site request — a purely token-header-authenticated stateless API has no session cookie for an attacker to exploit that way, which is precisely why disabling CSRF is appropriate here specifically, not as a general default.
+- **Validate `exp` (expiration) on every request, not just at issuance.** This is handled by the resource-server auto-configuration when using OAuth2, but is a common bug to introduce in hand-rolled implementations if `isValid()` doesn't check it explicitly.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| JWT | Self-contained, signed token — Base64-encoded, not encrypted, verified via signature |
+| `SessionCreationPolicy.STATELESS` | No `HttpSession` — every request authenticates itself independently |
+| OAuth2 | Framework for delegated authorization ("this app can act on your behalf") |
+| OIDC | Identity layer on top of OAuth2, standardizing "who is this user" |
+| Resource server | Validates tokens issued by an external provider — minimal custom code |
+| Refresh token | Long-lived, revocable token used to obtain new short-lived access tokens |
+
+## Wrapping up
+
+You now have both ends of the spectrum: a fully hand-rolled JWT implementation for when you own identity end-to-end, and Spring Security's OAuth2 resource-server support for when you delegate to an external provider — the same resource-server pattern scales directly into the service-to-service auth covered later in Part 7. **Chapter 16** finishes Part 4 with method-level security, CORS, CSRF in more depth, and RBAC/ABAC authorization models.
+
+## Interview Questions
+
+**1. What are the three parts of a JWT, and what is each for?**
+The header (specifies the signing algorithm and token type), the payload/claims (the actual data — subject, roles, expiration, and any custom claims), and the signature (computed from the header and payload using a secret or private key, used to verify the token hasn't been tampered with). All three are Base64-encoded and concatenated with dots.
+
+*Follow-up: Which of the three parts actually needs to stay secret, and is any of them transmitted in the token itself?* None of the three parts of the token itself needs to be kept secret — all three are visible (readable, even if not editable-without-detection) to anyone holding the token. What must stay secret is the *signing key* the server uses to produce and verify signatures — that key is never included in or derivable from the token itself.
+
+**2. Is a JWT's payload encrypted?**
+No. It's only Base64-*encoded*, which is trivially reversible by anyone — not encrypted. Anyone holding a JWT can read its claims directly. The signature is what provides tamper-evidence (proving the payload hasn't been altered since issuance), not confidentiality of the payload's contents.
+
+*Follow-up: If a use case genuinely required the claims themselves to be confidential, not just tamper-evident, how would you achieve that?* Use JWE (JSON Web Encryption) instead of, or layered with, the standard signed JWT (JWS) — JWE actually encrypts the payload so it can't be read without the corresponding decryption key, addressing confidentiality as a distinct property from the tamper-evidence a signature alone provides.
+
+**3. What does "stateless authentication" mean in the context of JWT, and why does it help scalability?**
+It means the server doesn't need to store any session state to validate a request — the JWT itself carries everything needed (identity, roles, expiration), verified by recomputing and checking its signature. This means any server instance can validate any request independently, with no shared session store required, which is exactly what lets an application scale horizontally across many instances without session-affinity concerns.
+
+*Follow-up: What's a real operational downside of full statelessness, and how do teams commonly work around it?* The server can't revoke an individual already-issued token before it naturally expires, since nothing is tracked server-side — a leaked token remains valid until its `exp` claim passes. Teams commonly work around this with a short-lived denylist (often in Redis, keyed by token ID and expiring alongside the token) checked on each request, which reintroduces a small amount of state but keeps it bounded to just revoked tokens rather than every session.
+
+**4. Why should JWT expiration times be kept short, and what's the role of a refresh token?**
+A stolen JWT remains valid for its entire remaining lifetime, since there's typically no way to revoke an individual stateless token before it expires. Keeping the access token's expiration short (minutes to a couple of hours) limits how long a compromised token remains usable, while a separate, longer-lived refresh token — which can be revoked server-side, since refresh tokens are typically tracked in a database — is used to obtain new short-lived access tokens without requiring the user to log in again.
+
+*Follow-up: Where should a refresh token be stored on the client, and why does that choice matter?* An `HttpOnly`, `Secure` cookie is generally preferred over `localStorage` or other JavaScript-accessible storage, because `HttpOnly` cookies can't be read by JavaScript at all — meaning an XSS vulnerability elsewhere in the client app can't exfiltrate the long-lived refresh token, which would otherwise let an attacker mint fresh access tokens indefinitely.
+
+**5. What's the difference between OAuth2 and OIDC?**
+OAuth2 is an authorization framework — it defines how an application can obtain limited access to a resource on a user's behalf (e.g., "this app can read your calendar"), without necessarily establishing who the user actually is. OpenID Connect (OIDC) is an identity layer built on top of OAuth2 that standardizes authentication specifically — adding the concept of an ID token and standardized user identity claims, answering "who is this user," which plain OAuth2 doesn't define on its own.
+
+*Follow-up: In an OIDC flow, which specific token carries the user's identity information, distinct from the token used to call APIs?* The **ID token** — a JWT specifically defined by OIDC that asserts the authenticated user's identity (claims like `sub`, `email`, `name`). It's distinct from the **access token**, which is used to authorize calls to protected resources/APIs and isn't intended to be inspected for identity information by the client at all.
+
+**6. What's the difference between Spring Security acting as an OAuth2 "client" versus a "resource server"?**
+As a client, the application delegates *login* to an external provider — redirecting users to, say, Google's login page and receiving tokens back (the "log in with Google" flow). As a resource server, the application *validates* tokens issued by an external provider on incoming API requests — it doesn't handle login itself, only verifies that a presented token is valid and extracts the caller's identity/authorities from it.
+
+*Follow-up: Could a single Spring Boot application be configured as both an OAuth2 client and a resource server at the same time? Why might that be needed?* Yes — a common example is a "backend for frontend" that logs users in via an external identity provider (acting as a client) while also exposing its own APIs that must independently validate tokens presented by a mobile app or another downstream service (acting as a resource server) — both roles can be configured together in the same `SecurityFilterChain` setup.
+
+**7. Why is `SessionCreationPolicy.STATELESS` typically paired with disabling CSRF protection?**
+CSRF protection exists specifically to prevent a malicious site from tricking a browser into making a request that carries the user's session cookie automatically. In a stateless, token-header-authenticated API, there's no session cookie for a browser to automatically attach to a forged request — the attack CSRF protection defends against doesn't apply — so disabling it is a deliberate, justified choice for this specific authentication model, not a general shortcut.
+
+*Follow-up: What would actually go wrong, practically rather than security-wise, if you left CSRF protection enabled alongside `STATELESS` session management?* It wouldn't create a security hole, but it would break API clients unnecessarily — they'd be required to fetch and attach a CSRF token on every state-changing request even though no session cookie is involved at all, adding pointless friction and failed requests for a protection that has nothing meaningful to defend in a purely bearer-token-authenticated flow.
+
+**8. What is `addFilterBefore` used for when implementing custom JWT authentication?**
+It inserts a custom filter (like `JwtAuthenticationFilter`) at a specific position within Spring Security's filter chain, relative to an existing filter — in this case, before `UsernamePasswordAuthenticationFilter`, ensuring the JWT is checked and the `SecurityContext` populated before Spring Security's other authentication mechanisms run.
+
+*Follow-up: What would likely go wrong if you used `addFilterAfter` instead, placing the JWT filter after `UsernamePasswordAuthenticationFilter`?* Later filters and the final authorization decision expect the `SecurityContext` to already reflect the caller's identity by the time they run; placing the JWT filter after `UsernamePasswordAuthenticationFilter` risks other parts of the chain evaluating authorization before the JWT-derived authentication has actually been established, effectively treating a legitimately-authenticated request as anonymous for anything that runs ahead of the misplaced filter.
+
+**9. Why should you generally prefer a managed OAuth2/OIDC provider over hand-rolling JWT authentication for a production system?**
+Correctly implementing secure token issuance, key rotation, revocation, and protection against a range of subtle authentication vulnerabilities is a substantial and easy-to-get-wrong undertaking. A dedicated, widely audited identity provider (Auth0, Okta, Keycloak, or a cloud provider's identity service) has already solved these problems at a level of rigor most application teams can't practically replicate and maintain themselves.
+
+*Follow-up: Is there a middle ground between hand-rolling everything and paying for a third-party SaaS identity provider?* Yes — self-hosted, open-source identity providers like Keycloak give you a fully OAuth2/OIDC-compliant issuance and management system running on your own infrastructure, under your own control, without needing to implement the protocol details (token issuance, key rotation, standard flows) yourself.
+
+**10. How does Spring Security's OAuth2 resource server support validate an incoming JWT without you writing custom validation logic?**
+Given an `issuer-uri` in configuration, Spring Security automatically fetches the identity provider's public signing keys (via its published JWKS endpoint), uses them to verify the token's signature, and checks standard claims like expiration (`exp`) and issuer (`iss`) — all through auto-configuration, with no custom filter or manual key management required, unlike the fully hand-rolled JWT example earlier in the chapter.
+
+*Follow-up: If the identity provider rotates its signing keys, does the resource server application need to be restarted to pick up the change?* No — Spring Security's JWT decoder fetches and caches the provider's public keys from its JWKS endpoint, and automatically refreshes that cache when it encounters a token signed with a key ID it doesn't currently recognize, handling rotation transparently without any restart or manual intervention.
+
+**11. What HTTP header is conventionally used to send a JWT, and in what format?**
+The `Authorization` header, using the `Bearer` scheme: `Authorization: Bearer <token>`. "Bearer" indicates that whoever presents ("bears") this token is granted the access it represents, without any additional proof of identity beyond holding the token itself.
+
+*Follow-up: Why is it especially important that bearer tokens only ever be sent over HTTPS?* Because "bearer" means possession alone is sufficient to use the token — anyone who intercepts it in transit gains full access as that identity for the remainder of the token's lifetime, with no additional secret or proof required. HTTPS is what prevents that interception in the first place; sending a bearer token over plain HTTP would make it trivially stealable to anyone able to observe the network traffic.
+
+**12. What would happen if a JWT's signature check is skipped or implemented incorrectly?**
+An attacker could forge a token with arbitrary claims (e.g., claiming an admin role) and have it accepted as valid, since nothing would actually verify the payload hasn't been tampered with or fabricated entirely — this would completely defeat the purpose of using a signed token in the first place. This is precisely why signature verification must never be skipped, and why using a well-tested library (or Spring Security's own resource-server support) rather than hand-rolled JWT parsing is strongly preferred.
+
+*Follow-up: There's a well-known real-world vulnerability class related to this — what is the "alg: none" JWT attack?* Some poorly implemented JWT libraries historically accepted a token whose header declared its signing algorithm as `"none"` — meaning literally unsigned — without the server-side verification code explicitly rejecting that possibility. An attacker could then craft a token with arbitrary claims, set `alg: none`, and have it accepted as valid by a vulnerable implementation, completely bypassing signature verification entirely.
+
+**13. Should sensitive personal data (e.g., a user's email or address) be stored in a JWT's claims?**
+Generally, no — since the payload is only Base64-encoded and readable by anyone holding the token (including, potentially, intermediary systems or logs the token passes through), sensitive personal data shouldn't be embedded in it. JWT claims should be limited to what's needed for authentication/authorization decisions (a user identifier, roles/permissions), with any sensitive personal data fetched separately from a trusted data store as needed, using the authenticated identity as the lookup key.
+
+*Follow-up: What's the practical exposure risk if a token containing even seemingly harmless personal data (like a full name) gets logged by mistake somewhere in the request path?* It creates a lingering copy of personal data in a place (application logs, monitoring tools, log-aggregation systems) that likely wasn't designed or governed as a system of record for that data — making later data-deletion or privacy-compliance requests (like GDPR erasure) harder to fully satisfy, since the data has silently propagated beyond the systems that were actually meant to hold it.
+
+**14. What's a realistic reason an application would need both a hand-rolled login endpoint and OAuth2 resource-server support simultaneously?**
+An application might allow both a traditional username/password login (issuing its own JWTs, as in the hand-rolled example) *and* accept "log in with Google" as an alternative, where Google issues the token instead. In that case, the resource-server validation logic needs to handle tokens from multiple possible issuers, or the application maintains two separate authentication paths that both ultimately populate the same `SecurityContext` shape for the rest of the application to use uniformly.
+
+*Follow-up: How would you make sure downstream authorization code (like `@PreAuthorize` checks) doesn't need to care which login path a given user came through?* Normalize both paths into the same `UserDetails`/`Authentication` representation — for the OAuth2 path, this typically means implementing a custom `OAuth2UserService` that maps the external provider's claims onto your own application's user model and authorities, so a `@PreAuthorize("hasRole('ADMIN')")` check behaves identically regardless of whether the underlying login was your own form or a third-party provider.
+
+**15. In a microservices context, why is the resource-server pattern (validating tokens issued elsewhere) generally preferred over each service implementing its own hand-rolled JWT issuance?**
+Centralizing token issuance in one identity provider (or a small number of them) means every service can independently validate tokens using the same public keys and standardized claims, without needing to share a login database or duplicate authentication logic across services. This keeps identity management consistent and centrally auditable across a distributed system — exactly the pattern extended into service-to-service authentication covered later, in Chapter 33.
+
+*Follow-up: In this model, how does a downstream service typically learn what permissions or scopes a caller has, without calling back to the identity provider on every single request?* The caller's roles/scopes are typically embedded directly as claims inside the JWT itself at issuance time, so each service can make its own authorization decision purely by reading and validating the token locally — with no network round trip back to the identity provider required for every individual authorization check.
+

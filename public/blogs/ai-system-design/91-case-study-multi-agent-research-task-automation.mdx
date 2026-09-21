@@ -1,0 +1,100 @@
+---
+title: "Chapter 91: Case Study — Multi-Agent Research and Task Automation"
+description: "A production research-automation system using orchestrator-worker architecture, cost budgeting across nested agent calls, human checkpoints for long-running tasks, and evaluation for open-ended, multi-step goals."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 14
+partTitle: "Applied Case Studies"
+chapter: 91
+totalChapters: 96
+tags: ["ai-system-design", "multi-agent", "research-automation", "orchestrator-worker", "case-study", "interview-prep"]
+---
+
+## Introduction
+
+Chapter 89's support agent used a single agent with tool access. This chapter builds the case study Chapter 69's multi-agent material was building toward: a research-automation system where an orchestrator decomposes an open-ended goal ("research competitor pricing strategies") into sub-tasks handled by specialized workers — directly exercising Chapter 69's cost-compounding and failure-propagation concerns at genuine production scale.
+
+## Architecture: Orchestrator-Worker for Open-Ended Research
+
+Directly reusing Chapter 69's orchestrator-worker pattern with concrete worker specializations: a search worker (Chapter 68's tool-use, web search), a document-analysis worker (Chapter 87's RAG pipeline, analyzing retrieved sources), and a synthesis worker (compiling findings into a final report).
+
+```python
+class ResearchOrchestrator(OrchestratorAgent):  # Ch. 69's base class
+    def __init__(self, llm_client, cost_budget: float):
+        super().__init__(llm_client, worker_agents={
+            "search": SearchWorker(),
+            "document_analysis": DocumentAnalysisWorker(),
+            "synthesis": SynthesisWorker(),
+        })
+        self.cost_tracker = CostTracker()  # Ch. 77 — essential here given
+                                              # Ch. 69's cost-compounding risk
+        self.cost_budget = cost_budget
+
+    def run(self, goal: str) -> str:
+        if self.cost_tracker.total_cost >= self.cost_budget:
+            return "Research halted: cost budget exhausted."  # Ch. 69's
+                                                                  # multiplicative
+                                                                  # cost concern,
+                                                                  # made a HARD,
+                                                                  # enforced limit
+        return super().run(goal)
+```
+
+## Cost Budgeting: Chapter 69's Theoretical Concern as a Hard Production Limit
+
+Directly extending Chapter 69's cost-compounding warning and Chapter 77's cost-tracking infrastructure from a theoretical concern into an enforced, hard budget: an open-ended research task has no natural upper bound on how many search-and-analyze cycles it might attempt, making an explicit cost ceiling (not just a step-count limit) essential — Chapter 67's `max_steps` alone bounds the orchestrator's own steps, but Chapter 69 established that nested worker invocations compound cost multiplicatively, requiring the cumulative, cross-agent tracking this chapter's `CostTracker` provides.
+
+## Human Checkpoints for Long-Running, Open-Ended Tasks
+
+Directly extending Chapter 68's confirmation-gating principle to a new context: rather than gating individual tool calls, a long-running research task benefits from periodic human checkpoints — surfacing intermediate findings for review before the orchestrator commits significant additional cost to a specific research direction, directly the same "structural human oversight for consequential, hard-to-reverse investment" principle Chapter 68 established, now applied to cost commitment rather than a single action's execution.
+
+```python
+def checkpoint_before_continuing(orchestrator, intermediate_findings: str,
+                                    checkpoint_callback) -> bool:
+    # Directly extends Ch. 68's confirmation gate to a COST-CONSEQUENCE
+    # decision rather than a single tool call's execution
+    return checkpoint_callback(intermediate_findings)  # human confirms
+                                                           # the research
+                                                           # direction is
+                                                           # worth continuing
+```
+
+## Evaluation for Open-Ended Goals: Beyond Chapter 72's Tool-Sequence Accuracy
+
+Directly extending Chapter 72's `AgentEvaluationGate` with a genuinely harder evaluation problem: an open-ended research task has no single "correct" tool sequence to check against, requiring Chapter 75's LLM-as-judge evaluation of the FINAL synthesized report's quality (comprehensiveness, accuracy against sources) rather than the more mechanical tool-sequence correctness Chapter 72's original evaluation gate checked.
+
+## Key Takeaways
+
+- Orchestrator-worker architecture (Chapter 69) directly maps onto research automation, with concrete worker specializations for search, document analysis, and synthesis.
+- Chapter 69's theoretical cost-compounding concern must become a hard, enforced production budget for open-ended tasks, since there's no natural upper bound on research scope without an explicit ceiling.
+- Long-running tasks benefit from periodic human checkpoints reviewing intermediate findings before further cost commitment, extending Chapter 68's confirmation-gating principle from individual actions to cumulative cost consequence.
+- Open-ended task evaluation requires Chapter 75's LLM-as-judge assessment of final output quality, since there's no single correct tool sequence to mechanically check against the way Chapter 72's original evaluation gate could.
+
+---
+
+## Interview Questions
+
+**1. Why does an open-ended research task specifically require a hard cost budget, beyond the step-count limit Chapter 67 already established?**
+Chapter 67's `max_steps` bounds the ORCHESTRATOR's own reasoning steps, but Chapter 69 established that each delegated worker invocation triggers its OWN, separate step budget — meaning the orchestrator's step limit alone provides no ceiling on the TOTAL, aggregated cost across all nested worker invocations, exactly the multiplicative compounding concern Chapter 69 raised; an open-ended goal with no natural stopping point could otherwise continue delegating to workers indefinitely within the orchestrator's own step allowance, each delegation adding substantial additional cost.
+*Follow-up: How would you determine an appropriate cost budget for a NEW research task type, rather than guessing at a number?*
+Run a representative sample of similar past research tasks (or a pilot batch of the new task type) to completion WITHOUT a hard budget, measuring the actual cost distribution these tasks incur, then set the budget at a percentile (e.g., the 90th percentile of observed costs) that accommodates the vast majority of legitimate research needs while still providing a meaningful ceiling against runaway, unusually expensive executions — directly following this series' consistent empirical-calibration discipline.
+
+**2. Why does this chapter recommend human checkpoints reviewing intermediate findings, rather than only gating individual tool calls per Chapter 68's original architecture?**
+Chapter 68's confirmation gate addresses the risk of a SINGLE, individually consequential action being taken incorrectly; a long-running research task's risk is different — the orchestrator could correctly execute many individually-fine tool calls while collectively pursuing an unproductive or misguided overall research DIRECTION, a cumulative, strategic risk no single tool-call confirmation would catch, requiring a periodic, higher-level checkpoint specifically reviewing the accumulated PROGRESS and DIRECTION rather than any single action's correctness.
+*Follow-up: How would you determine the appropriate frequency for these checkpoints, balancing oversight value against the friction of interrupting an otherwise autonomous process?*
+Calibrate checkpoint frequency to the task's cost-accumulation rate rather than a fixed time interval — triggering a checkpoint whenever cumulative cost crosses a meaningful fraction of the total budget (say, every 25%), ensuring the human reviews the research direction before a substantial fraction of the total budget is committed to a potentially unproductive path, directly extending this chapter's cost-tracking infrastructure to also drive the checkpoint-timing decision.
+
+**3. Why does evaluating an open-ended research task's output require LLM-as-judge assessment rather than the tool-sequence-accuracy check Chapter 72's original evaluation gate used?**
+Chapter 72's tool-sequence accuracy check assumed a KNOWN, correct sequence of tool calls existed to compare against — appropriate for a well-defined, narrow task (checking an order status); an open-ended research goal has no single correct sequence, since many different valid research paths could plausibly lead to a good final report, making a MECHANICAL sequence comparison meaningless here and requiring instead a QUALITATIVE assessment of the final output's actual comprehensiveness and accuracy (Chapter 75's LLM-as-judge methodology) as the appropriate evaluation mechanism for this genuinely different, open-ended task structure.
+*Follow-up: What shared-bias validation concern from Chapter 75 becomes especially important for this specific evaluation use case?*
+Since the judge is assessing a RESEARCH report's comprehensiveness and accuracy, a judge model sharing systematic knowledge gaps or reasoning limitations with the generating model could fail to recognize exactly the kind of gaps or errors that model is prone to introducing — making Chapter 75's shared-bias validation (using a genuinely different judge model family, validated against human-labeled ground truth) especially important here, since the STAKES of an undetected quality gap in a research report used for real business decisions are genuinely significant.
+
+**4. Why must this system's cost tracker (this chapter's `CostTracker` usage) aggregate cost across ALL nested worker invocations rather than tracking the orchestrator's own cost alone?**
+Directly extending Chapter 69's and Chapter 77's cost-observability discussion — the orchestrator's own reasoning cost is typically a SMALL fraction of the total system cost, since the bulk of actual work (and cost) happens WITHIN the delegated workers' own, separate reasoning loops; tracking only the orchestrator's cost would dramatically UNDERESTIMATE the true total cost, exactly the "additive assumption" underestimation trap Chapter 69 warned against, making comprehensive, cross-agent cost aggregation (this chapter's centralized tracker) essential for the budget enforcement this chapter's architecture depends on.
+*Follow-up: How would you specifically validate that this cost tracker is correctly capturing EVERY nested LLM call, rather than missing some subset of worker invocations?*
+I'd run a controlled test task with a known, deliberately-constructed sequence of orchestrator and worker invocations, manually computing the EXPECTED total cost from this known sequence, then comparing against what the cost tracker actually reports — directly validating the tracker's completeness empirically rather than assuming its instrumentation correctly captures every nested call without this kind of direct verification.
+
+**5. How would you diagnose whether a research task's cost overrun stems from the orchestrator over-delegating (too many worker invocations) versus a single worker's own inefficiency (excessive steps within one delegation), extending this Part's diagnostic discipline?**
+Directly extending Chapter 77's per-span-type cost breakdown discussion — examine the cost tracker's breakdown by span type: if cost is spread across MANY distinct worker invocations each individually reasonable in cost, this points toward the orchestrator's decomposition strategy generating too many delegations (Chapter 69's specialization-versus-overhead trade-off); if cost is concentrated in ONE OR A FEW specific worker invocations each individually consuming a disproportionate share, this points toward that specific worker's own reasoning efficiency or step-limit configuration as the responsible cause.
+*Follow-up: What remediation would each of these two diagnoses point toward?*
+Excessive orchestrator delegation points toward refining the orchestrator's task-decomposition prompting to favor fewer, more consolidated sub-tasks; a single inefficient worker points toward investigating that specific worker's own step limit, tool descriptions, or underlying model choice — two genuinely different remediation paths this cost-breakdown-based diagnostic separation is necessary to correctly distinguish between.

@@ -1,0 +1,208 @@
+---
+title: "Distributed Transactions & the Saga Pattern"
+description: "Chapter 11's @Transactional guarantees atomicity within one database. Chapter 23 pointed out that guarantee disappears the moment an operation spans services. This chapter covers what actually replaces it."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 32
+tags: ["Spring Boot", "Saga Pattern", "Distributed Transactions", "Microservices"]
+---
+
+Chapter 23 flagged this as the hardest cost of splitting into services and deferred it. Every other chapter in Part 7 has been building toward being able to actually solve it. This is that chapter.
+
+## The problem, concretely
+
+```java
+// Inside a monolith — Chapter 11's @Transactional handles this completely
+@Transactional
+void placeOrder(CreateOrderRequest request) {
+    Order order = orderRepository.save(new Order(request));
+    inventoryRepository.decrementStock(request.productIds());
+    paymentRepository.chargeCustomer(request.customerId(), order.getTotal());
+    // all three succeed together, or all three roll back together — one database, one transaction
+}
+```
+
+Once `order`, `inventory`, and `payment` are separate services with separate databases (Chapter 23's database-per-service rule), there is no longer one transaction that can span all three. If the order is created, inventory is decremented, but the payment charge fails — what happens to the already-decremented inventory and the already-created order?
+
+## The Saga pattern
+
+A **saga** is a sequence of local transactions, each within a single service, coordinated so that if any step fails, previously completed steps are undone by explicit **compensating actions** — rather than a single atomic transaction, you get eventual consistency achieved through a deliberate sequence of forward steps and, when needed, backward-undoing steps.
+
+```
+Happy path:
+  order-service: create order (PENDING)
+        │
+        ▼
+  inventory-service: decrement stock
+        │
+        ▼
+  payment-service: charge customer
+        │
+        ▼
+  order-service: mark order CONFIRMED
+
+Failure at payment step:
+  order-service: create order (PENDING)
+        │
+        ▼
+  inventory-service: decrement stock
+        │
+        ▼
+  payment-service: charge customer ── FAILS
+        │
+        ▼ (compensating actions run in reverse)
+  inventory-service: restore stock (compensation)
+        │
+        ▼
+  order-service: mark order CANCELLED (compensation)
+```
+
+Critically, **restoring stock isn't the same operation as "undo the decrement" in a database rollback sense** — it's a separate, explicit business operation (`inventory-service` exposes a "restore stock" action) that achieves the equivalent effect, because there's no shared transaction log to roll back; each service must expose the specific compensating operation another part of the saga can call when needed.
+
+## Choreography vs. orchestration
+
+**Choreography** — each service reacts to events from the previous step and publishes its own event when done, with no central coordinator (naturally building on Chapter 29's event-driven model):
+
+```java
+@KafkaListener(topics = "order-created", groupId = "inventory-service")
+void handleOrderCreated(OrderCreatedEvent event) {
+    boolean success = inventoryService.decrementStock(event.productIds());
+    if (success) {
+        kafkaTemplate.send("stock-decremented", new StockDecrementedEvent(event.orderId()));
+    } else {
+        kafkaTemplate.send("stock-decrement-failed", new StockDecrementFailedEvent(event.orderId()));
+    }
+}
+```
+
+**Orchestration** — a dedicated coordinator explicitly calls each step in sequence and explicitly triggers compensation on failure:
+
+```java
+@Service
+class OrderSagaOrchestrator {
+
+    void execute(CreateOrderRequest request) {
+        Order order = orderServiceClient.createOrder(request);
+        try {
+            inventoryServiceClient.decrementStock(request.productIds());
+            paymentServiceClient.chargeCustomer(request.customerId(), order.getTotal());
+            orderServiceClient.confirmOrder(order.getId());
+        } catch (Exception e) {
+            inventoryServiceClient.restoreStock(request.productIds());
+            orderServiceClient.cancelOrder(order.getId());
+        }
+    }
+}
+```
+
+```
+Choreography:                          Orchestration:
+order ──event──▶ inventory              orchestrator ──calls──▶ order
+                    │──event──▶ payment       │──calls──▶ inventory
+                                               │──calls──▶ payment
+  (no central coordinator,                (one place clearly shows
+   logic distributed across                the entire flow and its
+   each service's event handlers)          compensation logic)
+```
+
+**Choreography** scales well with fewer steps and keeps services fully decoupled, but the overall flow becomes genuinely hard to see — it's scattered across every service's individual event handlers, with no single place showing the complete picture. **Orchestration** makes the entire flow and its failure/compensation logic explicit and readable in one place, at the cost of the orchestrator needing to know about and coordinate every participating service, which is its own form of coupling.
+
+## Best practices & gotchas
+
+- **Every compensating action needs to be idempotent, exactly like the event consumers from Chapter 29.** A compensation step might itself need to be retried after a failure, and retrying "restore stock" twice must not double-restore it.
+- **Sagas provide eventual consistency, not immediate consistency.** Between the order being created and the saga's failure/compensation completing, the system is briefly in an inconsistent-looking state (an order exists, but payment hasn't succeeded yet) — application design (and UI/UX) needs to account for this window explicitly, rather than assuming the same instant consistency a single database transaction would provide.
+- **Choose choreography for simple, few-step sagas where the participating services are naturally decoupled already; choose orchestration once the flow has enough steps or branching logic that "what actually happens, and in what order" needs to be readable in one place** rather than reconstructed by reading through several services' independent event handlers.
+- **Compensating actions aren't always a perfect, symmetric undo.** "Cancel the order" after payment fails is straightforward; "the customer already received the shipped product before a compensation was triggered" is a business problem no amount of clever engineering fully automates — some sagas need a human-in-the-loop step for cases genuinely too late to cleanly compensate.
+- **This complexity is exactly what Chapter 23 meant by "data consistency is harder" in a microservices architecture** — sagas are the honest, real cost of that trade-off, not a trick that makes it disappear.
+
+## Quick reference
+
+| Concept | Summary |
+|---|---|
+| Saga | A sequence of local transactions across services, with compensating actions on failure |
+| Compensating action | An explicit operation undoing a previous step's effect — not a database rollback |
+| Choreography | Services react to each other's events with no central coordinator |
+| Orchestration | A dedicated coordinator explicitly sequences steps and triggers compensation |
+| Eventual consistency | The system briefly appears inconsistent between saga steps, resolving once the saga completes |
+
+## Wrapping up
+
+The Saga pattern is the honest answer to the hardest cost flagged all the way back in Chapter 23 — real, achievable consistency across services, without pretending a distributed system can have the same instant guarantees as a single database transaction. **Chapter 33** covers securing the inter-service calls this whole architecture depends on — mTLS, OAuth2 client credentials, and JWT propagation between services.
+
+## Interview Questions
+
+**1. Why can't `@Transactional` (Chapter 11) be used to guarantee atomicity across an operation spanning multiple microservices?**
+`@Transactional` relies on a single database transaction manager coordinating a single database connection's commit/rollback behavior — once an operation spans multiple services, each with its own separate database (per Chapter 23's database-per-service rule), there's no longer one shared transaction manager or connection that could atomically commit or roll back changes across all of them together; each service's database transaction is entirely independent of the others'.
+
+*Follow-up: Could distributed (XA/JTA) transactions technically solve this instead, and why does this chapter (and Chapter 23) generally steer away from that approach?* XA/JTA distributed transactions technically exist and can coordinate atomic commits across multiple independent resources, but they come with significant complexity, performance overhead (due to the two-phase commit protocol they require), and often poor fit with modern, independently-scaling microservices and diverse data stores — most microservices architectures deliberately avoid them in favor of embracing eventual consistency via patterns like sagas, which fit the independently-deployable, loosely-coupled nature of microservices far more naturally than trying to force distributed ACID transactions onto them.
+
+**2. What is a saga, and what does it provide instead of atomicity?**
+A saga is a sequence of local transactions, each confined to and committed within a single service's own database, coordinated together so that if any step in the sequence fails, previously completed steps are explicitly undone via compensating actions. Instead of atomicity (all-or-nothing, immediately), a saga provides eventual consistency — the overall operation eventually reaches a consistent end state (either fully completed, or fully compensated/rolled back), but there's a real, observable window during the saga's execution where the system's state across services isn't yet fully consistent.
+
+*Follow-up: Why is "eventual consistency" an acceptable trade-off for many business processes, despite sounding weaker than the immediate consistency a single database transaction provides?* Many real-world business processes are already naturally eventually consistent even outside of software — an order placed in a physical store isn't instantly and atomically reflected in warehouse inventory, accounting records, and shipping systems all at the exact same microsecond either; as long as the eventual consistency window is short, well-understood, and the system correctly handles or communicates the in-between state (rather than presenting it as a confusing error), it's often a perfectly acceptable, realistic trade-off for the genuine architectural flexibility gained by not requiring a single shared transaction.
+
+**3. What is a compensating action, and why isn't it simply "the database rollback" of a previous step?**
+A compensating action is an explicit, separately defined business operation (like "restore stock") that undoes the effect of a previously completed step in the saga — it's not a database-level rollback because, once a service's local transaction for that step has already committed, there's nothing left to roll back at the database level; achieving the equivalent "undo" effect requires the service to expose and execute a distinct, deliberate operation that reverses the business effect of the original step.
+
+*Follow-up: Why must a compensating action be designed and exposed deliberately by the service being compensated, rather than being something a saga orchestrator or another service could apply generically to any operation?* Only the service that owns the data and business logic for a given step genuinely understands what "undoing" that specific step correctly means in business terms — inventory-service is the only service that knows the correct way to safely restore stock (accounting for anything else that might have happened to that stock in the meantime), so compensation logic must be implemented by, and specific to, the owning service itself, rather than being generically inferred or applied externally by an orchestrator that doesn't have that same domain knowledge.
+
+**4. What's the fundamental difference between choreography and orchestration as approaches to implementing a saga?**
+Choreography has each participating service independently react to events from previous steps and publish its own events when it completes its part, with no single, central coordinator directing the overall flow — the sequence emerges from each service's own independent event-handling logic. Orchestration uses a dedicated coordinator that explicitly calls each participating service in a defined sequence and explicitly triggers compensating actions if a step fails — the entire flow and its failure handling are visible and defined in one place.
+
+*Follow-up: Which approach more naturally builds on the event-driven architecture concepts covered in Chapter 29, and why?* Choreography builds directly on Chapter 29's event-driven model — each service publishing an event when it completes its part of the saga, and other services subscribing and reacting to those events, is exactly the same publish/subscribe pattern already established for general event-driven communication, just applied specifically to coordinate a multi-step business process rather than simply broadcasting independent facts with no coordination implied.
+
+**5. What's the main drawback of choreography as a saga becomes more complex, with more steps or more branching logic?**
+The overall business process's logic — what happens in what order, and what should happen on various possible failures at various points — becomes scattered across many different services' independent event handlers, with no single place a developer (or anyone debugging an issue) can look to see and understand the complete flow; as the number of steps and possible failure/compensation paths grows, this distributed logic becomes increasingly difficult to trace, reason about, and maintain correctly.
+
+*Follow-up: How does orchestration directly address this specific drawback, and what does it trade away in return?* Orchestration directly addresses it by centralizing the entire sequence and its compensation logic into one explicit, readable piece of code (the orchestrator) — anyone wanting to understand the complete saga flow can read that one place rather than reconstructing it from several services' independent handlers. In return, it trades away some of the loose coupling choreography provides — the orchestrator needs explicit knowledge of and a direct relationship with every participating service, making the orchestrator itself a more centralized, coupled component that must be updated whenever the saga's flow changes.
+
+**6. Why must compensating actions themselves be idempotent, mirroring the idempotency requirement from Chapter 29's event consumers?**
+Given that sagas typically operate in a distributed system with the same at-least-once delivery and retry characteristics discussed throughout Part 7 (Chapters 27, 29, 30), a compensating action itself might be triggered more than once due to a retry after a transient failure in executing it — if "restore stock" isn't idempotent, executing it twice could incorrectly restore double the intended quantity, turning a correctness-preserving compensation mechanism into a new source of data corruption.
+
+*Follow-up: How would you design an idempotent "restore stock" compensating action, similar to the idempotency pattern shown for Kafka consumers in Chapter 29?* Track, per saga instance (using a unique saga/order identifier), whether the compensation for that specific instance has already been applied — before executing the restore-stock logic, check whether a compensation record for that specific order ID already exists; if it does, skip re-applying it and simply acknowledge success, exactly mirroring the "check if this specific event ID has already been processed" pattern shown for Kafka consumer idempotency in Chapter 29.
+
+**7. What does it mean that a saga is "eventually" consistent — is there a real, observable period where the data across services doesn't yet make full sense together?**
+Yes — for example, between the moment `order-service` creates an order (in a PENDING state) and the moment the entire saga either successfully completes (marking it CONFIRMED) or fails and fully compensates (marking it CANCELLED and restoring stock), there's a genuine window during which an order exists in a pending state while other steps are still in progress or being compensated — a query against `order-service`'s database during this window would show a real, temporary state that doesn't yet reflect the saga's eventual final outcome.
+
+*Follow-up: How should a system's design (particularly its user-facing behavior) account for this window, rather than assuming instant consistency?* The system should explicitly represent and communicate intermediate states (like a "PENDING" or "processing" order status shown to the user) rather than either falsely implying instant completion or leaving the user without any indication of what's happening — designing the UI/UX and any dependent business logic to correctly handle and display this legitimate, temporary in-between state, rather than assuming (incorrectly) that the operation completes atomically and instantaneously the way a single database transaction would.
+
+**8. Why is "the customer already received the shipped product before a compensation was triggered" identified as a case that "no amount of clever engineering fully automates"?**
+Some real-world side effects, once they've occurred, simply cannot be automatically and cleanly reversed by any software mechanism — a physical product already shipped and delivered can't be un-shipped by executing a compensating API call the way a database record or an inventory count can be programmatically adjusted; the actual "compensation" for this scenario is a genuine real-world business process (a return, a refund negotiation) that inherently requires human involvement, not something a saga's automated compensation logic alone can resolve.
+
+*Follow-up: What design pattern is commonly used to handle sagas with steps that might reach this kind of "too late to cleanly automate" scenario?* A human-in-the-loop or manual-intervention step — the saga's automated compensation logic handles what it safely and correctly can (restoring inventory, cancelling a not-yet-shipped order, reversing a not-yet-settled payment), but for cases where automated compensation genuinely isn't possible or safe (an already-shipped product), the saga instead flags the case for manual review or triggers a separate, human-driven business process (like initiating a returns workflow) rather than attempting to force an automated compensating action that doesn't actually correspond to any real, valid business operation.
+
+**9. How would you decide, for a specific multi-step business process being split across services, whether to implement its saga via choreography or orchestration?**
+Consider the number of steps and the complexity of the failure/compensation logic — a simple, two-or-three-step process with straightforward, linear compensation is often reasonably manageable via choreography, keeping services fully decoupled with no added orchestrator dependency. A longer, more complex process with significant branching logic (different compensation paths depending on which step failed, or steps that depend on results from earlier steps in non-trivial ways) usually benefits from orchestration's centralized visibility, even at the cost of the orchestrator needing explicit knowledge of every participating service.
+
+*Follow-up: Is it possible for a single system to use choreography for some sagas and orchestration for others, rather than needing to standardize on one approach throughout?* Yes, and this is a reasonable, common approach — different business processes within the same system can have genuinely different complexity profiles, and choosing the coordination style that best fits each specific saga's actual complexity (rather than forcing every saga in the system into one uniform style) is a sound engineering decision, similar in spirit to the earlier point in Chapters 29–30 about a system reasonably using both Kafka and RabbitMQ for different messaging needs rather than standardizing on just one throughout.
+
+**10. What role does the API Gateway (Chapter 26) or the resilience patterns (Chapter 27) play in supporting a saga's execution, particularly in an orchestration-based implementation?**
+An orchestrator making direct calls to each participating service (as shown in this chapter's orchestration example) is making genuine inter-service calls exactly like those covered in Chapter 28, and those calls are just as subject to network unreliability, slowness, and failure as any other inter-service call — meaning the orchestrator's calls to `inventoryServiceClient`, `paymentServiceClient`, and so on should themselves be wrapped with the same resilience patterns (circuit breakers, retries, timeouts) from Chapter 27, since a saga step failing due to a transient network issue (rather than a genuine business failure) is exactly the kind of scenario retry logic is meant to handle before falling back to a full compensation flow.
+
+*Follow-up: Should a saga step's failure due to a transient network blip trigger the same full compensation flow as a genuine business-logic failure (like "insufficient inventory")?* Ideally not immediately — a transient network failure calling `inventory-service` should first be retried (per Chapter 27's resilience patterns) since it may well succeed on a subsequent attempt, and only after retries are genuinely exhausted (or a clear, non-transient business failure like "insufficient inventory" is explicitly returned) should the saga actually proceed to trigger compensation for the steps already completed — conflating transient technical failures with genuine business failures would cause the saga to unnecessarily compensate and abandon operations that could have succeeded with a bit more retry patience.
+
+**11. Why does this chapter describe the Saga pattern as "the honest answer" to a problem Chapter 23 flagged, rather than a way to avoid the problem entirely?**
+Sagas don't eliminate the fundamental challenge of maintaining consistency across independently-owned, separately-databased services — they provide a structured, deliberate way to *manage* that challenge (via explicit compensating actions and accepted eventual consistency) rather than pretending the challenge doesn't exist or trying to force a single-database-style atomic guarantee onto a fundamentally distributed system where that guarantee genuinely can't apply in the same way; adopting sagas means consciously accepting and correctly handling the real complexity, not making it disappear.
+
+*Follow-up: What would be the risk of a team believing sagas make cross-service consistency "just as easy" as a single-database transaction, rather than understanding it as a different, more complex model requiring deliberate design?* A team with that misunderstanding would likely under-invest in correctly designing compensating actions, fail to make them properly idempotent, and fail to design their application (particularly the UI/UX) to correctly account for the eventual-consistency window — leading to real production bugs (double-compensation, confusing intermediate states shown to users, or genuinely inconsistent data if a failure case wasn't properly compensated) stemming from treating a fundamentally different consistency model as if it provided the same simple guarantees as `@Transactional` within one database.
+
+**12. How does the Saga pattern's need for compensating actions relate to the idempotent-consumer design already established in Chapters 29–30 for event-driven messaging?**
+Both stem from the same underlying reality of operating in a distributed system with at-least-once delivery and retry semantics — just as an event consumer might receive and need to safely handle the same event more than once (Chapter 29), a compensating action (whether triggered via choreographed events or direct orchestrator calls) might similarly need to be safely, idempotently repeatable if a retry occurs during its own execution; the saga pattern doesn't introduce a brand new kind of idempotency requirement so much as apply the same fundamental distributed-systems discipline specifically to the "undo" side of a multi-step business process.
+
+*Follow-up: If a saga is implemented via choreography (using Kafka events, per Chapter 29, to trigger both forward steps and compensating actions), does this mean the saga's compensation logic is subject to exactly the same at-least-once delivery considerations as Chapter 29's regular event consumers?* Yes, exactly — a compensating action triggered by consuming a "payment-failed" event (in a choreographed saga) is itself just another Kafka consumer subject to the identical at-least-once delivery guarantee and redelivery possibility covered in Chapter 29, meaning it needs the same idempotency design discipline (checking whether this specific compensation has already been applied) as any other event consumer in the system, whether that consumer happens to be doing forward business processing or saga compensation.
+
+**13. Why might a team specifically choose orchestration for a saga involving payment processing, even if they generally prefer choreography elsewhere in their system?**
+Payment-related flows often have relatively strict correctness, auditability, and regulatory requirements, along with genuinely complex branching logic (different handling for insufficient funds, fraud detection holds, partial payment failures, and various compensation scenarios) — having this entire flow's logic, including every possible failure/compensation path, explicitly visible and centrally defined in one orchestrator makes it significantly easier to review, audit, test comprehensively, and reason correctly about compared to having that same critical, complex logic scattered across several services' independent event handlers under a choreography approach.
+
+*Follow-up: Does choosing orchestration for this specific, critical saga preclude using choreography for other, less complex sagas elsewhere in the same system?* No — as discussed earlier, a single system can reasonably mix both approaches, choosing orchestration specifically for sagas where the complexity, criticality, and need for centralized visibility genuinely justify the added coupling to a coordinator, while using simpler choreography for other, more straightforward multi-step processes elsewhere in the same overall system where that added centralization and coupling wouldn't provide a meaningful corresponding benefit.
+
+**14. How would you test a saga's compensation logic, given that it specifically needs to be exercised under failure conditions that don't happen during normal, successful operation?**
+This requires deliberately testing the failure paths, not just the happy path — similar in spirit to Chapter 17's emphasis on testing failure paths, but now across service boundaries: using integration tests (Chapter 18, potentially with Testcontainers standing in for the messaging infrastructure or downstream service stubs) that specifically simulate a failure at each individual step of the saga (a payment failure, an inventory failure) and assert that the correct sequence of compensating actions is triggered and correctly restores the expected state, rather than only testing that the saga completes correctly when every step succeeds.
+
+*Follow-up: Why is testing "what happens if the payment step succeeds but the immediately following order-confirmation step then fails" a particularly important, easy-to-overlook scenario to explicitly test?* This tests a failure occurring *after* a step whose own compensation might itself be complex or costly (reversing an already-successful payment charge, rather than simply not having charged it at all) — it's easy to only think about "the obvious" failure points (like the payment step itself failing) and overlook that a failure in a *later*, seemingly simpler step (like just updating an order's status) still requires correctly triggering compensation for every already-completed *earlier* step, including ones that succeeded and now need a possibly-costly, careful reversal.
+
+**15. Summarize how the Saga pattern closes the specific gap left open since Chapter 23, and what it required from the rest of Part 7 to become practically achievable.**
+Chapter 23 identified that splitting into independently-databased services means a single ACID transaction can no longer span a multi-step business operation, deferring the solution. The Saga pattern provides that solution — a sequence of local transactions with explicit compensating actions on failure, achieving eventual rather than immediate consistency — but doing so practically depends on the rest of Part 7's infrastructure: reliable service-to-service communication (Chapter 28) or event-driven messaging (Chapters 29–30) to actually execute each step, resilience patterns (Chapter 27) to handle transient failures before resorting to full compensation, and distributed tracing (Chapter 31) to actually observe and debug a saga's execution across the many services and steps it touches.
+
+*Follow-up: Having now covered discovery, config, gateway, resilience, communication, messaging, tracing, and finally distributed transactions — what would you say is the single biggest mindset shift required to work effectively in this architecture, compared to building within a single monolithic application?*  Accepting that failure is a normal, expected, and frequent condition to design for explicitly at every step — rather than the rare edge case it can reasonably be treated as within a single, reliable in-process method call — every pattern across these nine chapters exists because a network call, an external service, or a multi-step distributed process can partially fail in ways a local method call and a single database transaction simply cannot, and building correctly in this architecture means designing for that reality by default, rather than treating it as an occasional exception to otherwise straightforward, always-succeeding logic.

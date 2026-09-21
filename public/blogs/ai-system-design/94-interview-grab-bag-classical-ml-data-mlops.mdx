@@ -1,0 +1,87 @@
+---
+title: "Chapter 94: Interview Grab Bag 1 — Classical ML, Data & MLOps"
+description: "A dedicated interview-question chapter covering Parts 1-7: ML system fundamentals, data engineering, feature stores, training at scale, evaluation, serving, and MLOps — cross-cutting questions spanning the whole classical-ML arc."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 15
+partTitle: "Dedicated Interview-Only Chapters"
+chapter: 94
+totalChapters: 96
+tags: ["ai-system-design", "interview-prep", "classical-ml", "mlops", "grab-bag"]
+---
+
+## Introduction
+
+This chapter and the two that follow depart from this series' usual format: no new material, no diagrams, no code — purely interview questions, designed to be worked through as a standalone review session covering the entire curriculum built so far. This chapter draws exclusively from Parts 1-7 (Chapters 1-35): ML system design fundamentals, data engineering, feature engineering, training at scale, evaluation, classical serving, and MLOps. Questions here deliberately cross Part boundaries, testing whether concepts from different Parts connect correctly in a candidate's understanding, exactly the kind of integrative question a senior system-design interview favors over single-topic recall.
+
+---
+
+## Interview Questions
+
+**1. Why does a well-designed ML system typically separate the training pipeline from the serving pipeline, and what specific risk does this separation introduce that a system designer must actively manage?**
+Training and serving have fundamentally different requirements — training favors throughput over latency and can tolerate batch processing, while serving demands low, predictable latency for individual requests — but this separation introduces training-serving skew, where features computed differently across the two pipelines cause a model to behave differently in production than its offline evaluation predicted, requiring a shared feature store or feature-computation library to guarantee consistency.
+*Follow-up: What's the most direct way to verify training-serving skew is NOT occurring for a specific feature?*
+Compute the same feature through both the training and serving code paths for an identical set of raw inputs, and directly compare the outputs for exact equality — any discrepancy reveals a skew source requiring investigation before trusting the model's offline evaluation as representative of production behavior.
+
+**2. Why is accuracy often the wrong metric to report for a production classification model, and what should replace it as the default reporting choice?**
+Accuracy can be misleadingly high under class imbalance, since a model predicting the majority class unconditionally can score well on accuracy while failing at the actual task; precision, recall, and their trade-off curve (or a single metric like F1 or AUC when a single number is genuinely needed) more honestly represent performance, especially when calibrated to the actual business cost of each error type.
+*Follow-up: When would accuracy actually be an appropriate primary metric?*
+When classes are genuinely balanced and the cost of a false positive and false negative are roughly symmetric — a rare combination in most real business applications, but a legitimate exception where accuracy's simplicity is not misleading.
+
+**3. Why does a feature store need both an online (low-latency) and offline (batch) serving path, rather than a single, unified storage layer?**
+Training needs to query large volumes of historical feature values efficiently (favoring a batch-optimized store), while serving needs single-record lookups with millisecond latency (favoring a key-value-optimized store) — these are genuinely different access patterns with different optimal storage engines, and a feature store's value comes specifically from guaranteeing both paths compute features identically despite this different underlying storage.
+
+**4. Why might a model's offline evaluation metrics look excellent while its online A/B test results disappoint?**
+Offline evaluation is computed against historical data reflecting the PREVIOUS system's decisions, introducing selection bias the new model's genuinely novel recommendations were never exposed to; online testing measures real user response to actually-different outputs, closing a gap offline evaluation structurally cannot close.
+*Follow-up: What evaluation practice would most directly reduce this specific risk before committing to a costly online test?*
+Constructing counterfactual or exploration-based logging (occasionally serving randomized or exploratory results in production specifically to build a less-biased offline evaluation dataset) reduces this selection bias, though it never fully substitutes for genuine online validation.
+
+**5. Why does model monitoring need to track both data drift and concept drift as distinct signals?**
+Data drift (the distribution of input features shifting) and concept drift (the relationship between features and the target label shifting) are genuinely different failure modes requiring different remediation — data drift might be addressed by retraining on recent data using the same labels, while concept drift means even fresh labels reflect a changed underlying relationship, requiring a reconsidered feature set or model architecture, not just fresher training data.
+
+**6. Why is a canary deployment strategy preferred over a full, immediate model rollout for a production ML system?**
+A canary deployment exposes the new model to a small fraction of traffic first, allowing real-world validation and rapid detection of unexpected regressions before the full user base is affected, directly limiting the blast radius of an undetected issue that offline evaluation and even A/B testing's own limited scope might have missed.
+*Follow-up: What specific metric would most quickly reveal a canary deployment should be rolled back?*
+A sudden divergence in a key business or safety metric between the canary and control populations, monitored in near-real-time rather than waiting for a full evaluation cycle to complete — the whole point of canarying is fast, low-cost detection before broader exposure.
+
+**7. Why does distributed training introduce a genuinely new failure mode (gradient staleness or synchronization issues) that single-machine training never faces?**
+Distributed training splits computation across multiple workers that must periodically synchronize gradients or parameters — network delays, straggler workers, or asynchronous update schemes can cause workers to train on stale or inconsistent parameter states, a coordination problem with no analog when all computation happens within a single machine's memory space.
+
+**8. Why might a team choose a simpler model architecture (logistic regression, gradient-boosted trees) over a deep neural network for a production classical ML system, despite the neural network's potentially higher accuracy ceiling?**
+Simpler models are typically faster to train, easier to interpret and debug, cheaper to serve, and require less data to avoid overfitting — following this series' consistent "escalate model complexity only as demonstrated need justifies" discipline, a team should validate that a simpler model's measured performance is genuinely insufficient before adopting a more complex, expensive alternative.
+
+**9. Why does a feature's importance in a trained model not automatically imply it should remain in production indefinitely?**
+A feature's importance is measured against the training data's specific distribution at a point in time — if the underlying data-generating process shifts (concept drift) or the feature's own upstream data source degrades or becomes unavailable, its continued inclusion could introduce risk (a stale or broken pipeline silently feeding garbage values) that outweighs its historically-measured value, requiring ongoing monitoring of feature health, not just one-time importance measurement.
+
+**10. Why is reproducibility (the ability to exactly recreate a specific model version's training run) a genuine engineering requirement, not merely a nice-to-have for a production ML system?**
+Without reproducibility, diagnosing a production regression traced to a specific model version becomes extremely difficult — a team cannot confidently determine whether a bug stems from the model itself, the data it was trained on, or an environmental difference, making experiment tracking (recording exact code versions, data snapshots, and hyperparameters) essential infrastructure rather than optional bookkeeping.
+
+**11. Why does hyperparameter tuning typically require a separate validation set from the test set ultimately used to report final model performance?**
+If hyperparameters are tuned against the same data used for final evaluation, the reported performance becomes overly optimistic — the tuning process implicitly "sees" and adapts to that specific data's quirks, meaning a genuinely held-out test set, untouched during tuning, is necessary to obtain an honest estimate of how the model will perform on truly unseen, future data.
+
+**12. Why might a company invest in a dedicated experiment-tracking platform rather than relying on spreadsheets or ad hoc logging for ML experimentation?**
+As the number of experiments, hyperparameter configurations, and team members grows, manual tracking becomes error-prone and fails to scale — a dedicated platform provides systematic versioning, comparison, and reproducibility guarantees at a scale manual processes cannot reliably sustain, directly the same "invest in shared infrastructure once ad hoc approaches demonstrably fail to scale" principle this series applies consistently.
+
+**13. Why does batch inference (scoring many records at once, offline) typically achieve better throughput-per-dollar than real-time inference for the same total volume of predictions?**
+Batch inference can fully utilize hardware parallelism (larger batch sizes better amortize fixed per-request overhead and utilize GPU/CPU resources more efficiently) without needing to guarantee any individual request's low latency — a genuine efficiency advantage available whenever an application's use case tolerates delayed, non-real-time results.
+
+**14. Why must a data pipeline's schema validation happen as early as possible in the pipeline, rather than only at the point where a model consumes the data?**
+Catching a schema violation (a missing field, an unexpected data type) at the earliest possible pipeline stage prevents corrupted or malformed data from propagating through multiple downstream transformations, where the original error becomes progressively harder to trace back to its actual source — directly the same "catch and fail fast, close to the actual point of failure" principle this series applies to error handling generally.
+
+**15. Why does a model's training data need to be representative of its EXPECTED SERVING distribution, not merely large in volume?**
+A large but unrepresentative dataset (skewed toward a specific user segment, time period, or scenario that doesn't match actual production traffic) produces a model optimized for the wrong distribution — volume alone cannot compensate for this representativeness gap, since more data drawn from the same unrepresentative distribution simply reinforces the mismatch rather than correcting it.
+
+**16. Why might A/B testing require a minimum sample size calculation before launching, rather than simply running the test until a result "looks" statistically significant?**
+Checking results repeatedly and stopping as soon as significance appears (without a pre-calculated sample size and stopping rule) inflates the false-positive rate through a well-known statistical pitfall — a proper power analysis conducted before the test begins ensures the experiment has genuine statistical validity when it concludes, rather than an artifact of when the team happened to look.
+
+**17. Why does model explainability matter more for a loan-approval model than for a movie-recommendation model, and how should this difference influence architecture choice?**
+A loan-approval decision has significant, regulated consequences for the individual affected and often carries a legal requirement to provide a reason for denial — favoring a more interpretable model architecture (or requiring a post-hoc explainability technique) even at some accuracy cost; a movie recommendation's low-stakes, easily-reversible nature makes this trade-off far less consequential, allowing a less interpretable but potentially more accurate model to be a reasonable choice.
+
+**18. Why is a "shadow deployment" (running a new model alongside the current production model without its outputs affecting real decisions) a useful pre-launch validation technique?**
+It allows direct comparison of the new model's predictions against the current model's on genuine, live production traffic, revealing real-world discrepancies and edge cases before the new model's outputs actually influence any real decision, providing a genuinely lower-risk validation step positioned between offline evaluation and a full canary rollout.
+
+**19. Why does feature engineering typically require domain expertise, not purely statistical or automated techniques?**
+A domain expert can identify meaningful, causally-relevant relationships and edge cases (a specific business rule, a known seasonal pattern) that a purely statistical or automated feature-generation process would have no way to discover from the raw data alone, making domain collaboration a genuine, ongoing part of effective feature engineering rather than a purely technical, automatable task.
+
+**20. What is the single most important, unifying lesson these classical ML system-design chapters (Parts 1-7) collectively establish, that a candidate should carry into every subsequent interview question about LLM systems?**
+That rigorous, empirical evaluation — measuring the right metric, on representative data, validated online as well as offline — must precede and justify every architectural decision, and that production ML systems require ongoing monitoring and governance rather than a one-time training-and-deploy event; this discipline, established here for classical ML, is the direct foundation this series' later Parts extend to LLM-specific concerns (RAG evaluation, agentic safety, adversarial robustness) rather than a separate, unrelated body of knowledge.

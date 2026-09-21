@@ -1,0 +1,194 @@
+---
+title: "Generics in Java"
+description: "Type-safe generic classes and methods, bounded type parameters, wildcards (? extends / ? super), and type erasure."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Strings, Generics & Collections"
+chapter: 17
+totalChapters: 65
+slug: "generics"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "generics"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 14
+---
+
+## Why Generics Exist
+
+Before generics (pre-Java 5), collections stored plain `Object` references, forcing manual casts everywhere and pushing type errors to runtime instead of compile time.
+
+```java
+// Pre-generics (Java 1.4 style)
+List list = new ArrayList();
+list.add("hello");
+list.add(42);                    // no compile-time error — mixed types allowed
+String s = (String) list.get(1); // compiles fine, throws ClassCastException at RUNTIME
+```
+
+```java
+// With generics
+List<String> list = new ArrayList<>();
+list.add("hello");
+// list.add(42);   // COMPILE ERROR — caught immediately, not at runtime
+String s = list.get(0);   // no cast needed at all
+```
+
+Generics move an entire category of bugs from runtime `ClassCastException`s to compile-time errors, and eliminate manual casting.
+
+## Generic Classes
+
+```java
+public class Box<T> {
+    private T content;
+
+    public void set(T content) { this.content = content; }
+    public T get() { return content; }
+}
+```
+
+```java
+Box<String> stringBox = new Box<>();
+stringBox.set("hello");
+String value = stringBox.get();   // no cast required
+
+Box<Integer> intBox = new Box<>();
+intBox.set(42);
+```
+
+`T` is a **type parameter** — a placeholder filled in with a concrete type at the point of use. Convention uses single uppercase letters: `T` (Type), `E` (Element), `K`/`V` (Key/Value), `R` (Result).
+
+## Generic Methods
+
+A method can introduce its own type parameter, independent of whether its enclosing class is generic.
+
+```java
+public class Utils {
+    public static <T> T firstElement(List<T> list) {
+        return list.get(0);
+    }
+}
+```
+
+```java
+String first = Utils.firstElement(List.of("a", "b", "c"));   // T inferred as String
+```
+
+## Bounded Type Parameters
+
+`extends` restricts a type parameter to a specific type or its subtypes (this is the only keyword used, even for interfaces).
+
+```java
+public static <T extends Comparable<T>> T max(List<T> list) {
+    T max = list.get(0);
+    for (T item : list) {
+        if (item.compareTo(max) > 0) {
+            max = item;
+        }
+    }
+    return max;
+}
+```
+
+This guarantees `T` has a `compareTo()` method available — without the bound, `T` would be treated as plain `Object`, which has no `compareTo()`.
+
+## Wildcards: `? extends` and `? super`
+
+Wildcards are used at the **call site** (method parameters, variable declarations) rather than declaring your own type parameter, when you don't need to reference the specific type elsewhere.
+
+```java
+// ? extends Number — can READ Numbers out, cannot safely add to it (producer)
+public static double sumAll(List<? extends Number> list) {
+    double sum = 0;
+    for (Number n : list) {
+        sum += n.doubleValue();
+    }
+    return sum;
+}
+
+sumAll(List.of(1, 2, 3));        // List<Integer> — works
+sumAll(List.of(1.0, 2.0));       // List<Double> — works
+```
+
+```java
+// ? super Integer — can WRITE Integers into it, reading gives only Object back (consumer)
+public static void addNumbers(List<? super Integer> list) {
+    list.add(1);
+    list.add(2);
+}
+
+List<Number> numbers = new ArrayList<>();
+addNumbers(numbers);   // works — Number is a supertype of Integer
+```
+
+This is the **PECS** mnemonic: **P**roducer **E**xtends, **C**onsumer **S**uper. If a structure only *produces* (you read from it), use `? extends`. If it only *consumes* (you write to it), use `? super`.
+
+![Diagram: PECS mnemonic showing a List<? extends Number> as a read-only producer flowing values out, and a List<? super Integer> as a write-only consumer accepting values in](/diagrams/ch17-pecs-wildcards.svg)
+
+## Type Erasure
+
+Generic type information exists **only at compile time** — the compiler uses it for type checking, then erases it, replacing type parameters with their bound (or `Object` if unbounded) in the compiled bytecode, inserting casts automatically where needed.
+
+```java
+List<String> strings = new ArrayList<>();
+List<Integer> ints = new ArrayList<>();
+
+System.out.println(strings.getClass() == ints.getClass());   // true! both are just ArrayList at runtime
+```
+
+This is why you **cannot** do things like `new T()`, `new T[10]`, `instanceof List<String>`, or overload two methods that only differ by generic type parameter (`process(List<String>)` vs `process(List<Integer>)`) — at runtime, the JVM has no idea what `T` or the generic type argument actually was.
+
+## Key Takeaways
+
+- Generics catch type mismatches at compile time and eliminate manual casting.
+- Bounded type parameters (`<T extends X>`) grant access to that bound's methods within the generic code.
+- PECS: `? extends` for read-only producers, `? super` for write-only consumers.
+- Type erasure means generic type information doesn't exist at runtime — no `new T()`, no `instanceof List<String>`, no generic-only method overloads.
+
+---
+
+## Interview Questions
+
+**1. What problem do generics solve that existed in pre-Java-5 collections?**
+Pre-generics collections stored everything as `Object`, so adding mismatched types compiled without error and any type mismatch only surfaced as a `ClassCastException` at runtime, often far from where the bad data was actually inserted. Generics let you declare the intended element type at compile time, so the compiler rejects mismatched insertions immediately and eliminates the need for manual casts on retrieval.
+
+**2. What is type erasure, and what does it mean practically for what you can do with a type parameter `T` at runtime?**
+Type erasure means the compiler uses generic type information only during compilation for type-checking, then strips it from the compiled bytecode, replacing type parameters with `Object` (or their bound, if one is declared) and inserting casts automatically where needed. Practically, this means you cannot create a new instance of `T` directly (`new T()`), cannot create a generic array (`new T[10]`), cannot check `instanceof` against a parameterized type (`obj instanceof List<String>`), and two overloaded methods can't differ only by generic type argument, since at runtime the JVM sees identical erased signatures.
+
+**3. Given `List<String>` and `List<Integer>`, are they the same class at runtime? Why?**
+Yes — due to type erasure, both are compiled down to the same raw `List` (backed by `ArrayList`, etc.) with no runtime record of what type argument was used. `list.getClass()` for either returns the identical `Class` object; the type distinction exists purely for the compiler's benefit during compilation.
+
+**4. What is the PECS mnemonic, and how does it guide the choice between `? extends` and `? super`?**
+PECS stands for "Producer Extends, Consumer Super." If you only need to read values *out* of a generic structure (it acts as a producer of data for you), use `? extends T`. If you only need to write values *into* it (it acts as a consumer of data from you), use `? super T`. Structures you both read from and write to generally shouldn't use wildcards at all — they need an exact, unbounded type parameter.
+
+**5. Why can't you add elements (other than `null`) to a `List<? extends Number>`?**
+Because `? extends Number` could actually be any specific subtype of `Number` at runtime (a `List<Integer>`, a `List<Double>`, etc.) that the compiler can't pin down — allowing an `add(someNumber)` call could insert, say, a `Double` into what's actually backing a `List<Integer>`, silently corrupting it. The compiler prevents this entirely by disallowing any addition except `null`, since `null` is valid for every reference type.
+
+**6. Why can you add `Integer` values to a `List<? super Integer>` but only read them back as `Object`?**
+`? super Integer` guarantees the list's actual element type is `Integer` or some supertype of it (`Number`, `Object`, etc.), so it's always safe to insert an `Integer` — it will fit whatever the actual, more general element type is. But reading an element back, the compiler only knows it's *at least* an `Object` (since the exact supertype isn't pinned down), so it can only guarantee an `Object` reference on retrieval without an explicit downcast.
+
+**7. What is a bounded type parameter, and why would you write `<T extends Comparable<T>>` instead of just `<T>`?**
+A bounded type parameter restricts what concrete types can be substituted for `T`, and grants the generic code access to the bound's methods. `<T extends Comparable<T>>` specifically requires that `T` implements `Comparable<T>`, which lets the generic method call `.compareTo()` on values of type `T` — with a plain unbounded `<T>`, the compiler only knows `T` as `Object`, which has no `compareTo()` method, making comparison-based generic logic impossible without the bound.
+
+**8. Can a type parameter have multiple bounds? What's the syntax and restriction?**
+Yes — `<T extends ClassName & Interface1 & Interface2>`. At most one class bound is allowed, and it must be listed first if present; any number of interface bounds can follow. This lets generic code require `T` to satisfy multiple contracts simultaneously.
+
+**9. Why can't you create a generic array directly, like `T[] array = new T[10];`?**
+Due to type erasure, the JVM has no way to know what the actual runtime component type of the array should be at the point of creation — arrays in Java carry runtime type information about their element type (needed to enforce `ArrayStoreException` checks), and there's no real type available for `T` at runtime to give the array. The common workaround is creating an `Object[]` internally and casting, or using `java.lang.reflect.Array.newInstance()` with an explicitly passed `Class<T>` token.
+
+**10. What is an unbounded wildcard (`List<?>`), and how does it differ from a raw `List`?**
+`List<?>` means "a list of some specific but unknown type," and the compiler still enforces type safety — you can't add anything to it (except `null`), since it doesn't know what the actual element type is, but reading elements out gives you `Object` safely. A raw `List` (no type argument at all) disables generic type checking entirely, allowing any type to be added or retrieved without compiler warnings beyond an unchecked-operation warning, essentially reverting to pre-Java-5 behavior — raw types exist mainly for backward compatibility and should be avoided in new code.
+
+**11. Why does Java use type erasure at all instead of preserving generic type information at runtime the way some other languages do?**
+It was a deliberate backward-compatibility decision when generics were introduced in Java 5 — erasure allows generic code to interoperate with, and be compiled against, pre-existing non-generic bytecode and libraries without requiring the entire JVM bytecode format or existing compiled libraries to change.
+
+**12. Can static members of a generic class reference the class's type parameter `T`?**
+No — a `static` member belongs to the class itself, shared across all parameterizations (`Box<String>`, `Box<Integer>`, etc. all share the exact same static members after erasure), so there's no single, consistent `T` a static context could refer to. If a static method needs its own type parameter, it must declare an independent one of its own, e.g. `static <U> U someMethod(U arg)`.
+
+**13. What is a "generic method," and how does its type parameter declaration differ from a generic class's?**
+A generic method introduces its own type parameter scoped to just that method (declared just before the return type, e.g. `public static <T> T identity(T value)`), independent of whether its enclosing class is generic at all — a plain, non-generic class can still have individual generic methods.
+
+**14. If you write two overloaded methods, `void process(List<String> list)` and `void process(List<Integer> list)`, in the same class, does it compile?**
+No — after type erasure, both methods have the identical erased signature `void process(List list)`, and the compiler rejects this as a duplicate method definition, since Java's overload resolution operates on the erased signatures at the bytecode level, not the pre-erasure generic type arguments.

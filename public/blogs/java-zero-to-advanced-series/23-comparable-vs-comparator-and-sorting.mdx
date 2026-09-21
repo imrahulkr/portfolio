@@ -1,0 +1,138 @@
+---
+title: "Comparable vs. Comparator & Sorting"
+description: "Natural ordering with Comparable, external/pluggable ordering with Comparator, chaining comparators, and Collections.sort/List.sort internals."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Strings, Generics & Collections"
+chapter: 23
+totalChapters: 65
+slug: "comparable-vs-comparator-and-sorting"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "collections", "sorting"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 12
+---
+
+## `Comparable` — One Natural Ordering, Defined by the Class Itself
+
+A class implements `Comparable<T>` to define its single, intrinsic "natural" ordering — the way instances of that class should sort by default.
+
+```java
+public class Employee implements Comparable<Employee> {
+    private String name;
+    private double salary;
+
+    @Override
+    public int compareTo(Employee other) {
+        return Double.compare(this.salary, other.salary);   // natural order: by salary, ascending
+    }
+}
+```
+
+```java
+List<Employee> employees = new ArrayList<>(...);
+Collections.sort(employees);   // uses compareTo() automatically — no extra argument needed
+```
+
+`compareTo()` returns a negative number if `this` should sort before `other`, zero if they're considered equal for ordering purposes, and positive if `this` should sort after `other` — the exact magnitude doesn't matter, only the sign.
+
+## `Comparator` — Any Number of External, Pluggable Orderings
+
+`Comparator<T>` defines an ordering *externally*, without modifying the class being compared — useful when you need multiple different sort orders, or when you don't own the class's source code at all.
+
+```java
+Comparator<Employee> byName = (e1, e2) -> e1.getName().compareTo(e2.getName());
+Comparator<Employee> bySalaryDesc = (e1, e2) -> Double.compare(e2.getSalary(), e1.getSalary());
+
+employees.sort(byName);
+employees.sort(bySalaryDesc);
+```
+
+## Modern Comparator Construction (Java 8+)
+
+Writing raw comparison lambdas by hand is rarely necessary — `Comparator` provides fluent factory and chaining methods that read far more clearly.
+
+```java
+Comparator<Employee> byName = Comparator.comparing(Employee::getName);
+Comparator<Employee> bySalaryDesc = Comparator.comparingDouble(Employee::getSalary).reversed();
+
+// Chain: primary sort by department, tie-break by salary descending, then by name
+Comparator<Employee> combined = Comparator
+        .comparing(Employee::getDepartment)
+        .thenComparing(Comparator.comparingDouble(Employee::getSalary).reversed())
+        .thenComparing(Employee::getName);
+
+employees.sort(combined);
+```
+
+`thenComparing()` only takes effect when the preceding comparator considers two elements equal — this is exactly how multi-level sorting (sort by A, then by B for ties, then by C for further ties) is expressed cleanly.
+
+## `null`-Safe Comparators
+
+```java
+Comparator<Employee> byNameNullsFirst =
+        Comparator.comparing(Employee::getName, Comparator.nullsFirst(Comparator.naturalOrder()));
+```
+
+`Comparator.nullsFirst()`/`nullsLast()` wrap another comparator to explicitly define where `null` values should sort, since comparing `null` directly with `compareTo()` throws `NullPointerException`.
+
+## How Sorting Actually Happens: `Collections.sort()` / `List.sort()`
+
+Both delegate to `Arrays.sort()` internally after converting the list to an array. Since Java 7, the algorithm used is:
+
+- **Timsort** (a hybrid merge-sort/insertion-sort, stable, O(n log n) worst case) for object references — including anything sorted via `Comparable`/`Comparator`.
+- **Dual-pivot Quicksort** (O(n log n) average, not stable, but faster in practice and doesn't need stability) for arrays of **primitives**.
+
+**Stability matters**: a stable sort guarantees that elements considered equal by the comparator retain their original relative order — essential for the "sort by A, then by B" pattern above to behave predictably, since a second sort pass by A should not scramble the relative order already established by a prior sort by B.
+
+![Diagram: two employees with equal department values retaining their original relative order after a stable sort, contrasted with an unstable sort that could swap them](/diagrams/ch23-stable-vs-unstable-sort.svg)
+
+## Key Takeaways
+
+- `Comparable` defines one natural ordering intrinsic to the class; `Comparator` defines any number of external, swappable orderings.
+- Prefer `Comparator.comparing(...)`/`thenComparing(...)` factory methods over hand-written comparison lambdas for clarity.
+- Object sorting in Java uses a stable Timsort; primitive array sorting uses an unstable dual-pivot Quicksort — the difference matters for multi-key sorts.
+- `Comparator.nullsFirst()`/`nullsLast()` handle `null` values explicitly rather than letting them throw.
+
+---
+
+## Interview Questions
+
+**1. What's the fundamental difference between `Comparable` and `Comparator`?**
+`Comparable` is implemented by the class itself to define its single, intrinsic natural ordering (`compareTo()`), baked directly into the class. `Comparator` is a separate, standalone object that defines an ordering externally, independent of the class's own source code, and any number of different `Comparator` implementations can exist for sorting the same type in different ways.
+
+**2. If a class already implements `Comparable`, why would you still use a `Comparator`?**
+When you need an ordering different from the class's built-in natural order (e.g., sorting `Employee` by name sometimes and by salary other times), or when the class doesn't implement `Comparable` at all and you don't have the ability (or desire) to modify its source to add that. `Comparator` lets sorting logic live entirely outside the class being sorted.
+
+**3. What do the return value conventions of `compareTo()`/`compare()` mean?**
+A negative return value means the first argument sorts before the second, zero means they're considered equal for ordering purposes, and a positive value means the first argument sorts after the second. The exact magnitude carries no meaning — only the sign matters for determining relative order.
+
+**4. What is `Comparator.thenComparing()` used for, and when does the "then" comparator actually get consulted?**
+It chains a secondary comparator to break ties when the primary comparator considers two elements equal (returns zero). The secondary comparator is only invoked in that tie case — if the primary comparator already distinguishes the two elements, the chained comparator is never consulted at all, making it ideal for expressing "sort by A, then by B for ties, then by C for further ties" logic cleanly.
+
+**5. What sorting algorithm does `Collections.sort()` use for a `List<Employee>`, and is it stable?**
+It uses Timsort (since Java 7), a hybrid of merge sort and insertion sort, which is guaranteed stable — elements that compare as equal retain their original relative order in the output. This applies to sorting any reference type (objects), which is what `List<Employee>` sorting always involves.
+
+**6. Does `Arrays.sort()` on a primitive `int[]` array use the same algorithm as sorting an `Integer[]` array or a `List<Integer>`?**
+No — `Arrays.sort(int[])` uses a dual-pivot Quicksort variant, which is not stable but is generally faster in practice for primitives (stability is meaningless for bare primitive values with no associated payload data, so there's no downside to using an unstable algorithm there). Sorting `Integer[]` or `List<Integer>` uses Timsort instead, since these involve object references where stability can matter if a custom `Comparator` treats distinct objects as "equal" for ordering purposes.
+
+**7. Why does stability matter specifically for a multi-key sort like "sort by department, then by salary"?**
+If you first sort by salary, then perform a second, stable sort by department, elements that share the same department retain their relative order from the salary sort — producing the correct combined result (grouped by department, salary-ordered within each group) without needing a single complex combined comparator. An unstable sort could scramble that already-established salary order within a department group during the second sort pass, silently producing an incorrect final ordering.
+
+**8. What happens if you call `list.sort(null)` on a `List<String>`?**
+Passing `null` as the comparator tells `List.sort()` to use the elements' natural ordering via `Comparable`, exactly equivalent to calling `Collections.sort(list)` with no comparator argument — this works for `String` since it implements `Comparable<String>`, but would throw `ClassCastException` for a type that doesn't implement `Comparable` at all.
+
+**9. How would you sort a list in descending order using a class's existing natural ordering, without writing a new comparator from scratch?**
+Use `Comparator.reverseOrder()` if sorting the elements directly by natural order (`list.sort(Comparator.reverseOrder())`), or call `.reversed()` on any existing `Comparator` instance (including one built with `Comparator.comparing(...)`) to invert its ordering — both avoid manually writing an inverted comparison expression.
+
+**10. Why does calling `.compareTo()` directly on two potentially-null objects risk a `NullPointerException`, and how does `Comparator.nullsFirst()`/`nullsLast()` solve this?**
+If either object being compared is `null`, invoking `.compareTo()` on it (or passing it as the argument in some implementations) throws `NullPointerException`, since there's no defined comparison result against a null reference. `Comparator.nullsFirst(comparator)`/`nullsLast(comparator)` wrap an underlying comparator and explicitly intercept null values first, deciding up front where nulls should sort (always first or always last) before ever delegating to the wrapped comparator for the actual non-null comparison.
+
+**11. What's a concrete downside of writing raw comparison lambdas like `(e1, e2) -> e1.getSalary() - e2.getSalary()` compared to using `Comparator.comparingDouble`?**
+Subtracting `double`/`float`/`long` values directly and truncating to an `int` return type can silently produce incorrect results due to overflow or precision loss (e.g., a very large `long` difference wrapping around a 32-bit `int`, or a sub-1.0 `double` difference truncating to 0, incorrectly signaling "equal"). `Comparator.comparingDouble`/`comparingLong`/`comparingInt` avoid this class of bug entirely by using the appropriate type-safe `compare()` static method internally rather than naive subtraction.
+
+**12. If a class's `equals()` method and its `compareTo()`/`Comparator` disagree about what counts as "equal," what problem can arise when used with `TreeSet`/`TreeMap`?**
+`TreeSet`/`TreeMap` use `compareTo()`/`Comparator` (not `equals()`/`hashCode()`) exclusively to determine both ordering *and* uniqueness — two elements that `compareTo()` treats as equal (returning zero) are considered duplicates and only one is kept, even if `equals()` would say they're genuinely different objects. This "inconsistency with equals" is explicitly called out in the `Comparable`/`Comparator` Javadoc as something to avoid unless deliberately intended, since it can produce surprising, silent data loss when such objects are stored in a sorted collection.

@@ -1,0 +1,138 @@
+---
+title: "Profiling & Performance Tuning Basics"
+description: "A practical workflow for diagnosing Java performance problems: thread dumps, heap dumps, flight recorder, GC logs, and common anti-patterns to check first."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "JVM Internals, Memory & Performance"
+chapter: 49
+totalChapters: 65
+slug: "profiling-and-performance-tuning-basics"
+javaVersion: "21"
+difficulty: "advanced"
+tags: ["java", "jvm", "performance", "profiling"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 11
+---
+
+## Measure First — Never Guess
+
+The single most important principle in performance work: **profile before optimizing**. Intuition about "what's probably slow" in a non-trivial application is frequently wrong, and optimizing the wrong thing wastes effort while leaving the actual bottleneck untouched. Every tool in this chapter exists to replace guessing with actual evidence.
+
+## Thread Dumps — Diagnosing Hangs and Deadlocks
+
+A thread dump captures a snapshot of every thread's current stack trace and state, essential for diagnosing an application that's hung, deadlocked, or exhibiting unexpectedly high CPU usage.
+
+```bash
+jstack <pid>              # generates a thread dump to stdout
+kill -3 <pid>              # alternative: sends the dump to the process's stdout/log (on Unix-like systems)
+```
+
+```
+"pool-1-thread-1" #12 prio=5 os_prio=0 tid=0x... nid=0x... waiting on condition
+   java.lang.Thread.State: BLOCKED (on object monitor)
+        at com.example.Account.transfer(Account.java:42)
+        - waiting to lock <0x000000076ab...> (a com.example.Account)
+        - locked <0x000000076ac...> (a com.example.Account)
+```
+
+A thread shown as `BLOCKED`, waiting to acquire a lock that another thread already holds (which is itself shown waiting for a lock the *first* thread holds) is the textbook signature of a **deadlock** — two threads permanently waiting on each other, going nowhere. Modern JDK tools (like `jstack` itself) often explicitly detect and report deadlock cycles directly in the dump output.
+
+## Heap Dumps — Diagnosing Memory Leaks
+
+A heap dump is a full snapshot of every live object on the heap at a point in time, analyzed with a tool like **Eclipse MAT (Memory Analyzer Tool)** or VisualVM to find what's consuming memory and why objects aren't being garbage collected.
+
+```bash
+jmap -dump:live,format=b,file=heap.hprof <pid>
+
+# Or configure the JVM to dump automatically on OutOfMemoryError:
+-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/var/dumps/
+```
+
+The key analysis technique is examining the **dominator tree** and **path to GC roots** for suspiciously large objects — this reveals exactly *which* reference chain is keeping an unexpectedly large object graph reachable (and therefore un-collectible), which is usually the direct answer to "why is this leaking."
+
+## JDK Flight Recorder (JFR) — Low-Overhead Continuous Profiling
+
+JFR is a profiling and event-collection framework built directly into the JDK, with low enough overhead to run continuously in production (unlike many older, heavier profiling tools).
+
+```bash
+java -XX:+FlightRecorder -XX:StartFlightRecording=duration=60s,filename=recording.jfr MyApp
+
+jfr print --events jdk.ExecutionSample recording.jfr   # inspect CPU sampling data from the command line
+```
+
+Recordings can be opened in **JDK Mission Control (JMC)** for a rich visual breakdown of CPU usage (via periodic stack-trace sampling), memory allocation hot spots, GC pause details, and lock contention — all from a single low-overhead recording, making it a strong default first tool to reach for on a genuinely mysterious production performance issue.
+
+![Diagram: JFR continuously sampling application threads at low overhead in production, producing a recording file later analyzed in JDK Mission Control for CPU, allocation, and lock-contention breakdowns](/diagrams/ch49-jfr-continuous-profiling-workflow.svg)
+
+## GC Logs — Understanding Collector Behavior Over Time
+
+```bash
+-Xlog:gc*:file=gc.log:time,uptime,level,tags
+```
+
+GC logs reveal pause frequency, pause duration, and how much memory each collection actually reclaimed — essential for diagnosing whether a latency problem correlates with GC activity (long or frequent pauses) versus something entirely unrelated to memory management. Tools like **GCViewer** or **GCEasy** can visualize a raw GC log into readable charts rather than requiring manual line-by-line log inspection.
+
+## Common Performance Anti-Patterns to Check First
+
+Before reaching for heavyweight profiling tools, several common, easily-checked anti-patterns from earlier chapters in this series are worth ruling out first, since they're both common and cheap to verify:
+
+- **String concatenation in loops** (Chapter 16) — should use `StringBuilder`.
+- **Unnecessary autoboxing in hot numeric loops** (Chapter 3, Chapter 33) — consider primitive-specialized types.
+- **N+1 query patterns** in data access code (a database call inside a loop, rather than one batched call) — a database/ORM-layer concern, but a very common root cause of "slow" Java services that's often mistaken for a JVM-level problem.
+- **Overly broad `synchronized` scope** (Chapter 39) — causing unnecessary thread contention.
+- **Unbounded collections/queues** (Chapter 41, Chapter 42) — causing gradual memory growth under load rather than a sudden crash.
+- **Blocking calls inside a `parallelStream()`** (Chapter 36) — starving the shared common `ForkJoinPool` for unrelated code elsewhere in the application.
+
+## A Practical Diagnostic Workflow
+
+1. **Reproduce and characterize the problem** — is it high CPU, high memory, high latency, or a hang? Each points toward different tools.
+2. **Check GC logs first** for memory/latency issues — rule in or out GC-related pauses before assuming application-code causes.
+3. **Take a thread dump** for hangs, deadlocks, or high CPU with no obvious cause — often several dumps a few seconds apart, to see if the same threads are stuck in the same place.
+4. **Run a JFR recording** for a broader, lower-overhead view of CPU/allocation/lock hot spots when the cause isn't immediately obvious from the above.
+5. **Take a heap dump** specifically for suspected memory leaks, analyzing the dominator tree/path-to-GC-roots for unexpectedly large retained object graphs.
+
+## Key Takeaways
+
+- Always profile before optimizing — intuition about bottlenecks in non-trivial systems is frequently wrong.
+- Thread dumps diagnose hangs and deadlocks; heap dumps diagnose memory leaks via dominator-tree/path-to-GC-roots analysis.
+- JDK Flight Recorder is a low-overhead, production-safe profiler built into the JDK, ideal as a first broad diagnostic tool.
+- Check common, cheap-to-verify anti-patterns (string concatenation in loops, N+1 queries, overly broad synchronization) before reaching for heavyweight profiling.
+
+---
+
+## Interview Questions
+
+**1. Why is "profile before optimizing" considered such an important principle in performance engineering?**
+Developer intuition about which part of a non-trivial system is actually slow is frequently wrong — the real bottleneck is often in an unexpected place (a single N+1 database query pattern, a surprisingly hot allocation site, lock contention on a rarely-suspected shared resource). Optimizing based on a guess risks spending significant effort improving something that was never actually the bottleneck, while the real problem remains completely unaddressed and the perceived performance issue persists.
+
+**2. What is a thread dump, and what specific problem is it primarily used to diagnose?**
+A thread dump is a snapshot of every thread's current state and full stack trace at a specific moment, primarily used to diagnose application hangs, deadlocks, and unexplained high CPU usage — it directly shows what every thread is actually doing (or blocked waiting for) at that instant, which is often immediately revealing for these classes of problems.
+
+**3. What pattern in a thread dump specifically indicates a deadlock?**
+Two (or more) threads each shown in a `BLOCKED` state, each waiting to acquire a lock that's currently held by another thread in that same set — forming a cycle where every thread in the cycle is permanently waiting on another thread in the same cycle to release a lock that will never actually be released, since that thread is itself stuck waiting. Modern tools like `jstack` often explicitly detect and call out such cycles directly in their output.
+
+**4. What is a heap dump, and what's the key technique used to find a memory leak's root cause once you have one?**
+A heap dump is a complete snapshot of every live object on the heap at a specific moment, analyzed with a tool like Eclipse MAT or VisualVM. The key technique is examining the "path to GC roots" (and the related "dominator tree") for suspiciously large retained object graphs — this traces exactly which reference chain is keeping a large amount of memory reachable and therefore un-collectible, which usually points directly at the specific piece of code responsible for the unintended retention.
+
+**5. What is JDK Flight Recorder (JFR), and why is it particularly well-suited for use directly in production?**
+JFR is a profiling and diagnostic-event-collection framework built into the JDK itself, engineered specifically for very low overhead (typically well under 1-2% CPU impact), which is what makes it viable to run continuously or on-demand in live production environments, unlike many older, heavier-weight profiling tools that could meaningfully distort the very performance characteristics they're trying to measure.
+
+**6. What kinds of information can a JFR recording, viewed in JDK Mission Control, reveal about an application's runtime behavior?**
+CPU usage hot spots (via periodic stack-trace sampling of running threads), memory allocation hot spots (which code paths allocate the most objects), detailed GC pause information, and lock contention data — all captured together from a single low-overhead recording, giving a broad diagnostic picture without needing to run several separate, more specialized tools individually.
+
+**7. Why is examining GC logs often a useful first step when diagnosing a latency problem in a Java application?**
+GC logs directly reveal collection frequency, pause duration, and how much memory was actually reclaimed per collection — if application latency spikes correlate closely with logged GC pause events, that's strong, direct evidence pointing toward GC tuning (heap sizing, collector choice, allocation rate reduction) as the fix, versus ruling GC out entirely and looking elsewhere (application code, external dependencies, network) if the timing doesn't correlate.
+
+**8. What is an "N+1 query" performance anti-pattern, and why might it be initially mistaken for a JVM-level performance issue?**
+It occurs when code executes one query to fetch a list of N items, then executes an additional separate database query for each of those N items individually (rather than a single batched query), resulting in N+1 total database round-trips instead of a small, fixed number. It's often initially misdiagnosed as a "Java is slow" problem because the symptom (a slow service response) manifests inside the JVM process, when the actual bottleneck is external database round-trip latency multiplied by an unnecessarily large number of separate queries — a data-access-layer/ORM usage issue, not a JVM performance issue at all.
+
+**9. Why might taking several thread dumps a few seconds apart be more useful than taking just one, when diagnosing suspected high-CPU-usage code?**
+A single thread dump only shows one instantaneous snapshot — if the same specific threads and stack traces appear consistently across several dumps taken moments apart, that's strong evidence those particular code paths are where the CPU time is actually concentrated (a legitimate hot loop or repeated stuck condition), whereas threads that appear in completely different locations each time are more likely just normal, varying execution rather than a genuine consistent bottleneck.
+
+**10. Why should common, cheap-to-check anti-patterns (like string concatenation in loops, or overly broad synchronized blocks) be reviewed before reaching for heavyweight profiling tools?**
+These patterns are well-understood, quick to visually spot in code review, and are surprisingly common root causes of real-world performance problems — checking for them first is a low-cost, high-value step that can sometimes resolve the issue immediately without needing the more time-consuming setup and analysis heavier profiling tools (JFR recordings, heap dump analysis) require, reserving those deeper tools for cases where the cause genuinely isn't apparent from a straightforward code-level review.
+
+**11. If GC logs show frequent, short minor GC pauses but essentially no major/full GC activity at all, what does that suggest about where to focus tuning effort versus where NOT to focus it?**
+It suggests the young generation is sized appropriately and the application's short-lived object allocation pattern is being handled efficiently by the generational collector as intended — tuning effort would be better directed at investigating whether the *frequency* itself (implying a high overall allocation rate) is contributing to any observed latency or throughput concerns, such as by reducing unnecessary allocations in hot code paths, rather than assuming a major-GC-related tuning problem (like Old Generation sizing) that the logs don't actually indicate is currently occurring.

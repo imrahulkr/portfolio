@@ -1,0 +1,208 @@
+---
+title: "Chapter 12: Feature Engineering Fundamentals"
+description: "The core techniques for transforming raw data into effective model inputs — normalization, encoding, aggregation, and interaction features — and how to reason about feature quality."
+series: "ai-system-design"
+seriesTitle: "AI System Design: Zero to Advanced"
+part: 3
+partTitle: "Feature Engineering & Feature Stores"
+chapter: 12
+totalChapters: 96
+tags: ["ai-system-design", "feature-engineering", "interview-prep"]
+---
+
+## Introduction
+
+Part 2 covered how raw data gets collected, moved, and validated. Part 3 covers what happens next: turning that raw, validated data into the actual numeric inputs a model consumes — **features**. This chapter builds the fundamental technique toolkit; Chapters 13-15 then build the production infrastructure (feature stores) and address the most consequential system design risk in this area (training-serving skew).
+
+## What Makes a "Good" Feature?
+
+Before technique, it's worth being explicit about what you're optimizing for when engineering a feature:
+
+- **Predictive power**: does it actually help the model discriminate between outcomes? (Measured empirically via feature importance, ablation, or correlation analysis — not assumed from intuition alone.)
+- **Availability at serving time**: can this exact feature be computed, with the exact same value, at the moment of inference — not just during offline training? (This is the seed of Chapter 15's training-serving skew problem.)
+- **Freshness requirements**: how quickly must this feature reflect new information to remain useful? (Ties directly to Chapter 5 and 8's batch/streaming decisions.)
+- **Robustness**: does it degrade gracefully when the underlying raw data is missing, delayed, or malformed, rather than silently producing a nonsensical value?
+
+A feature that scores well on offline predictive power but fails on availability or robustness is not actually a usable production feature — a lesson often learned the hard way when a promising notebook feature can't survive contact with the serving environment.
+
+## Core Feature Engineering Techniques
+
+### Normalization & Scaling
+
+Most models (especially linear models, neural networks, and distance-based methods like k-NN) perform better, train faster, and are more numerically stable when numeric features share a comparable scale.
+
+- **Min-max scaling**: rescales a feature to a fixed range (typically [0, 1]).
+- **Standardization (z-score)**: rescales to zero mean and unit variance — generally more robust to outliers than min-max scaling.
+- **Log transformation**: compresses heavily right-skewed distributions (e.g., income, transaction amounts) into a more symmetric, model-friendly shape.
+
+```python
+import numpy as np
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+# Standardization — most common default for neural networks and
+# linear models; fit ONLY on training data, then applied identically
+# to validation/test/production data (never re-fit at serving time).
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)  # reuse fitted params
+
+# Log transform for a heavily right-skewed feature like transaction amount
+transaction_amount_log = np.log1p(transaction_amount)  # log1p handles zero values safely
+```
+
+### Categorical Encoding
+
+Categorical variables (a country code, a product category, a device type) need to be converted into a numeric representation:
+
+- **One-hot encoding**: creates a binary column per category — simple and effective for low-cardinality categoricals (a handful to a few dozen categories), but explodes in dimensionality for high-cardinality fields (e.g., millions of user IDs or product SKUs).
+- **Label/ordinal encoding**: maps each category to an integer — appropriate only when categories have a genuine order (e.g., "low/medium/high"); using it on unordered categories misleadingly implies a numeric relationship that doesn't exist.
+- **Target/mean encoding**: replaces a category with the average target value observed for that category in training data (e.g., replace a ZIP code with the historical average conversion rate for that ZIP code) — powerful for high-cardinality categoricals, but prone to leakage and overfitting if not computed carefully with proper cross-validation folds.
+- **Embeddings**: learn a dense, low-dimensional vector representation for each category (e.g., a learned embedding per product ID) — the dominant approach for very high-cardinality categoricals in deep learning systems, covered in depth in Chapter 14.
+
+```python
+import pandas as pd
+
+# One-hot encoding — fine for low-cardinality categorical
+df = pd.get_dummies(df, columns=["device_type"], prefix="device")
+
+# Target encoding — must be computed using only training-fold data
+# to avoid leaking test-set information into the encoding itself.
+from sklearn.model_selection import KFold
+
+def target_encode_with_cv(df, cat_col, target_col, n_splits=5):
+    df = df.copy()
+    df[f"{cat_col}_target_enc"] = np.nan
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    for train_idx, val_idx in kf.split(df):
+        means = df.iloc[train_idx].groupby(cat_col)[target_col].mean()
+        df.loc[df.index[val_idx], f"{cat_col}_target_enc"] = (
+            df.iloc[val_idx][cat_col].map(means)
+        )
+    # Fill any category unseen in a given fold with the global mean
+    global_mean = df[target_col].mean()
+    df[f"{cat_col}_target_enc"].fillna(global_mean, inplace=True)
+    return df
+```
+
+### Aggregation Features
+
+Summarizing a set of related raw events into a single, informative numeric value — often the single highest-value category of feature engineering in real production systems:
+
+- **Counts**: "number of transactions in the last 7 days"
+- **Sums/Averages**: "total spend in the last 30 days," "average session length"
+- **Ratios**: "click-through rate over the last 90 days," "return rate"
+- **Recency**: "days since last purchase," "time since account creation"
+
+These aggregates require careful **time-window design** — a window too short misses meaningful signal (noisy, sparse), a window too long dilutes recent, more relevant behavior with stale history — and, critically, must respect **point-in-time correctness** (Chapter 13) to avoid leaking future information into a training example.
+
+### Interaction & Cross Features
+
+Sometimes the predictive signal lies not in individual features but in their combination — e.g., "user's preferred category" crossed with "time of day" might reveal that a user browses electronics in the evening but groceries in the morning, a pattern neither feature captures alone. Feature crosses can be manually engineered (multiplying or concatenating two features) or learned automatically by sufficiently expressive models (deep neural networks, gradient boosted trees) — a key trade-off in feature engineering effort vs. model complexity that we'll revisit when comparing classical ML to deep learning approaches.
+
+```python
+# Manual interaction feature: category preference x time-of-day bucket
+df["category_x_timeofday"] = df["preferred_category"] + "_" + df["time_of_day_bucket"]
+```
+
+## Handling Missing Data
+
+Missing values are a fact of life in production data (Chapter 10). Common strategies, in increasing order of sophistication:
+
+1. **Drop rows/columns** with missing values — simplest, but wasteful and can introduce bias if missingness isn't random (e.g., users who skip a field might systematically differ from those who don't).
+2. **Simple imputation**: fill with the mean/median/mode, or a sentinel value (e.g., -1) that the model can learn to treat specially.
+3. **Model-based imputation**: predict the missing value from other available features using a separate model.
+4. **Missingness as a signal**: add a binary "was this field missing" indicator feature alongside the imputed value — often more informative than the specific imputed value itself, since *why* something is missing can itself be predictive (e.g., a user who didn't provide their income might systematically differ from one who did).
+
+## Feature Selection
+
+More features aren't always better — irrelevant or redundant features increase training time, serving latency, storage cost, and can even hurt model performance (especially for models sensitive to the curse of dimensionality). Common approaches:
+
+- **Filter methods**: rank features by a statistical measure (correlation with target, mutual information) independent of any specific model, and keep the top-K.
+- **Wrapper methods**: iteratively add/remove features based on actual model performance (e.g., recursive feature elimination) — more accurate but computationally expensive.
+- **Embedded methods**: feature importance emerges naturally from the model itself during training (e.g., L1/Lasso regularization driving irrelevant feature weights to zero, or tree-based feature importance scores).
+
+## Key Takeaways
+
+- A good feature must score well not just on offline predictive power, but on serving-time availability, freshness, and robustness to missing/malformed data.
+- Core techniques include normalization/scaling, categorical encoding (one-hot, target encoding, embeddings), aggregation over time windows, and interaction/cross features.
+- Missing data should be handled deliberately — simple imputation, model-based imputation, or (often most valuable) an explicit "missingness" indicator feature.
+- Feature selection matters because more features aren't automatically better — irrelevant features cost latency, storage, and can hurt model performance.
+
+---
+
+## Interview Questions
+
+**1. What criteria determine whether a feature is actually usable in a production ML system, beyond its offline predictive power?**
+Availability at serving time (can the exact same feature value be computed at inference time, not just during offline training), freshness requirements (does it update quickly enough to remain useful), and robustness (does it degrade gracefully rather than break when underlying raw data is missing or delayed). A feature with excellent offline predictive power that can't be reliably computed in the production serving path is not a usable feature, regardless of how promising it looks in an offline notebook analysis.
+*Follow-up: Give an example of a feature that might look highly predictive offline but fail the "availability at serving time" test.*
+A feature computed using data that's only available with a significant delay in production — for example, "whether the user's payment was successfully settled," which might be known within seconds in a batch reconciliation job run hours later, but is completely unavailable in real time at the moment a fraud model needs to make an instant decision during checkout, making it offline-predictive but practically unusable for real-time serving.
+
+**2. Why is standardization (z-score normalization) generally preferred over min-max scaling when a feature has significant outliers?**
+Min-max scaling maps a feature to a fixed range based on its observed minimum and maximum values, so a single extreme outlier can compress the vast majority of "normal" values into a very narrow sub-range near one end of the scale, reducing the model's ability to meaningfully discriminate between them; standardization uses the mean and standard deviation, which are less sensitive (though still not immune) to individual extreme outliers, generally preserving more useful spread among the bulk of normal-range values.
+*Follow-up: What would you do if a feature has both significant outliers and a clear business reason to cap them (e.g., transaction amount)?*
+Apply an explicit, business-justified cap or clipping threshold (e.g., capping transaction amount at a reasonable percentile like the 99th, treating anything above as the capped value) before standardizing, which combines domain knowledge about what constitutes a realistic value with the numerical stability benefits of standardization, rather than relying on standardization alone to handle the outliers implicitly.
+
+**3. Why is target encoding more prone to data leakage than one-hot encoding, and how do you mitigate this risk?**
+Target encoding directly uses the target/label variable to compute each category's encoded value (e.g., "average conversion rate for this ZIP code"), so if this is computed using the entire dataset (including validation/test data) rather than only training data, information about the target leaks into the feature in a way that inflates offline evaluation metrics without reflecting genuine, generalizable predictive power. One-hot encoding, by contrast, only uses the categorical value itself, with no dependency on the target variable, so it carries no equivalent leakage risk.
+*Follow-up: Walk through why a naive, non-cross-validated target encoding would specifically inflate a model's offline validation accuracy.*
+If you compute each category's target encoding using the full dataset (including the validation set) before splitting into train/validation, the validation set's own target values have directly influenced the encoded feature value it will be evaluated against — effectively leaking the answer into the input feature for validation examples — causing the model to appear far more accurate on validation than it would actually be on genuinely unseen production data, since production examples won't have had their true target value baked into their encoding.
+
+**4. When would you choose to add features via manual crosses/interactions versus relying on a model architecture that can learn interactions automatically?**
+Manual feature crosses are valuable when you have strong domain knowledge about a specific, meaningful interaction (e.g., "time of day crossed with day of week" for a traffic prediction model) and are using a simpler model (like linear/logistic regression) that can't automatically discover non-linear interactions on its own; more expressive models (deep neural networks, gradient boosted trees) can often learn useful interactions automatically from raw individual features, reducing the need for exhaustive manual feature crossing, though explicitly engineering a known important interaction can still help even sophisticated models learn it faster and more reliably with less data.
+*Follow-up: What's the risk of manually creating too many interaction features, especially for high-cardinality categorical variables?*
+Crossing two high-cardinality categorical features (e.g., a million users crossed with a million products) creates a combinatorially exploding number of possible interaction values, most of which will be extremely sparse (seen only a handful of times, if at all, in the training data) — this both dramatically increases feature dimensionality/storage cost and provides very little statistically reliable signal per interaction value, since there's rarely enough data per specific combination to learn a meaningful, generalizable pattern.
+
+**5. Why might adding a "missingness indicator" feature alongside an imputed value be more valuable than the imputation itself?**
+The fact that a value is missing can itself carry predictive signal independent of what the imputed replacement value happens to be — for example, a loan applicant who declines to report their income might systematically differ in creditworthiness from one who reports a specific (even if low) income, and a simple mean-imputed value alone would erase this distinction, treating both cases identically; an explicit binary "was this field missing" feature preserves this potentially informative distinction for the model to learn from.
+*Follow-up: Is there a scenario where adding a missingness indicator could actually hurt model performance or introduce bias?*
+Yes — if the missingness pattern itself correlates with a protected or sensitive attribute in a way that isn't a legitimate business signal (e.g., a demographic group is more likely to skip a certain field due to unrelated factors like lower internet literacy or distrust, not creditworthiness), the missingness indicator could inadvertently let the model learn and act on a proxy for that sensitive attribute, raising fairness concerns that would need to be assessed as part of the bias auditing process covered in Chapter 25.
+
+**6. How would you decide the right time-window length for an aggregation feature like "transaction count in the last N days"?**
+Balance signal density against staleness/relevance: a very short window (e.g., last hour) may be too sparse and noisy to produce a statistically reliable aggregate for lower-activity users, while a very long window (e.g., last year) risks diluting recent, more behaviorally relevant patterns with stale history that may no longer reflect the user's current behavior; the right choice is typically validated empirically by testing several window lengths (or multiple parallel windows, like 7-day, 30-day, and 90-day versions of the same aggregate) and measuring which contributes most to offline model performance, rather than choosing an arbitrary window based on intuition alone.
+*Follow-up: Why might a model benefit from including multiple versions of the same aggregate at different window lengths, rather than picking just one?*
+Different window lengths capture different aspects of behavior — a short window captures immediate, recent activity/momentum, while a longer window captures more stable, baseline behavioral patterns — and a sufficiently expressive model (e.g., gradient boosted trees) can learn to combine signal from both time horizons (e.g., "recent activity is unusually high relative to the long-term baseline" is itself informative), which a single fixed window length can't represent on its own.
+
+**7. What's the "curse of dimensionality," and how does it relate to feature selection decisions?**
+As the number of features (dimensions) in a dataset grows, the volume of the feature space grows exponentially, meaning the available training data becomes increasingly sparse relative to that space — models need exponentially more data to reliably learn patterns as dimensionality increases, and distance-based methods in particular (like k-NN) become less meaningful since all points start to appear roughly equidistant from each other in very high-dimensional space. This directly motivates feature selection: including many irrelevant or redundant features doesn't just add computational cost, it can genuinely degrade a model's ability to learn generalizable patterns from a fixed amount of training data.
+*Follow-up: Are all model types equally susceptible to the curse of dimensionality?*
+No — distance-based and simpler linear models tend to be more susceptible, since they rely more directly on the geometric structure of the feature space; tree-based models (like gradient boosted trees) and deep neural networks with appropriate regularization are generally more robust to a larger number of features, since they can implicitly perform a degree of feature selection or dimensionality reduction internally (e.g., trees naturally ignore uninformative features during splitting, and neural networks can learn to down-weight irrelevant input dimensions), though they're not entirely immune to the problem either, especially with limited training data.
+
+**8. Why is it important to fit a feature scaler (like StandardScaler) only on training data, and not on the full dataset including validation/test data?**
+Fitting the scaler on the full dataset means the computed mean and standard deviation are influenced by validation/test set values, which the model shouldn't have any knowledge of during training — this is a subtle form of data leakage that can make offline validation metrics overly optimistic, since the scaling parameters themselves have "seen" information from the data used to evaluate the model, not reflecting how the model would perform on genuinely unseen production data whose statistics weren't used to fit the scaler at all.
+*Follow-up: How does this same principle extend to the production serving environment, beyond just the train/validation split?*
+The exact same scaler (with its parameters fitted only on the original training data) must be saved/persisted and reused unchanged at serving time to transform incoming production features — you should never re-fit or recompute scaling parameters based on live production data, since doing so would mean the same raw feature value could be scaled differently in production than it was during training, silently introducing a training-serving skew (Chapter 15) even though the raw feature computation itself might otherwise be correct and consistent.
+
+**9. How would you handle a categorical feature with very high cardinality (e.g., 10 million unique product IDs) in a deep learning-based ranking system?**
+One-hot encoding is infeasible at this cardinality (it would create a 10-million-dimensional sparse vector per example); instead, use a learned embedding layer that maps each product ID to a dense, lower-dimensional vector (e.g., 32 or 64 dimensions) that's trained jointly with the rest of the model, letting the model discover a compact, meaningful representation of product similarity through the training process itself, rather than manually engineering that structure — this is the standard approach in modern deep learning-based recommendation and ranking systems, covered in depth in Chapter 14.
+*Follow-up: What happens to this embedding-based approach when a brand-new product ID appears that wasn't seen during training?*
+This is the classic embedding cold-start problem — a new product ID has no learned embedding yet, so a fallback strategy is needed, such as initializing new IDs with a default/average embedding, using embeddings derived from the product's content attributes (e.g., text description or category) rather than purely from its ID, or falling back to a simpler, non-personalized ranking signal until sufficient interaction data accumulates to learn a meaningful ID-based embedding for that new product.
+
+**10. What's the difference between a filter method, a wrapper method, and an embedded method for feature selection?**
+Filter methods rank and select features based on a statistical measure (like correlation with the target or mutual information) computed independently of any specific model, making them fast but potentially missing feature interactions that only matter in combination; wrapper methods iteratively test subsets of features using actual model performance as the selection criterion (e.g., recursive feature elimination), which is more accurate but computationally expensive since it requires repeatedly retraining the model; embedded methods derive feature importance as a natural byproduct of the model training process itself (e.g., L1 regularization zeroing out irrelevant feature coefficients, or tree-based feature importance scores), offering a practical middle ground between the speed of filter methods and the model-awareness of wrapper methods.
+*Follow-up: Which approach would you choose for an initial, quick feature selection pass on a dataset with thousands of candidate features, and why?*
+I'd start with a filter method for an initial, cheap first pass to quickly eliminate clearly irrelevant or redundant features (e.g., near-zero variance features, or features with negligible correlation/mutual information with the target) at minimal computational cost, then apply a more expensive wrapper or embedded method on the remaining, already-narrowed-down candidate set to make finer-grained selection decisions — this staged approach balances the speed needed to handle a very large initial feature space with the accuracy benefits of model-aware selection methods on the more manageable remaining subset.
+
+**11. Why is "predictive power" alone an insufficient criterion for deciding whether to include a feature in a production model?**
+A feature can show strong predictive power in an offline evaluation while still being problematic for production use for several other reasons discussed in this chapter: it might not be reliably available at serving time, it might introduce excessive latency to compute in real time, it might rely on a data source with poor reliability/freshness guarantees, or it might inadvertently encode a legally or ethically problematic proxy for a protected attribute (a fairness concern covered in Chapter 25) — a comprehensive feature evaluation must weigh predictive power against these practical and ethical production constraints together, not in isolation.
+*Follow-up: How would you structure a feature evaluation process to systematically weigh these multiple criteria rather than just optimizing for offline predictive power?*
+Establish an explicit feature evaluation checklist or scorecard that requires assessing predictive power alongside serving-time availability, latency cost, data source reliability, and fairness/proxy-variable risk for every candidate feature before it's approved for production use — making these considerations a required, structured part of the feature review process rather than an afterthought that only surfaces if a feature happens to cause a problem after it's already been deployed.
+
+**12. How does feature engineering differ in importance and approach between classical ML models (like gradient boosted trees) and deep learning models?**
+Classical ML models like gradient boosted trees generally benefit significantly from careful, manual feature engineering (well-designed aggregates, interaction features, thoughtful encoding) since they don't automatically learn hierarchical or highly non-linear representations from raw, unprocessed inputs the way deep learning can; deep learning models, particularly with sufficient training data, can often learn useful feature representations directly from relatively raw inputs (e.g., learning embeddings from raw categorical IDs, or learning relevant patterns directly from raw text/image/sequence data), reducing (though rarely eliminating entirely) the need for extensive manual feature engineering, shifting more of the effort toward architecture design and having sufficient data volume instead.
+*Follow-up: Does this mean feature engineering effort should be deprioritized when working with deep learning models? Why or why not?*
+Not entirely — while deep learning reduces the need for certain kinds of manual feature engineering (especially around raw representation learning), well-designed aggregate and domain-specific features (like the "transaction count in last 30 days" example from earlier) still often provide meaningful additional signal that a deep model might struggle to learn purely from raw event-level data alone, especially with limited training data; in practice, many strong production deep learning systems still combine learned representations (embeddings) with carefully engineered aggregate features as complementary, not competing, sources of signal.
+
+**13. What's a practical risk of using mean/median imputation for missing values without also considering whether the missingness is random?**
+If missingness isn't random (technically termed "not missing at random") — for example, higher-income users being more likely to decline to report their income — replacing all missing values with the overall population mean can introduce systematic bias, since the true (unobserved) values for that subgroup likely differ meaningfully from the overall population average being imputed; this can distort the model's learned relationships specifically for the subgroup with non-random missingness patterns, rather than simply adding random, unbiased noise as naive imputation approaches implicitly assume.
+*Follow-up: How would you investigate whether missingness in a specific feature is random or systematically related to other variables?*
+Compare the distribution of other available features (and, if possible, the target variable) between the group of examples with the value present versus the group with it missing — if these groups look statistically similar across other measured characteristics, missingness is more likely close to random; if they differ meaningfully (e.g., the "missing income" group has systematically different spending patterns or account tenure), that's evidence of non-random missingness that a simple mean imputation would mishandle, warranting either the missingness-indicator approach or a more careful, subgroup-aware imputation strategy.
+
+**14. If you were reviewing a colleague's proposed feature for a production model and it required a raw data join against a table that's only updated weekly, what questions would you ask before approving it?**
+I'd ask what the actual freshness requirement is for the use case this feature supports — if weekly freshness is genuinely acceptable for the business context (e.g., a feature for a monthly retraining cycle of a slow-changing model), it's fine as-is; but if the feature is intended for a real-time, latency-sensitive serving path (e.g., fraud detection needing current-day information), a weekly-updated source would introduce unacceptable staleness, and I'd push back and ask whether a more frequently updated source is available or whether this specific proposed feature is even appropriate for that use case given its inherent freshness ceiling.
+*Follow-up: What follow-up question would you ask about how this feature would be computed consistently between training and serving, given its weekly-refreshed source?*
+I'd ask exactly how the training pipeline captures point-in-time-correct historical snapshots of this weekly-refreshed table (to avoid leaking future information into past training examples, per the point-in-time correctness concept referenced in this chapter) and confirm that the serving-time lookup for this feature pulls from the same underlying weekly-refreshed source using identical logic, to rule out a training-serving skew risk before approving the feature for production use.
+
+**15. How would you explain, in a system design interview, why feature engineering deserves its own dedicated design discussion rather than being treated as a minor implementation detail?**
+I'd explain that feature engineering is often the highest-leverage lever for improving a production model's real-world performance — frequently having more impact on final accuracy than model architecture choice alone — while also being the layer where the most consequential and hardest-to-debug production risks (training-serving skew, data leakage, missing-data handling, availability constraints) are introduced; treating it as a minor detail risks both under-investing in the improvements with the highest expected return, and under-designing the exact area most likely to silently break a production system in ways that are difficult to trace back to their root cause.
+*Follow-up: How would you prioritize your limited design discussion time in an interview between feature engineering and model architecture, given this?*
+I'd allocate meaningfully more discussion time to feature engineering and the surrounding data/serving-consistency concerns than to model architecture specifics, briefly justifying a reasonable model choice (following the "baseline to advanced" progression from Chapter 2) while spending proportionally more time discussing which features matter most, how they'd be computed consistently between training and serving, and how missing or delayed data would be handled — reflecting the real-world proportion of engineering effort and risk these two areas actually represent in production ML systems.

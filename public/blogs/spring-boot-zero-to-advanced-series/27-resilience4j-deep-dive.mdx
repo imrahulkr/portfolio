@@ -1,0 +1,256 @@
+---
+title: "Resilience4j Deep Dive: Circuit Breaker, Retry, Bulkhead & Rate Limiter"
+description: "Discovery finds a service; the gateway routes to it — but neither protects you when that service is actually slow or failing. This chapter covers what does: the resilience patterns every inter-service call needs."
+date: "2026-09-14"
+readTime: "13 min read"
+series: "spring-boot"
+part: 27
+tags: ["Spring Boot", "Resilience4j", "Microservices", "Circuit Breaker"]
+---
+
+Chapter 26 closed on the exact gap this chapter fills: none of the infrastructure so far protects a service from a downstream dependency that's slow, failing, or completely unreachable. In a monolith, a method call either works or throws — over a network, it can also hang indefinitely, partially succeed, or fail intermittently under load. Resilience4j is the standard Spring Boot answer.
+
+## Why "just add a try/catch" isn't enough
+
+```java
+// Naive — doesn't protect against a slow (not just failing) dependency,
+// and retries a failing call indefinitely with no backoff
+InventoryResponse response;
+try {
+    response = inventoryClient.checkStock(productId);
+} catch (Exception e) {
+    response = InventoryResponse.unavailable();
+}
+```
+
+This handles an immediate exception, but not a call that hangs for 30 seconds before failing — during which the calling service's own threads are tied up waiting, potentially exhausting its own resources and becoming unhealthy *itself*, purely because a downstream dependency is struggling. This cascading failure pattern is exactly what Resilience4j's patterns exist to prevent.
+
+## The Circuit Breaker
+
+```xml
+<dependency>
+    <groupId>io.github.resilience4j</groupId>
+    <artifactId>resilience4j-spring-boot3</artifactId>
+</dependency>
+```
+
+```java
+@Service
+class InventoryClient {
+
+    @CircuitBreaker(name = "inventoryService", fallbackMethod = "fallbackStock")
+    InventoryResponse checkStock(Long productId) {
+        return webClient.get()
+            .uri("http://inventory-service/api/inventory/{id}", productId)
+            .retrieve()
+            .bodyToMono(InventoryResponse.class)
+            .block();
+    }
+
+    InventoryResponse fallbackStock(Long productId, Exception ex) {
+        return InventoryResponse.unavailable();   // graceful degradation, not a hung request
+    }
+}
+```
+
+```yaml
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventoryService:
+        sliding-window-size: 20
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 5
+```
+
+A circuit breaker has three states, directly modeled on the electrical analogy it's named after:
+
+```
+        failure rate exceeds threshold
+   CLOSED ─────────────────────────────▶ OPEN
+     ▲     (calls flow normally,              │
+     │      failures are counted)             │ wait-duration-in-open-state elapses
+     │                                          ▼
+     │                                    HALF-OPEN
+     │                                    (a limited number of
+     └────────────────────────────────────  trial calls allowed
+       enough trial calls succeed             through)
+```
+
+- **CLOSED** — normal operation; calls pass through, and failures are tracked over a sliding window.
+- **OPEN** — once the failure rate exceeds the threshold, the circuit "trips": calls **fail immediately** without even attempting the network call, invoking the fallback instead. This is the core insight — once a dependency is known to be failing, stop hammering it (which would only make its recovery harder) and fail fast instead.
+- **HALF-OPEN** — after `wait-duration-in-open-state`, a limited number of trial calls are allowed through to test whether the dependency has recovered. Enough successes closes the circuit again; continued failures reopen it.
+
+## Retry — for genuinely transient failures
+
+```java
+@Retry(name = "inventoryService", fallbackMethod = "fallbackStock")
+@CircuitBreaker(name = "inventoryService", fallbackMethod = "fallbackStock")
+InventoryResponse checkStock(Long productId) {
+    return webClient.get()
+        .uri("http://inventory-service/api/inventory/{id}", productId)
+        .retrieve()
+        .bodyToMono(InventoryResponse.class)
+        .block();
+}
+```
+
+```yaml
+resilience4j:
+  retry:
+    instances:
+      inventoryService:
+        max-attempts: 3
+        wait-duration: 500ms
+        exponential-backoff-multiplier: 2   # 500ms, 1000ms, 2000ms between attempts
+```
+
+Retry is appropriate specifically for **transient** failures — a brief network blip, a momentary spike causing one request to fail — not for a dependency that's genuinely, persistently down, where retrying just adds load to an already-struggling service. This is exactly why `@Retry` and `@CircuitBreaker` are commonly combined: retry handles the brief, transient case, and the circuit breaker handles the sustained-failure case by stopping the retries (and everything else) from continuing to hit a service that's clearly not recovering.
+
+## Bulkhead — isolating failure to one dependency
+
+```java
+@Bulkhead(name = "inventoryService", type = Bulkhead.Type.THREADPOOL)
+InventoryResponse checkStock(Long productId) { }
+```
+
+```yaml
+resilience4j:
+  thread-pool-bulkhead:
+    instances:
+      inventoryService:
+        max-thread-pool-size: 10
+        core-thread-pool-size: 5
+        queue-capacity: 20
+```
+
+Named after a ship's bulkheads — compartments that stop one section flooding from sinking the whole vessel — a bulkhead limits how many concurrent calls (or how many threads) can be used for calls to one specific dependency. Without it, a single slow dependency can exhaust an entire shared thread pool, starving calls to every *other*, perfectly healthy dependency too. With a bulkhead, `inventoryService` calls are confined to their own limited pool — if it's exhausted, subsequent calls fail fast, but calls to `paymentService` on a separate bulkhead are entirely unaffected.
+
+```
+Without a bulkhead:                    With a bulkhead:
+┌─────────────────────┐               ┌───────┐  ┌───────┐
+│   Shared thread pool   │             │inventory│  │payment │
+│  (inventory calls hang, │             │  pool   │  │  pool  │
+│   exhausting threads    │             │(isolated)│ │(isolated)│
+│   payment calls need    │             └───────┘  └───────┘
+│   too — both fail)      │             inventory failure has
+└─────────────────────┘               zero effect on payment
+```
+
+## Rate Limiter and Time Limiter
+
+```java
+@RateLimiter(name = "inventoryService")
+@TimeLimiter(name = "inventoryService")
+CompletableFuture<InventoryResponse> checkStockAsync(Long productId) { }
+```
+
+```yaml
+resilience4j:
+  timelimiter:
+    instances:
+      inventoryService:
+        timeout-duration: 2s
+```
+
+`@TimeLimiter` enforces a maximum wait time for an async call, converting a hang into a defined, fast failure — critical because a circuit breaker's failure-rate calculation depends on failures actually being *detected*, which a call that simply never returns would prevent entirely. `@RateLimiter` (distinct from the gateway-level one in Chapter 26) caps how many calls *this specific service* makes to a dependency, protecting that dependency from being overwhelmed by its callers.
+
+## Best practices & gotchas
+
+- **Combine patterns deliberately, not all of them everywhere.** `@Retry` + `@CircuitBreaker` + `@TimeLimiter` on a call to a genuinely unreliable external dependency is reasonable; the same stack on a call to a highly reliable internal service adds complexity with little benefit.
+- **Always define a fallback, and make it genuinely useful, not just "return null."** A fallback returning a clearly marked "unavailable" state that calling code can meaningfully handle is far better than one that silently returns something that looks like valid data.
+- **A fallback method's signature must match the protected method's, plus a `Throwable`/`Exception` parameter** — this is a common, easy-to-miss configuration mistake that causes the fallback to silently not be applied.
+- **Bulkheads matter most for genuinely independent dependencies sharing infrastructure.** If `inventoryService` and `paymentService` calls share one thread pool, a bulkhead per dependency is what actually delivers fault isolation between them.
+- **Retrying a non-idempotent operation (like "charge this payment") without care can cause duplicate side effects.** Retry logic needs to be paired with idempotency (an idempotency key sent with the request, so the receiving service can recognize and deduplicate a retried attempt) for anything beyond safe, read-only operations.
+
+## Quick reference
+
+| Pattern | Protects against |
+|---|---|
+| Circuit Breaker | Continuing to call a dependency that's clearly failing |
+| Retry | Brief, transient failures — not sustained outages |
+| Bulkhead | One failing dependency exhausting shared resources needed by others |
+| Time Limiter | A call hanging indefinitely instead of failing fast |
+| Rate Limiter | Overwhelming a dependency with too many calls from this service |
+
+## Wrapping up
+
+None of these patterns make a network call as reliable as a local method call — they make failure *contained, fast, and observable* instead of cascading silently into a wider outage. **Chapter 28** covers the actual mechanics of making these inter-service calls in the first place: `WebClient`/`RestClient`, OpenFeign, and a brief look at gRPC.
+
+## Interview Questions
+
+**1. Why isn't a simple try/catch around a network call sufficient for handling failures from a downstream service?**
+A try/catch only handles a call that has already thrown an exception — it does nothing about a call that's slow or hangs without ever throwing, during which the calling thread remains blocked and tied up. Under sustained load, many such hung calls can exhaust the calling service's own thread pool, making the caller itself unhealthy purely as a side effect of a downstream dependency's slowness, a cascading failure pattern a bare try/catch provides no protection against at all.
+
+*Follow-up: Which specific Resilience4j pattern most directly addresses the "hangs without ever throwing" scenario?* The Time Limiter — it enforces a maximum wait duration for an async call and converts a hang into a defined, prompt failure, which is also a prerequisite for other patterns like the circuit breaker to work correctly at all, since a circuit breaker's failure-rate tracking depends on failures being detected in a timely manner rather than a call that simply never resolves.
+
+**2. What are the three states of a circuit breaker, and what triggers the transition between each?**
+CLOSED (normal operation, calls flow through and failures are tracked over a sliding window) transitions to OPEN once the tracked failure rate exceeds a configured threshold. OPEN (calls fail immediately without attempting the real call at all) transitions to HALF-OPEN once a configured wait duration elapses. HALF-OPEN (a limited number of trial calls are allowed through) transitions back to CLOSED if enough of those trial calls succeed, or back to OPEN if they continue failing.
+
+*Follow-up: Why does the circuit breaker fail calls immediately while OPEN, rather than continuing to attempt the real call and just catching more failures?* Continuing to send real calls to a dependency that's already known to be failing adds more load to a service that's likely already struggling, potentially making its recovery harder or slower — failing fast while OPEN protects the downstream dependency from being further overwhelmed, and also protects the calling service's own resources (threads, connections) from being wasted on calls very likely to fail anyway.
+
+**3. Why does the HALF-OPEN state only allow a limited number of trial calls through, rather than immediately going back to fully normal operation?**
+Allowing only a small number of trial calls limits the risk if the dependency hasn't actually recovered yet — if it immediately went back to full traffic and the dependency was still struggling, that full traffic could immediately overwhelm it again, causing the circuit to flap open and closed rapidly. A small number of trial calls provides a safer, lower-risk way to test recovery before committing to full traffic again.
+
+*Follow-up: What would you expect to happen if, during HALF-OPEN, some trial calls succeed and some fail — how is the decision to close or reopen made?* The decision is based on the configured success/failure ratio among the specific number of permitted trial calls (`permitted-number-of-calls-in-half-open-state`) — if the proportion of successes among those trial calls meets the configured threshold, the circuit closes and normal traffic resumes; if the failure rate among the trial calls still exceeds the threshold, the circuit reopens and the wait period begins again before another half-open trial is attempted.
+
+**4. Why is Retry specifically appropriate for transient failures but not for sustained outages?**
+A transient failure — a brief network blip, a momentary resource spike — is likely to resolve on its own within a short time, so a retry after a brief wait has a real chance of succeeding. A sustained outage means the dependency is persistently unavailable, so retrying repeatedly against it doesn't meaningfully increase the chance of success and instead adds unnecessary additional load to an already-struggling dependency, potentially making its situation worse rather than better.
+
+*Follow-up: Why is `@Retry` commonly combined with `@CircuitBreaker` rather than used alone?* The circuit breaker's failure-rate tracking provides the mechanism that distinguishes "still a transient issue, keep retrying" from "this has become a sustained outage, stop trying entirely" — combining them lets retry handle brief transient blips while the circuit breaker takes over and stops all further attempts (retried or otherwise) once the failure pattern indicates a genuine, sustained problem rather than a passing one.
+
+**5. Why does exponential backoff matter for retry configuration, rather than retrying immediately and repeatedly at a fixed interval?**
+Retrying immediately and repeatedly at a fixed, short interval can itself contribute to overwhelming a struggling dependency — especially if many calling instances are all retrying simultaneously — potentially making a brief issue worse or preventing the dependency from recovering. Exponential backoff spaces out successive retry attempts with increasing delay, reducing the added load on the dependency with each subsequent attempt and giving it more room to recover between attempts.
+
+*Follow-up: What additional problem can occur if many different calling service instances are all retrying the same failing dependency with the exact same backoff timing, and how is it typically addressed?* This can create a "thundering herd" effect, where all the retrying instances happen to retry at the same synchronized moments, producing sharp, repeated spikes of load on the dependency rather than a smooth, spread-out retry pattern — this is typically addressed by adding "jitter," a small randomized variation to each instance's actual backoff delay, so retries from different instances become spread out over time rather than landing simultaneously.
+
+**6. What problem does a Bulkhead solve that a Circuit Breaker alone doesn't?**
+A circuit breaker protects against continuing to call a specific failing dependency, but doesn't prevent that dependency's calls (before the circuit trips, or during the trial calls in half-open) from consuming a disproportionate share of a *shared* resource — like a thread pool also used for calls to other, unrelated, healthy dependencies. A bulkhead isolates the resources (threads, concurrent call slots) allocated to each dependency, so one dependency's problems can't exhaust resources genuinely needed for calls to a completely different, healthy dependency.
+
+*Follow-up: In the ship analogy the pattern is named after, what does a "resource pool per dependency" correspond to?* Each dependency's dedicated thread pool (or concurrent-call limit) corresponds to one of a ship's separate watertight compartments — just as flooding in one compartment doesn't sink the whole ship because the compartments are sealed off from each other, exhaustion of one dependency's dedicated resource pool doesn't affect the separate, isolated resource pools allocated to other dependencies.
+
+**7. What's the difference between a `SEMAPHORE`-type bulkhead and a `THREADPOOL`-type bulkhead in Resilience4j?**
+A semaphore-based bulkhead limits the number of *concurrent calls* allowed on the calling thread itself (using a permit-based counter), without dedicating separate threads — it's lighter-weight but the calling thread still directly executes the call. A thread-pool-based bulkhead actually routes calls to a separate, dedicated thread pool for that specific dependency, providing stronger isolation (a slow call genuinely occupies a thread from its own isolated pool, not the caller's original thread) at the cost of the added overhead of thread pool management.
+
+*Follow-up: Which type would provide stronger protection against a slow, hanging call actually blocking the original calling thread, and why?* The `THREADPOOL` type — since the actual call executes on a separate, dedicated thread from that dependency's own pool, the original calling thread is freed to do other work (or handle other requests) rather than being directly blocked waiting on the potentially slow call itself, whereas a semaphore-based bulkhead's concurrency limiting still executes the call on the original calling thread.
+
+**8. Why is it important that a fallback method's signature match the protected method's, plus an additional exception parameter?**
+Resilience4j uses this signature-matching convention to determine, at startup, which fallback method corresponds to which protected method — if the signatures don't align correctly (wrong parameter types, missing the exception parameter, or a mismatched return type), Resilience4j may fail to wire the fallback correctly, silently resulting in the original exception propagating instead of the intended fallback executing, which can be a subtle, easy-to-miss configuration mistake.
+
+*Follow-up: What symptom would you observe in a running application if a fallback method's signature was configured incorrectly, causing this wiring to fail?* Calls to the protected method would still throw the original exception (or otherwise fail) exactly as if no fallback were configured at all, rather than gracefully degrading to the fallback's intended behavior — since the mismatch typically doesn't produce an obvious startup error in every case, this can go unnoticed until the failure scenario the fallback was meant to handle actually occurs in practice, at which point the expected graceful degradation doesn't happen.
+
+**9. Why is a fallback that "just returns null" or an empty object considered a poor practice compared to a fallback that returns a clearly-marked "unavailable" state?**
+Returning `null` or an empty object that looks structurally like valid data can cause calling code further downstream to mistake a failure/fallback scenario for a genuinely successful, normal result — leading to confusing behavior or silent incorrect data being processed as if everything succeeded. A clearly-marked "unavailable" state (a specific flag, status field, or dedicated response type) lets calling code deliberately detect and handle the degraded scenario explicitly, rather than being misled into treating it as ordinary success.
+
+*Follow-up: How might a poorly-designed fallback that returns an empty list, rather than an explicit "unavailable" indicator, cause a real user-facing bug?* A UI or downstream business logic checking "does this product have any stock available" against an empty list returned by a silent fallback could incorrectly conclude the product is genuinely out of stock (rather than "we couldn't determine stock status because the inventory service was unavailable") — potentially preventing a sale or displaying misleading information to a user, when the actual underlying issue was a transient service outage rather than a real, confirmed inventory shortage.
+
+**10. Why does retrying a non-idempotent operation (like charging a payment) require special care, beyond just adding `@Retry`?**
+If the original call actually succeeded on the backend (e.g., the payment was genuinely charged) but the response was lost or delayed in a way that made the caller believe it failed, a naive retry would resend the same charge request — potentially resulting in the customer being charged twice for what should have been a single logical operation, since the operation itself isn't safe to simply repeat.
+
+*Follow-up: How is this problem typically solved in a system that needs to safely retry non-idempotent operations like payments?* Via an idempotency key — a unique identifier generated once per logical operation and included with the request (and any of its retries) — allowing the receiving service to recognize that a request with the same idempotency key has already been processed, and safely return the original result again rather than performing the operation a second time, making the overall operation safe to retry even though the underlying action (charging a payment) isn't naturally idempotent on its own.
+
+**11. What's the relationship between the Rate Limiter covered in this chapter and the rate limiter covered at the API Gateway in Chapter 26?**
+They apply the same conceptual pattern (limiting the rate of calls/requests) but at different points and for different purposes: the gateway's rate limiter protects backend services from excessive traffic coming from *external clients*, while a `@RateLimiter` applied within a calling service (this chapter) limits how many calls *that specific service* makes outbound to one of its own dependencies, protecting that dependency from being overwhelmed by calls originating from within the system itself.
+
+*Follow-up: Could both be needed simultaneously in the same request's path, and if so, why wouldn't one alone be sufficient?* Yes — the gateway's rate limiter protects the overall system from excessive external client traffic in aggregate, while an internal service's own `@RateLimiter` on a specific downstream call protects that specific dependency even from traffic that's already passed the gateway's check but might still, in aggregate across many legitimate internal calls, exceed what that particular downstream dependency can safely handle; the two operate at different layers addressing different specific traffic-control needs, rather than one making the other redundant.
+
+**12. Why does the sliding window used for a circuit breaker's failure-rate calculation matter, and what's the difference between a count-based and time-based sliding window?**
+The sliding window determines what set of recent calls is used to calculate the current failure rate — a count-based window considers the last N calls regardless of how long they took to occur, while a time-based window considers all calls within the last N seconds/minutes regardless of how many that turns out to be. The choice affects how quickly and under what call-volume conditions the circuit breaker reacts to a changing failure pattern.
+
+*Follow-up: For a dependency called relatively infrequently (say, a handful of times per minute), which type of sliding window would likely provide a more meaningful failure-rate signal, and why?* A time-based window would likely be more meaningful, since a count-based window (say, the "last 20 calls") could span a very long, potentially misleading time period if calls are infrequent — mixing genuinely old, no-longer-relevant failure data together with recent behavior; a time-based window ensures the failure rate reflects a more consistent, recent time period regardless of exactly how many calls happened to occur within it.
+
+**13. Why should resilience patterns not be applied uniformly and maximally to every single inter-service call in a system?**
+Every pattern adds real configuration and conceptual complexity, and its value depends on the actual reliability characteristics and criticality of the specific dependency being called — applying a heavy stack of retry, circuit breaker, bulkhead, and rate limiter to a call to a highly reliable, low-latency internal service adds overhead and complexity without a meaningful corresponding benefit, since that dependency rarely if ever actually fails or behaves unpredictably in the ways these patterns are designed to protect against.
+
+*Follow-up: What characteristics of a specific dependency would make it a strong candidate for the full stack of resilience patterns?* A dependency that's external (outside your own team's operational control), historically less reliable or with variable latency, critical enough to the calling service's functionality that a failure needs graceful handling rather than an unhandled exception, and/or one where retrying is safe and could plausibly help (making it a genuine candidate for transient-failure retry) — a dependency matching several of these characteristics justifies the additional complexity of a comprehensive resilience configuration far more than one lacking them.
+
+**14. How do the resilience patterns covered in this chapter relate to the health checks and observability tools covered in Chapter 19?**
+Resilience patterns act automatically and immediately in response to individual call failures/slowness, while health checks and metrics (Chapter 19) provide the broader visibility needed to notice, diagnose, and respond to the underlying patterns those individual failures represent — for example, a circuit breaker tripping open is itself a valuable event worth exposing as a metric or health indicator, since a team should want to know when and how often their circuit breakers are actually tripping in production, not just rely on the automatic fallback silently handling it.
+
+*Follow-up: How would you specifically make a circuit breaker's state changes visible through the observability tooling from Chapter 19?* Resilience4j integrates with Micrometer (Chapter 19) out of the box, automatically exposing metrics like the current circuit breaker state, failure rate, and number of calls in each state — these can be scraped via `/actuator/prometheus` and visualized/alerted on in a monitoring dashboard, letting a team notice a circuit breaker tripping open in production as a genuine, actionable operational signal rather than just an invisible, automatic fallback happening silently behind the scenes.
+
+**15. Summarize how the four main Resilience4j patterns covered in this chapter work together in a single, well-protected inter-service call.**
+A Time Limiter ensures the call fails fast rather than hanging indefinitely; a Retry attempts a small number of additional tries with backoff specifically for brief, transient failures; a Circuit Breaker tracks the aggregate failure rate over time and stops sending calls entirely (invoking a fallback immediately) once the dependency is clearly, persistently failing rather than just occasionally blipping; and a Bulkhead ensures that whatever resources (threads, concurrent call slots) this specific dependency's calls consume are isolated from the resources needed for calls to other, unrelated dependencies — together providing fast failure detection, appropriate handling of both transient and sustained failure modes, and containment of the failure's impact to just the affected dependency.
+
+*Follow-up: In what order would these patterns typically be evaluated/applied for a single call, and why does that order make sense?* A common composition applies the Bulkhead first (limiting/queuing entry into the protected call at all), then the Circuit Breaker (deciding whether to even attempt the call or fail fast to the fallback immediately), then the Time Limiter and Retry around the actual call execution itself — this ordering makes sense because it's more efficient to reject excess concurrent load (bulkhead) or an already-known-failing dependency (circuit breaker) before even attempting the more granular, per-call machinery of timing out and retrying an individual attempt that a bulkhead or open circuit would have prevented from executing at all.

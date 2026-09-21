@@ -1,0 +1,148 @@
+---
+title: "Polymorphism: Overloading vs. Overriding"
+description: "Compile-time (static) vs runtime (dynamic) polymorphism, method overloading resolution rules, dynamic method dispatch, and the virtual method table."
+series: "java-zero-to-advanced"
+seriesTitle: "Java: Zero to Advanced"
+part: "Object-Oriented Programming"
+chapter: 11
+totalChapters: 65
+slug: "polymorphism"
+javaVersion: "21"
+difficulty: "intermediate"
+tags: ["java", "oop", "polymorphism"]
+publishedAt: "2026-09-14"
+updatedAt: "2026-09-14"
+draft: true
+interviewQuestionCount: 13
+---
+
+## Two Kinds of Polymorphism
+
+Java has **compile-time (static) polymorphism** via method overloading, and **runtime (dynamic) polymorphism** via method overriding. They're resolved at completely different times and are frequently confused with each other in interviews.
+
+## Method Overloading — Resolved at Compile Time
+
+Overloading means multiple methods in the same class share a name but differ in parameter list (type, number, or order of parameters).
+
+```java
+public class Calculator {
+    public int add(int a, int b) { return a + b; }
+    public double add(double a, double b) { return a + b; }
+    public int add(int a, int b, int c) { return a + b + c; }
+}
+```
+
+The compiler decides **which overload to call based on the static (declared) types of the arguments**, at compile time — no runtime object information is involved.
+
+```java
+Calculator calc = new Calculator();
+calc.add(2, 3);        // calls add(int, int)
+calc.add(2.0, 3.0);    // calls add(double, double)
+calc.add(2, 3, 4);     // calls add(int, int, int)
+```
+
+## Method Overriding — Resolved at Runtime
+
+Overriding means a subclass provides its own implementation of an *inherited* method with an identical signature. Which implementation actually runs is decided **at runtime**, based on the object's actual (runtime) type — this is called **dynamic method dispatch**.
+
+```java
+public class Animal {
+    public void makeSound() { System.out.println("Some generic sound"); }
+}
+
+public class Dog extends Animal {
+    @Override
+    public void makeSound() { System.out.println("Woof!"); }
+}
+
+public class Cat extends Animal {
+    @Override
+    public void makeSound() { System.out.println("Meow!"); }
+}
+```
+
+```java
+Animal a1 = new Dog();
+Animal a2 = new Cat();
+
+a1.makeSound();   // Woof! — determined by actual object type, not declared type
+a2.makeSound();   // Meow!
+```
+
+Even though both `a1` and `a2` are declared as `Animal`, the JVM looks at each object's *actual* runtime class to decide which `makeSound()` implementation to invoke. This is the essence of runtime polymorphism, and it's what makes code like `for (Animal a : animals) a.makeSound();` able to correctly invoke each animal's specific behavior without a chain of `instanceof` checks.
+
+![Diagram: virtual method table (vtable) for Dog pointing to Dog's makeSound, versus Animal's vtable pointing to Animal's makeSound, showing the JVM resolving a1.makeSound() through Dog's vtable at runtime](/diagrams/ch11-dynamic-dispatch-vtable.svg)
+
+## How the JVM Actually Does This: the vtable
+
+Internally, the JVM builds a **virtual method table** for each class — essentially an array of method pointers. When you call an overridable instance method, the JVM doesn't statically bake in which implementation to run; instead, it looks up the method in the *actual object's* vtable at the call site. This lookup has a small runtime cost compared to a direct (non-virtual) call, which is one reason `final` methods (which can't be overridden) can sometimes be inlined more aggressively by the JIT.
+
+## Overloading Resolution Rules and Ambiguity
+
+When multiple overloads could technically match, Java applies a strict phase-based resolution: first look for an exact match without any conversions, then allow widening primitive conversions, then allow autoboxing, then allow varargs. If two overloads are equally applicable after these phases, the compiler reports an **ambiguous method call** error.
+
+```java
+public void process(int x) { }
+public void process(long x) { }
+public void process(Integer x) { }
+
+process(5);   // calls process(int) — exact match wins over widening or boxing
+```
+
+## Overriding Rules Recap
+
+- Same method name and parameter list as the superclass method.
+- Return type must be the same or a covariant (subtype) of the original.
+- Cannot reduce visibility (can't override `public` with `protected`).
+- Cannot throw new or broader checked exceptions than the overridden method.
+- `static`, `private`, and `final` methods **cannot** be overridden — `static` methods are hidden (not overridden) if redeclared in a subclass, `private` methods aren't inherited at all, and `final` methods are explicitly locked from being changed.
+
+## Key Takeaways
+
+- Overloading is resolved by the compiler using declared (static) argument types; overriding is resolved by the JVM using the object's actual runtime type.
+- Dynamic method dispatch is what lets a superclass-typed reference invoke the correct subclass-specific behavior automatically.
+- `static`, `private`, and `final` methods cannot participate in overriding.
+- Ambiguous overload calls are a compile-time error, not a runtime one.
+
+---
+
+## Interview Questions
+
+**1. What is the fundamental difference between method overloading and method overriding?**
+Overloading is having multiple methods with the same name but different parameter lists within the same class, resolved entirely at compile time based on the declared types of the arguments. Overriding is a subclass replacing an inherited method's implementation while keeping the exact same signature, resolved at runtime based on the actual type of the object the method is called on.
+
+**2. What is dynamic method dispatch, and why does it matter for polymorphism?**
+It's the mechanism by which the JVM determines, at runtime, which actual method implementation to execute for an overridden method call, based on the real (runtime) type of the object rather than the declared (compile-time) type of the reference variable. It matters because it's what allows a single line like `animal.makeSound()` to correctly invoke `Dog`'s or `Cat`'s specific behavior depending on what object `animal` actually refers to at that moment, without the caller needing to know or check the concrete type.
+
+**3. Can `static` methods be overridden? What happens if a subclass declares a static method with the same signature as one in its superclass?**
+No — static methods belong to the class itself, not to instances, so there's no object to dynamically dispatch on. If a subclass declares a static method with an identical signature, it's called **method hiding**, not overriding: which version runs is determined at compile time based on the reference's declared type, not the object's runtime type — the opposite behavior of true overriding.
+
+**4. Why can't `private` methods be overridden?**
+Private methods aren't visible to subclasses at all (they can't even be called by name from a subclass), so there's no inherited method for a subclass to provide an alternative implementation of. If a subclass happens to declare a method with the identical signature, it's an entirely new, unrelated method — not an override.
+
+**5. Why can't `final` methods be overridden, and why might a class designer deliberately mark a method `final`?**
+`final` explicitly locks a method's implementation against being changed by any subclass, enforced by the compiler. A designer might do this to protect a critical invariant that depends on that exact behavior never changing — for example, a security check or a core algorithm step that subclasses should never be able to subtly alter.
+
+**6. What are the rules governing a valid method override with respect to the return type?**
+The override's return type must be either identical to the superclass method's return type, or a **covariant** subtype of it (i.e., a more specific type that's still assignment-compatible with the original). For example, a superclass method returning `Animal` can be overridden by a subclass method returning `Dog`, since `Dog` is-a `Animal`, but not the reverse.
+
+**7. Can an overriding method throw broader checked exceptions than the method it overrides?**
+No — an overriding method can throw the same checked exceptions, narrower/subtype checked exceptions, fewer of them, or none at all, but never a new or broader checked exception than what the superclass method declares. This preserves the guarantee that code calling the superclass method through a superclass reference won't be surprised by an unhandled checked exception type it didn't originally need to handle.
+
+**8. How does the compiler resolve which overloaded method to call when multiple overloads could technically apply?**
+It proceeds through phases in strict order: first, it looks for a match requiring no type conversion at all; if none is found, it allows widening primitive conversions; if still none, it allows autoboxing/unboxing; and finally it considers varargs methods. The first phase that produces exactly one applicable, most-specific match wins — if a phase produces more than one equally applicable match, the compiler reports an ambiguous method call error.
+
+**9. What is an example of an ambiguous overload call, and why does the compiler reject it rather than picking one arbitrarily?**
+If a class has both `process(Integer x)` and `process(long x)` and you call `process(5)` where `5` is an `int` literal, both are reachable via a single conversion (autoboxing to `Integer`, or widening to `long`) at the same resolution phase, with neither being more specific than the other — the compiler refuses to guess, since silently picking one could produce behavior the developer didn't intend, and instead flags it as a compile error requiring an explicit cast to disambiguate.
+
+**10. Why is the concept of a "virtual method table" (vtable) relevant to understanding overriding performance?**
+Every class has a vtable — effectively an array mapping method signatures to the implementation that applies for that class. Calling an overridable instance method involves a runtime lookup into the *actual object's* vtable rather than a fixed, statically-resolved address, which carries a small overhead compared to non-virtual calls. This is why the JIT compiler and language features like `final` (which prevents overriding) can enable more aggressive optimizations like inlining, since the exact implementation is then known ahead of time.
+
+**11. If a superclass reference variable points to a subclass object, which version of an overridden method gets called, and which version of a field gets accessed?**
+The overridden *method* is resolved dynamically based on the object's actual runtime type — the subclass's version runs. Fields, however, are **not** polymorphic in Java — field access is resolved statically based on the reference variable's *declared* type, not the object's actual type, which is a common interview trap (if a subclass "hides" a field with the same name, accessing it through a superclass-typed reference gets the superclass's field, not the subclass's).
+
+**12. Can constructors be overloaded? Can they be overridden?**
+Constructors can absolutely be overloaded (multiple constructors with different parameter lists, as covered in Chapter 8), but they can never be overridden, since they aren't inherited by subclasses at all — each class must define its own constructors, even if they simply delegate to the superclass via `super(...)`.
+
+**13. What's a real-world scenario where overriding enables cleaner code than a chain of `instanceof` checks would?**
+A payment processing system with a superclass `PaymentMethod` and subclasses `CreditCard`, `PayPal`, `BankTransfer`, each overriding a `process(amount)` method with their own logic. Code that processes a `List<PaymentMethod>` can simply call `payment.process(amount)` in a loop and let dynamic dispatch invoke the correct behavior for each concrete type — versus a fragile chain of `if (payment instanceof CreditCard) {...} else if (payment instanceof PayPal) {...}` that must be manually updated every time a new payment type is added.
