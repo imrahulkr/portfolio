@@ -18,10 +18,11 @@ export async function POST(request: Request) {
 
   // Inert until RECAPTCHA_SECRET_KEY is set (see components/home/contact.tsx —
   // the widget itself doesn't render without NEXT_PUBLIC_RECAPTCHA_SITE_KEY either).
+  // reCAPTCHA v3 is invisible and returns a 0-1 trust score instead of a pass/fail.
   const recaptchaSecret = process.env.RECAPTCHA_SECRET_KEY;
   if (recaptchaSecret) {
     if (!recaptchaToken) {
-      return NextResponse.json({ error: "Please complete the verification." }, { status: 400 });
+      return NextResponse.json({ error: "Please try again." }, { status: 400 });
     }
     const verifyRes = await fetch("https://www.google.com/recaptcha/api/siteverify", {
       method: "POST",
@@ -29,7 +30,8 @@ export async function POST(request: Request) {
       body: new URLSearchParams({ secret: recaptchaSecret, response: recaptchaToken }),
     });
     const verifyBody = await verifyRes.json();
-    if (!verifyBody.success) {
+    console.log("recaptcha verify response:", verifyBody);
+    if (!verifyBody.success || verifyBody.action !== "contact" || verifyBody.score < 0.5) {
       return NextResponse.json({ error: "Verification failed — please try again." }, { status: 400 });
     }
   }

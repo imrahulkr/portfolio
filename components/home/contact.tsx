@@ -1,10 +1,9 @@
 "use client";
 
-import { useCallback, useRef, useState, useEffect } from "react";
+import { useState } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import Script from "next/script";
-import { useTheme } from "next-themes";
 import { FiSend } from "react-icons/fi";
 import { siteConfig } from "@/data/site-config";
 
@@ -15,16 +14,8 @@ const RECAPTCHA_SITE_KEY = process.env.NEXT_PUBLIC_RECAPTCHA_SITE_KEY;
 declare global {
   interface Window {
     grecaptcha?: {
-      render: (
-        container: HTMLElement,
-        params: {
-          sitekey: string;
-          theme?: "light" | "dark";
-          callback?: (token: string) => void;
-          "expired-callback"?: () => void;
-        }
-      ) => number;
-      reset: (widgetId?: number) => void;
+      ready: (callback: () => void) => void;
+      execute: (sitekey: string, options: { action: string }) => Promise<string>;
     };
   }
 }
@@ -32,27 +23,13 @@ declare global {
 export function Contact() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
-  const [mounted, setMounted] = useState(false);
   const [recaptchaReady, setRecaptchaReady] = useState(false);
-  const [recaptchaToken, setRecaptchaToken] = useState("");
-  const widgetIdRef = useRef<number | null>(null);
-  const { resolvedTheme } = useTheme();
 
-  useEffect(() => setMounted(true), []);
-
-  const recaptchaRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      if (node && recaptchaReady && RECAPTCHA_SITE_KEY && window.grecaptcha) {
-        widgetIdRef.current = window.grecaptcha.render(node, {
-          sitekey: RECAPTCHA_SITE_KEY,
-          theme: resolvedTheme === "dark" ? "dark" : "light",
-          callback: (token) => setRecaptchaToken(token),
-          "expired-callback": () => setRecaptchaToken(""),
-        });
-      }
-    },
-    [recaptchaReady, resolvedTheme]
-  );
+  async function getRecaptchaToken(): Promise<string> {
+    if (!RECAPTCHA_SITE_KEY || !window.grecaptcha) return "";
+    await new Promise<void>((resolve) => window.grecaptcha!.ready(resolve));
+    return window.grecaptcha!.execute(RECAPTCHA_SITE_KEY, { action: "contact" });
+  }
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -60,15 +37,17 @@ export function Contact() {
     setError("");
 
     const form = e.currentTarget;
-    const data = {
-      name: (form.elements.namedItem("name") as HTMLInputElement).value,
-      email: (form.elements.namedItem("email") as HTMLInputElement).value,
-      message: (form.elements.namedItem("message") as HTMLTextAreaElement).value,
-      company: (form.elements.namedItem("company") as HTMLInputElement).value,
-      recaptchaToken,
-    };
 
     try {
+      const recaptchaToken = await getRecaptchaToken();
+      const data = {
+        name: (form.elements.namedItem("name") as HTMLInputElement).value,
+        email: (form.elements.namedItem("email") as HTMLInputElement).value,
+        message: (form.elements.namedItem("message") as HTMLTextAreaElement).value,
+        company: (form.elements.namedItem("company") as HTMLInputElement).value,
+        recaptchaToken,
+      };
+
       const res = await fetch("/api/contact", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -81,20 +60,16 @@ export function Contact() {
     } catch (err) {
       setStatus("error");
       setError(err instanceof Error ? err.message : "Something went wrong.");
-      if (RECAPTCHA_SITE_KEY && window.grecaptcha && widgetIdRef.current !== null) {
-        window.grecaptcha.reset(widgetIdRef.current);
-        setRecaptchaToken("");
-      }
     }
   }
 
-  const canSubmit = status !== "sending" && (!RECAPTCHA_SITE_KEY || !!recaptchaToken);
+  const canSubmit = status !== "sending" && (!RECAPTCHA_SITE_KEY || recaptchaReady);
 
   return (
     <section id="contact" className="bg-surface border-t border-border">
       {RECAPTCHA_SITE_KEY && (
         <Script
-          src="https://www.google.com/recaptcha/api.js?render=explicit"
+          src={`https://www.google.com/recaptcha/api.js?render=${RECAPTCHA_SITE_KEY}`}
           strategy="lazyOnload"
           onLoad={() => setRecaptchaReady(true)}
         />
@@ -162,10 +137,6 @@ export function Contact() {
             </div>
 
             {status === "error" && <p role="alert" className="text-xs text-error">{error}</p>}
-
-            {mounted && RECAPTCHA_SITE_KEY && (
-              <div key={resolvedTheme} ref={recaptchaRef} className="flex justify-center" />
-            )}
 
             <button
               type="submit"
