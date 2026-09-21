@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
+import { Logo } from "@/components/layout/logo";
 
 const navItems = [
   { label: "Projects", href: "/#projects", sectionId: "projects" },
@@ -66,7 +67,8 @@ export function Navbar() {
       }`}
     >
       <div className="max-w-5xl mx-auto flex items-center justify-between px-6">
-        <Link href="/" className={`font-heading font-semibold text-sm text-text ${focusRing}`}>
+        <Link href="/" className={`flex items-center gap-2 font-heading font-semibold text-sm text-text ${focusRing}`}>
+          <Logo />
           Rahul Kumar
         </Link>
 

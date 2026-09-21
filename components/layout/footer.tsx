@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { siteConfig } from "@/data/site-config";
+import { Logo } from "@/components/layout/logo";
 
 const quickLinks = [
   { label: "Projects", href: "/#projects" },
@@ -16,9 +17,12 @@ export function Footer() {
   return (
     <footer className="border-t border-border">
       <div className="max-w-5xl mx-auto px-6 py-10 flex flex-col sm:flex-row justify-between gap-8 text-xs text-text-soft">
-        <div>
-          <p className="text-text font-heading font-medium">{siteConfig.name}</p>
-          <p>{siteConfig.role}</p>
+        <div className="flex items-start gap-2.5">
+          <Logo />
+          <div>
+            <p className="text-text font-heading font-medium">{siteConfig.name}</p>
+            <p>{siteConfig.role}</p>
+          </div>
         </div>
         <nav aria-label="Footer" className="flex flex-wrap gap-4">
           {quickLinks.map((item) => (
