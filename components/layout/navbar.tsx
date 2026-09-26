@@ -67,12 +67,12 @@ export function Navbar() {
       }`}
     >
       <div className="max-w-5xl mx-auto flex items-center justify-between px-6">
-        <Link href="/" className={`flex items-center gap-2 font-heading font-semibold text-sm text-text ${focusRing}`}>
+        <Link href="/" className={`flex items-center gap-2.5 font-heading font-semibold text-base text-text ${focusRing}`}>
           <Logo />
           Rahul Kumar
         </Link>
 
-        <nav className="hidden md:flex items-center gap-6 text-sm text-text-soft">
+        <nav className="hidden md:flex items-center gap-7 text-base text-text-soft">
           {navItems.map((item) => (
             <Link
               key={item.href}

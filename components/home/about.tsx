@@ -1,4 +1,5 @@
 import { Reveal } from "@/components/ui/reveal";
+import { SectionHeading } from "@/components/ui/section-heading";
 
 export type AboutContent = {
   intro: string;
@@ -17,21 +18,21 @@ export const aboutContent: AboutContent = {
 
 export function About({ content = aboutContent }: { content?: AboutContent }) {
   return (
-    <section id="about" className="max-w-5xl mx-auto px-6 py-20">
+    <section id="about" className="max-w-5xl mx-auto px-6 py-24">
       <Reveal>
-        <h2 className="font-heading text-xl font-semibold text-text mb-6">About</h2>
-        <p className="text-base text-text-soft max-w-[65ch] mb-8">{content.intro}</p>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-sm">
+        <SectionHeading title="About" />
+        <p className="text-lg text-text-soft max-w-[65ch] mx-auto text-center mb-10">{content.intro}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 text-base max-w-3xl mx-auto">
           <div>
-            <p className="text-text-soft mb-1.5">Currently building</p>
+            <p className="text-text-soft mb-2">Currently building</p>
             <p className="text-text">{content.currentlyBuilding}</p>
           </div>
           <div>
-            <p className="text-text-soft mb-1.5">Currently learning</p>
+            <p className="text-text-soft mb-2">Currently learning</p>
             <p className="text-text">{content.currentlyLearning}</p>
           </div>
           <div>
-            <p className="text-text-soft mb-1.5">Interested in</p>
+            <p className="text-text-soft mb-2">Interested in</p>
             <p className="text-text">{content.interestedIn}</p>
           </div>
         </div>

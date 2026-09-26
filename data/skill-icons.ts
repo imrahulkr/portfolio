@@ -20,6 +20,7 @@ import {
   SiPostman,
   SiJira,
   SiIntellijidea,
+  SiSpring,
 } from "react-icons/si";
 import { DiJava, DiMsqlServer } from "react-icons/di";
 
@@ -36,6 +37,7 @@ export const skillIcons: Record<string, { icon: IconType; color?: string }> = {
   "C++": { icon: SiCplusplus, color: "#00599C" },
   "Spring Boot": { icon: SiSpringboot, color: "#6DB33F" },
   "Spring Security": { icon: SiSpringsecurity, color: "#6DB33F" },
+  "Spring Data JPA": { icon: SiSpring, color: "#6DB33F" },
   Hibernate: { icon: SiHibernate, color: "#59666C" },
   JWT: { icon: SiJsonwebtokens },
   Maven: { icon: SiApachemaven, color: "#C71A36" },

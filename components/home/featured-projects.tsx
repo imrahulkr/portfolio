@@ -1,5 +1,7 @@
+import Image from "next/image";
 import { projects } from "@/data/projects";
 import { Reveal } from "@/components/ui/reveal";
+import { SectionHeading } from "@/components/ui/section-heading";
 import { ArchitectureThumb } from "@/components/projects/architecture-thumb";
 import { BrowserFrame } from "@/components/projects/browser-frame";
 
@@ -7,13 +9,13 @@ export function FeaturedProjects() {
   const featured = projects.filter((p) => p.featured);
 
   return (
-    <section id="projects" className="max-w-5xl mx-auto px-6 py-20">
-      <h2 className="font-heading text-xl font-semibold text-text mb-10">Featured projects</h2>
+    <section id="projects" className="max-w-5xl mx-auto px-6 py-24">
+      <SectionHeading title="Featured projects" subtitle="A selection of things I've designed and built" />
 
       <div className="flex flex-col gap-8">
         {featured.map((project) => (
           <Reveal key={project.slug}>
-            <article className="grid grid-cols-1 md:grid-cols-[1fr_1.2fr] gap-0 border border-border rounded-xl overflow-hidden hover:border-accent transition-colors">
+            <article className="group grid grid-cols-1 md:grid-cols-[1fr_1.2fr] gap-0 border border-border rounded-2xl overflow-hidden hover:border-accent transition-colors">
               <div
                 className="project-tint relative border-b md:border-b-0 md:border-r border-border min-h-[220px] flex items-center justify-center overflow-hidden"
                 style={
@@ -23,38 +25,48 @@ export function FeaturedProjects() {
                   } as React.CSSProperties
                 }
               >
-                <div
-                  aria-hidden
-                  className="absolute inset-0 opacity-[0.06]"
-                  style={{
-                    backgroundImage:
-                      "linear-gradient(var(--text) 1px, transparent 1px), linear-gradient(90deg, var(--text) 1px, transparent 1px)",
-                    backgroundSize: "20px 20px",
-                  }}
-                />
-                <div className="relative">
+                {project.backgroundTexture ? (
+                  <Image
+                    src={project.backgroundTexture}
+                    alt=""
+                    aria-hidden
+                    fill
+                    className="object-cover opacity-[0.12] grayscale"
+                  />
+                ) : (
+                  <div
+                    aria-hidden
+                    className="absolute inset-0 opacity-[0.06]"
+                    style={{
+                      backgroundImage:
+                        "linear-gradient(var(--text) 1px, transparent 1px), linear-gradient(90deg, var(--text) 1px, transparent 1px)",
+                      backgroundSize: "20px 20px",
+                    }}
+                  />
+                )}
+                <div className={`relative ${project.screenshot ? "w-full" : ""}`}>
                   {project.cardVisual === "architecture" && project.architecture ? (
                     <ArchitectureThumb nodes={project.architecture} />
                   ) : (
-                    <BrowserFrame url={project.liveUrl} title={project.title} />
+                    <BrowserFrame url={project.liveUrl} title={project.title} screenshot={project.screenshot} />
                   )}
                 </div>
               </div>
 
-              <div className="p-7">
-                <div className="flex items-center gap-2 mb-1 flex-wrap">
-                  <p className="text-xs text-text-soft">{project.category}</p>
+              <div className="p-8">
+                <div className="flex items-center gap-2 mb-2 flex-wrap">
+                  <p className="text-sm text-text-soft">{project.category}</p>
                   {project.status === "in-progress" && (
                     <span className="text-xs px-2 py-0.5 rounded-full border border-accent text-accent">
                       Currently building
                     </span>
                   )}
                 </div>
-                <h3 className="font-heading text-lg font-medium text-text mb-2">{project.title}</h3>
-                <p className="text-sm text-text-soft mb-4">{project.description}</p>
-                <div className="flex flex-wrap gap-2 mb-5">
+                <h3 className="font-heading text-xl font-semibold text-text mb-2.5">{project.title}</h3>
+                <p className="text-base text-text-soft mb-5">{project.description}</p>
+                <div className="flex flex-wrap gap-2 mb-6">
                   {project.technologies.map((tech) => (
-                    <span key={tech} className="text-xs px-2 py-1 rounded bg-surface text-text-soft border border-border">
+                    <span key={tech} className="text-sm px-2.5 py-1 rounded-full bg-surface text-text-soft border border-border">
                       {tech}
                     </span>
                   ))}

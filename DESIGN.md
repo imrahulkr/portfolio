@@ -53,7 +53,12 @@ Otherwise: no gradients, glows, or shadows on UI elements beyond a hairline
 border, and no further second-accent usage beyond the three exceptions above.
 
 ## Type scale (Tailwind keys — always use these, never text-[Npx])
-xs 12px · sm 13px · base 15px · lg 18px · xl 24px · 2xl 32px · 3xl 42px
+xs 13px · sm 14px · base 16px · lg 19px · xl 26px · 2xl 34px · 3xl 46px · 4xl 58px
+
+(Enlarged 2026-09-21 — the original scale read as small/cramped for a
+portfolio site; `4xl` was added for the large centered section headings
+introduced the same day via `components/ui/section-heading.tsx`, reused by
+About/Experience/Skills/Featured-projects/Contact.)
 
 Headings: Public Sans (500/600) — `font-heading`
 Body: Source Sans 3 (400/500) — `font-body` (default)

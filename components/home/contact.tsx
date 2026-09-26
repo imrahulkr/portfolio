@@ -6,6 +6,7 @@ import Link from "next/link";
 import Script from "next/script";
 import { FiSend, FiCheck } from "react-icons/fi";
 import { siteConfig } from "@/data/site-config";
+import { SectionHeading } from "@/components/ui/section-heading";
 
 type Status = "idle" | "sending" | "sent" | "error";
 
@@ -74,19 +75,16 @@ export function Contact() {
           onLoad={() => setRecaptchaReady(true)}
         />
       )}
-      <div className="max-w-2xl mx-auto px-6 py-20 text-center">
-        <h2 className="font-heading text-3xl font-semibold text-text mb-3">
-          Let&apos;s build something interesting<span className="text-accent">.</span>
-        </h2>
-        <p className="text-sm text-text-soft mb-10 max-w-prose mx-auto">
-          Send a message directly, or find me in the usual places.
-        </p>
+      <div className="max-w-2xl mx-auto px-6 py-24 text-center">
+        <SectionHeading
+          title="Let's build something interesting"
+          subtitle="Send a message directly, or find me in the usual places."
+        />
 
         {status === "sent" ? (
           <SentConfirmation />
         ) : (
-          <form onSubmit={handleSubmit} aria-busy={status === "sending"} className="flex flex-col gap-4 text-left">
-            <p className="text-xs text-text-soft" aria-hidden="true">* Required</p>
+          <form onSubmit={handleSubmit} aria-busy={status === "sending"} className="flex flex-col gap-5 text-left">
             <input
               type="text"
               name="company"
@@ -96,8 +94,8 @@ export function Contact() {
               className="absolute -left-[9999px] w-px h-px overflow-hidden"
             />
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="flex flex-col gap-1.5">
-                <label htmlFor="name" className="text-xs text-text-soft">
+              <div className="flex flex-col gap-2">
+                <label htmlFor="name" className="text-sm text-text-soft">
                   Name <span aria-hidden="true">*</span>
                 </label>
                 <input
@@ -105,11 +103,11 @@ export function Contact() {
                   name="name"
                   type="text"
                   required
-                  className="bg-bg border border-border rounded-lg px-3 py-2 text-sm text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent"
+                  className="bg-bg border border-border rounded-lg px-4 py-2.5 text-base text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent"
                 />
               </div>
-              <div className="flex flex-col gap-1.5">
-                <label htmlFor="email" className="text-xs text-text-soft">
+              <div className="flex flex-col gap-2">
+                <label htmlFor="email" className="text-sm text-text-soft">
                   Email <span aria-hidden="true">*</span>
                 </label>
                 <input
@@ -117,12 +115,12 @@ export function Contact() {
                   name="email"
                   type="email"
                   required
-                  className="bg-bg border border-border rounded-lg px-3 py-2 text-sm text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent"
+                  className="bg-bg border border-border rounded-lg px-4 py-2.5 text-base text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent"
                 />
               </div>
             </div>
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="message" className="text-xs text-text-soft">
+            <div className="flex flex-col gap-2">
+              <label htmlFor="message" className="text-sm text-text-soft">
                 Message <span aria-hidden="true">*</span>
               </label>
               <textarea
@@ -130,21 +128,34 @@ export function Contact() {
                 name="message"
                 required
                 rows={4}
-                className="bg-bg border border-border rounded-lg px-3 py-2 text-sm text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent resize-none"
+                className="bg-bg border border-border rounded-lg px-4 py-2.5 text-base text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent resize-none"
               />
             </div>
 
-            {status === "error" && <p role="alert" className="text-xs text-error">{error}</p>}
+            {status === "error" && <p role="alert" className="text-sm text-error">{error}</p>}
 
             <button
               type="submit"
               disabled={!canSubmit}
-              className="w-full flex items-center justify-center gap-2 text-sm font-medium px-4 py-3 rounded-lg bg-accent text-bg hover:opacity-90 transition-opacity disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
+              className="w-full flex items-center justify-center gap-2 text-base font-medium px-4 py-3.5 rounded-lg bg-accent text-bg hover:opacity-90 transition-opacity disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
             >
               <FiSend aria-hidden className="w-4 h-4" />
               {status === "sending" ? "Sending…" : "Send message"}
             </button>
-            <p className="text-xs text-text-soft text-center">I&apos;ll get back to you within 24-48 hours.</p>
+            <p className="text-sm text-text-soft text-center">I&apos;ll get back to you within 24-48 hours.</p>
+            {RECAPTCHA_SITE_KEY && (
+              <p className="text-xs text-text-soft text-center">
+                This site is protected by reCAPTCHA and the Google{" "}
+                <a href="https://policies.google.com/privacy" className="underline hover:text-text">
+                  Privacy Policy
+                </a>{" "}
+                and{" "}
+                <a href="https://policies.google.com/terms" className="underline hover:text-text">
+                  Terms of Service
+                </a>{" "}
+                apply.
+              </p>
+            )}
           </form>
         )}
 

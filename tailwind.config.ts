@@ -7,13 +7,14 @@ const config: Config = {
     // Deliberate type scale — every component uses these keys, never
     // arbitrary text-[13px] values, so sizing stays consistent site-wide.
     fontSize: {
-      xs: ["12px", { lineHeight: "1.5" }],
-      sm: ["13px", { lineHeight: "1.6" }],
-      base: ["15px", { lineHeight: "1.7" }],
-      lg: ["18px", { lineHeight: "1.5" }],
-      xl: ["24px", { lineHeight: "1.3" }],
-      "2xl": ["32px", { lineHeight: "1.2" }],
-      "3xl": ["42px", { lineHeight: "1.1" }],
+      xs: ["13px", { lineHeight: "1.5" }],
+      sm: ["14px", { lineHeight: "1.6" }],
+      base: ["16px", { lineHeight: "1.7" }],
+      lg: ["19px", { lineHeight: "1.6" }],
+      xl: ["26px", { lineHeight: "1.35" }],
+      "2xl": ["34px", { lineHeight: "1.2" }],
+      "3xl": ["46px", { lineHeight: "1.1" }],
+      "4xl": ["58px", { lineHeight: "1.05" }],
     },
     extend: {
       colors: {

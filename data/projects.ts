@@ -28,6 +28,8 @@ export type Project = {
   status?: "in-progress";
   cardVisual: CardVisual; // how the featured-project card shows its visual block
   cardTint: CardTint; // signature color for the card's visual panel background
+  screenshot?: string; // real homepage screenshot for cardVisual: "browser-frame" (path under /public); falls back to a text placeholder when unset
+  backgroundTexture?: string; // decorative-only image behind an architecture diagram (path under /public) — never a real product screenshot, never shown in a browser-chrome frame
 
   overview?: string;
   problem?: string;
@@ -52,6 +54,7 @@ export const projects: Project[] = [
     featured: true,
     cardVisual: "architecture",
     cardTint: { light: "#8A6234", dark: "#C99A5F" },
+    backgroundTexture: "/projects/E-Commerce.png",
 
     overview:
       "A multi-role e-commerce platform built to support three distinct workflows — Customer, Seller, and Admin — spanning product catalog, cart, checkout, orders, inventory, and payments in a single system.",
@@ -115,6 +118,7 @@ export const projects: Project[] = [
     featured: true,
     cardVisual: "browser-frame",
     cardTint: { light: "#3D7A55", dark: "#7CB78F" },
+    screenshot: "/projects/sidhant-home.png",
 
     overview:
       "A public-facing website for SIDHANT, a non-profit organization operating at the state and national level across healthcare, education, community development, and rural development programs. The site covers the organization's work areas, partner organizations, a media gallery, and a donation flow, and is live in production.",
@@ -146,6 +150,7 @@ export const projects: Project[] = [
     status: "in-progress",
     cardVisual: "architecture",
     cardTint: { light: "#5B4B8F", dark: "#A597D6" },
+    backgroundTexture: "/projects/fluxgate.png",
 
     overview:
       "FluxGate is an API gateway with a microservice architecture, built to consolidate authentication across services and to work hands-on with distributed systems patterns — caching, rate limiting, event streaming, and service-to-service communication. It's under active development, with coding underway across all three services below.",

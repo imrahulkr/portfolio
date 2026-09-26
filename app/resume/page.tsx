@@ -1,12 +1,28 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { FiMail, FiPhone, FiCalendar, FiMapPin, FiGithub, FiLinkedin, FiDownload, FiServer, FiCode, FiLayers, FiCpu } from "react-icons/fi";
+import {
+  FiMail,
+  FiPhone,
+  FiCalendar,
+  FiMapPin,
+  FiGithub,
+  FiLinkedin,
+  FiDownload,
+  FiServer,
+  FiCode,
+  FiLayers,
+  FiCpu,
+  FiAward,
+  FiExternalLink,
+} from "react-icons/fi";
 import { SiLeetcode } from "react-icons/si";
 import { siteConfig } from "@/data/site-config";
 import { experience } from "@/data/experience";
 import { skills, focusAreas } from "@/data/skills";
 import { skillIcons } from "@/data/skill-icons";
 import { stats } from "@/data/stats";
+import { projects } from "@/data/projects";
+import { achievements, certifications } from "@/data/achievements";
 import { aboutContent } from "@/components/home/about";
 import { Footer } from "@/components/layout/footer";
 
@@ -53,7 +69,7 @@ export default function ResumePage() {
   return (
     <>
       <main id="main-content">
-        <section className="max-w-5xl mx-auto px-6 py-12 grid grid-cols-1 md:grid-cols-[280px_1fr] gap-12 items-start">
+        <section className="max-w-5xl mx-auto px-6 pt-12 pb-24 grid grid-cols-1 md:grid-cols-[280px_1fr] gap-12 items-start">
           <aside className="flex flex-col gap-6 md:sticky md:top-24">
             <div className="border border-border rounded-xl bg-surface p-6 flex flex-col items-center text-center">
               <div
@@ -70,7 +86,7 @@ export default function ResumePage() {
 
             <div className="border border-border rounded-xl bg-surface p-6 flex flex-col gap-5">
               <ContactItem icon={<FiMail aria-hidden="true" />} label="Email" value={siteConfig.email} href={`mailto:${siteConfig.email}`} />
-              <ContactItem icon={<FiPhone aria-hidden="true" />} label="Phone" value="[Add phone number]" />
+              <ContactItem icon={<FiPhone aria-hidden="true" />} label="Phone" value={siteConfig.phone} href={`tel:${siteConfig.phone.replace(/\s+/g, "")}`} />
               <ContactItem icon={<FiCalendar aria-hidden="true" />} label="Experience" value={`${yearsExperience} years`} />
               <ContactItem icon={<FiMapPin aria-hidden="true" />} label="Location" value={currentRole.location} />
             </div>
@@ -173,6 +189,82 @@ export default function ResumePage() {
                         <li key={achievement}>{achievement}</li>
                       ))}
                     </ul>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <h2 className="font-heading text-xl font-semibold text-text mb-6">Projects</h2>
+              <div className="flex flex-col gap-5">
+                {projects.map((project) => (
+                  <div key={project.slug} className="border border-border rounded-xl bg-surface p-5">
+                    <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                      <h3 className="text-sm font-medium text-text">{project.title}</h3>
+                      {project.status === "in-progress" && (
+                        <span className="text-xs px-2 py-0.5 rounded-full border border-accent text-accent">
+                          Currently building
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-text-soft mb-3">{project.description}</p>
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {project.technologies.map((tech) => (
+                        <span key={tech} className="text-xs px-2 py-1 rounded-full bg-bg text-text-soft border border-border">
+                          {tech}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex gap-4 text-xs">
+                      <a
+                        href={`/projects/${project.slug}`}
+                        className={`flex items-center gap-1 text-accent hover:underline font-medium ${focusRing}`}
+                      >
+                        View case study <FiExternalLink aria-hidden="true" />
+                      </a>
+                      {project.github && (
+                        <a href={project.github} className={`text-text-soft hover:text-text transition-colors ${focusRing}`}>
+                          GitHub
+                        </a>
+                      )}
+                      {project.liveUrl && (
+                        <a href={project.liveUrl} className={`text-text-soft hover:text-text transition-colors ${focusRing}`}>
+                          Live demo
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <h2 className="font-heading text-xl font-semibold text-text mb-6">Achievements &amp; Certifications</h2>
+              <div className="flex flex-col gap-3">
+                {[stats[2], stats[1]].map((stat) => (
+                  <div key={stat.label} className="flex items-start gap-3">
+                    <span className="w-8 h-8 shrink-0 rounded-lg bg-accent/10 flex items-center justify-center text-accent">
+                      <FiAward aria-hidden="true" size={14} />
+                    </span>
+                    <p className="text-sm text-text pt-1.5">
+                      <span className="font-medium text-accent">{stat.value}</span> {stat.label}
+                    </p>
+                  </div>
+                ))}
+                {achievements.map((achievement) => (
+                  <div key={achievement} className="flex items-start gap-3">
+                    <span className="w-8 h-8 shrink-0 rounded-lg bg-accent/10 flex items-center justify-center text-accent">
+                      <FiAward aria-hidden="true" size={14} />
+                    </span>
+                    <p className="text-sm text-text pt-1.5">{achievement}</p>
+                  </div>
+                ))}
+                {certifications.map((cert) => (
+                  <div key={cert} className="flex items-start gap-3">
+                    <span className="w-8 h-8 shrink-0 rounded-lg bg-accent/10 flex items-center justify-center text-accent">
+                      <FiAward aria-hidden="true" size={14} />
+                    </span>
+                    <p className="text-sm text-text pt-1.5">{cert}</p>
                   </div>
                 ))}
               </div>
