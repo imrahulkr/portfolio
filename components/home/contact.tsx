@@ -4,8 +4,9 @@ import { useState, useEffect } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import Script from "next/script";
-import { FiSend, FiCheck } from "react-icons/fi";
+import { FiSend, FiCheck, FiChevronDown } from "react-icons/fi";
 import { siteConfig } from "@/data/site-config";
+import { topicOptions, timelineOptions } from "@/data/contact-options";
 import { SectionHeading } from "@/components/ui/section-heading";
 
 type Status = "idle" | "sending" | "sent" | "error";
@@ -24,12 +25,25 @@ declare global {
 export function Contact() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
-  const [recaptchaReady, setRecaptchaReady] = useState(false);
 
+  // The submit button is never disabled waiting on reCAPTCHA: Next's Script
+  // `onLoad` only fires on the very first load, so after client-side
+  // navigation, hot reload, or a blocked script the button used to stay
+  // disabled forever. Instead, wait for the script here, at submit time,
+  // and fail with a clear message if it never arrives.
   async function getRecaptchaToken(): Promise<string> {
-    if (!RECAPTCHA_SITE_KEY || !window.grecaptcha) return "";
+    if (!RECAPTCHA_SITE_KEY) return "";
+    const deadline = Date.now() + 8000;
+    while (!window.grecaptcha && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!window.grecaptcha) {
+      throw new Error(
+        "Spam protection couldn't load. Please disable any ad blocker and retry, or email me directly."
+      );
+    }
     await new Promise<void>((resolve) => window.grecaptcha!.ready(resolve));
-    return window.grecaptcha!.execute(RECAPTCHA_SITE_KEY, { action: "contact" });
+    return window.grecaptcha.execute(RECAPTCHA_SITE_KEY, { action: "contact" });
   }
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
@@ -45,6 +59,8 @@ export function Contact() {
         name: (form.elements.namedItem("name") as HTMLInputElement).value,
         email: (form.elements.namedItem("email") as HTMLInputElement).value,
         message: (form.elements.namedItem("message") as HTMLTextAreaElement).value,
+        topic: (form.elements.namedItem("topic") as HTMLSelectElement).value,
+        timeline: (form.elements.namedItem("timeline") as HTMLSelectElement).value,
         company: (form.elements.namedItem("company") as HTMLInputElement).value,
         recaptchaToken,
       };
@@ -64,7 +80,7 @@ export function Contact() {
     }
   }
 
-  const canSubmit = status !== "sending" && (!RECAPTCHA_SITE_KEY || recaptchaReady);
+  const canSubmit = status !== "sending";
 
   return (
     <section id="contact" className="bg-surface border-t border-border">
@@ -72,7 +88,6 @@ export function Contact() {
         <Script
           src={`https://www.google.com/recaptcha/api.js?render=${RECAPTCHA_SITE_KEY}`}
           strategy="lazyOnload"
-          onLoad={() => setRecaptchaReady(true)}
         />
       )}
       <div className="max-w-2xl mx-auto px-6 py-24 text-center">
@@ -103,6 +118,8 @@ export function Contact() {
                   name="name"
                   type="text"
                   required
+                  maxLength={100}
+                  autoComplete="name"
                   className="bg-bg border border-border rounded-lg px-4 py-2.5 text-base text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent"
                 />
               </div>
@@ -115,8 +132,54 @@ export function Contact() {
                   name="email"
                   type="email"
                   required
+                  maxLength={200}
+                  autoComplete="email"
                   className="bg-bg border border-border rounded-lg px-4 py-2.5 text-base text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent"
                 />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="flex flex-col gap-2">
+                <label htmlFor="topic" className="text-sm text-text-soft">
+                  What&apos;s this about?
+                </label>
+                <div className="relative">
+                  <select
+                    id="topic"
+                    name="topic"
+                    defaultValue=""
+                    className="w-full appearance-none bg-bg border border-border rounded-lg pl-4 pr-10 py-2.5 text-base text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent"
+                  >
+                    <option value="">Select an option</option>
+                    {topicOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                  <FiChevronDown aria-hidden className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-soft" />
+                </div>
+              </div>
+              <div className="flex flex-col gap-2">
+                <label htmlFor="timeline" className="text-sm text-text-soft">
+                  Timeline
+                </label>
+                <div className="relative">
+                  <select
+                    id="timeline"
+                    name="timeline"
+                    defaultValue=""
+                    className="w-full appearance-none bg-bg border border-border rounded-lg pl-4 pr-10 py-2.5 text-base text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent"
+                  >
+                    <option value="">Select an option</option>
+                    {timelineOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                  <FiChevronDown aria-hidden className="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-text-soft" />
+                </div>
               </div>
             </div>
             <div className="flex flex-col gap-2">
@@ -127,7 +190,9 @@ export function Contact() {
                 id="message"
                 name="message"
                 required
+                maxLength={5000}
                 rows={4}
+                placeholder="Tell me a bit about what you're building or the role you have in mind."
                 className="bg-bg border border-border rounded-lg px-4 py-2.5 text-base text-text focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent resize-none"
               />
             </div>

@@ -7,7 +7,7 @@ hardcoded content.
 
 **Live tech stack:** Next.js 15 · React 18 · TypeScript · Tailwind CSS ·
 MDX (`@mdx-js/mdx`) · `next-themes` · Resend (contact email) · Google
-reCAPTCHA v2 (optional)
+reCAPTCHA v3 (optional)
 
 ---
 
@@ -40,12 +40,15 @@ simply doesn't render, and the site URL falls back to `example.com`).
 | Variable | Required for | Notes |
 | --- | --- | --- |
 | `RESEND_API_KEY` | Contact form actually sending email | Used server-side in [app/api/contact/route.ts](app/api/contact/route.ts). Without it, the API route responds but no email is sent. |
+| `CONTACT_FROM_EMAIL` | Auto-reply to people who use the contact form | A sender on a domain verified with Resend, e.g. `Rahul Kumar <hello@yourdomain.com>`. Also used as the sender of the notification email. Without it the sandbox sender is used and the auto-reply is skipped, because the sandbox can only deliver to the Resend account owner. |
 | `NEXT_PUBLIC_SITE_URL` | Correct URLs in `sitemap.xml`, `robots.txt`, Open Graph images, `metadataBase` | Falls back to `https://example.com`. Set once a real domain is live. |
 | `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Contact form spam protection (client widget) | Must be set together with `RECAPTCHA_SECRET_KEY` — the widget only renders when both are present. |
 | `RECAPTCHA_SECRET_KEY` | Contact form spam protection (server verification) | Verified server-side in the same API route. |
 
-The contact form also has a honeypot field that runs regardless of reCAPTCHA
-configuration.
+The contact form also has a honeypot field and a per-IP rate limit (5 messages
+per 15 minutes, in memory, see [lib/rate-limit.ts](lib/rate-limit.ts)) that run
+regardless of reCAPTCHA configuration. The limiter is per server instance, so on
+serverless hosting it is a speed bump, not a hard global cap.
 
 ---
 
@@ -160,7 +163,7 @@ locked in [DESIGN.md](DESIGN.md). Don't introduce new colors or arbitrary
 - 329-chapter MDX blog across 5 series with scroll-spy table of contents,
   syntax highlighting, and responsive tables/code blocks
 - Contact form → Resend email delivery, with honeypot + optional reCAPTCHA
-  v2 spam protection
+  v3 spam protection, per-IP rate limiting, and an optional auto-reply
 - Résumé page (`/resume`) with a downloadable PDF
 - Code-generated Open Graph images (site-wide and per blog series) via
   `next/og`
