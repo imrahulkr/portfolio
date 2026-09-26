@@ -9,6 +9,8 @@ import remarkGfm from "remark-gfm";
 import { getAllSeries, getSeriesBySlug, getChapter, getAdjacentChapters, extractHeadings } from "@/lib/blog";
 import { TableOfContents } from "@/components/blog/table-of-contents";
 import { Footer } from "@/components/layout/footer";
+import { JsonLd } from "@/components/seo/json-ld";
+import { siteConfig, siteUrl } from "@/data/site-config";
 
 export function generateStaticParams() {
   return getAllSeries().flatMap((s) => s.chapters.map((c) => ({ series: s.slug, chapter: c.slug })));
@@ -25,6 +27,7 @@ export async function generateMetadata({
   return {
     title: `${c.title} — Rahul Kumar`,
     description: c.description,
+    alternates: { canonical: `/blog/${series}/${chapter}` },
     openGraph: { title: c.title, description: c.description, type: "article" },
   };
 }
@@ -58,6 +61,32 @@ export default async function ChapterPage({
   const headings = extractHeadings(c.content);
   const { prev, next } = getAdjacentChapters(series, c.order);
 
+  const seriesUrl = `${siteUrl}/blog/${s.slug}`;
+  const chapterUrl = `${seriesUrl}/${c.slug}`;
+  const articleJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    headline: c.title,
+    description: c.description,
+    url: chapterUrl,
+    mainEntityOfPage: chapterUrl,
+    inLanguage: "en",
+    articleSection: c.partLabel || undefined,
+    keywords: c.tags.length ? c.tags.join(", ") : undefined,
+    author: { "@type": "Person", name: siteConfig.name, url: siteUrl },
+    isPartOf: { "@type": "CreativeWorkSeries", name: s.title, url: seriesUrl },
+  };
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: siteUrl },
+      { "@type": "ListItem", position: 2, name: "Blog", item: `${siteUrl}/blog` },
+      { "@type": "ListItem", position: 3, name: s.title, item: seriesUrl },
+      { "@type": "ListItem", position: 4, name: c.title, item: chapterUrl },
+    ],
+  };
+
   const { default: MDXContent } = await evaluate(c.content, {
     ...jsxRuntime,
     remarkPlugins: [remarkGfm],
@@ -66,6 +95,8 @@ export default async function ChapterPage({
 
   return (
     <>
+      <JsonLd data={articleJsonLd} />
+      <JsonLd data={breadcrumbJsonLd} />
       <main id="main-content">
         <div className="max-w-5xl mx-auto px-6 pt-8">
           <Link

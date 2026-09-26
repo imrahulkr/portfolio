@@ -6,6 +6,7 @@ import Link from "next/link";
 import Script from "next/script";
 import { FiSend, FiCheck, FiChevronDown } from "react-icons/fi";
 import { siteConfig } from "@/data/site-config";
+import { trackEvent } from "@/lib/analytics";
 import { topicOptions, timelineOptions } from "@/data/contact-options";
 import { SectionHeading } from "@/components/ui/section-heading";
 
@@ -73,6 +74,7 @@ export function Contact() {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Something went wrong.");
       setStatus("sent");
+      trackEvent("Contact Submitted", data.topic ? { topic: data.topic } : undefined);
       form.reset();
     } catch (err) {
       setStatus("error");

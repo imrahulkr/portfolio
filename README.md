@@ -26,6 +26,7 @@ Other scripts:
 npm run build   # production build
 npm run start   # serve the production build
 npm run lint    # next lint
+npm run typecheck   # tsc --noEmit (also run in CI)
 ```
 
 ---
@@ -41,6 +42,8 @@ simply doesn't render, and the site URL falls back to `example.com`).
 | --- | --- | --- |
 | `RESEND_API_KEY` | Contact form actually sending email | Used server-side in [app/api/contact/route.ts](app/api/contact/route.ts). Without it, the API route responds but no email is sent. |
 | `CONTACT_FROM_EMAIL` | Auto-reply to people who use the contact form | A sender on a domain verified with Resend, e.g. `Rahul Kumar <hello@yourdomain.com>`. Also used as the sender of the notification email. Without it the sandbox sender is used and the auto-reply is skipped, because the sandbox can only deliver to the Resend account owner. |
+| `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` | Privacy-friendly analytics | Your site's domain as registered in Plausible. Cookieless, so no consent banner. Nothing loads until this is set. Also records a "Contact Submitted" event. |
+| `NEXT_PUBLIC_PLAUSIBLE_SRC` | Self-hosted Plausible | Optional. Overrides the default `https://plausible.io/js/script.js`. |
 | `NEXT_PUBLIC_SITE_URL` | Correct URLs in `sitemap.xml`, `robots.txt`, Open Graph images, `metadataBase` | Falls back to `https://example.com`. Set once a real domain is live. |
 | `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Contact form spam protection (client widget) | Must be set together with `RECAPTCHA_SECRET_KEY` — the widget only renders when both are present. |
 | `RECAPTCHA_SECRET_KEY` | Contact form spam protection (server verification) | Verified server-side in the same API route. |
@@ -70,6 +73,8 @@ app/
   blog/[series]/page.tsx       Chapter list for one series, grouped by part
   blog/[series]/banner-image/  Code-generated per-series banner (next/og)
   blog/[series]/[chapter]/     MDX chapter reader with prev/next nav
+  blog/search-index.json/      Static chapter index for the blog search box
+  blog/feed.xml/               RSS feed of every chapter
 
 components/
   layout/                      Navbar, footer

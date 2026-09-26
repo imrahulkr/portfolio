@@ -3,6 +3,7 @@ import { Public_Sans, Source_Sans_3, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/layout/navbar";
 import { CommandPalette } from "@/components/command-palette/command-palette";
+import { Analytics } from "@/components/analytics";
 import { siteConfig, siteUrl } from "@/data/site-config";
 import "./globals.css";
 
@@ -32,6 +33,7 @@ export const metadata: Metadata = {
   description:
     "Backend and full-stack engineer building scalable systems with Java, Spring Boot, and React. Writing engineering notes on Spring Boot, system design, and Java.",
   metadataBase: new URL(siteUrl),
+  alternates: { types: { "application/rss+xml": "/blog/feed.xml" } },
   openGraph: {
     title: "Rahul Kumar — Software Engineer",
     description: "Backend and full-stack engineer building scalable systems with Java, Spring Boot, and React.",
@@ -72,6 +74,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Navbar />
           {children}
           <CommandPalette />
+          <Analytics />
         </ThemeProvider>
       </body>
     </html>

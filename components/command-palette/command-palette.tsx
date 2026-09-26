@@ -53,6 +53,7 @@ export function CommandPalette() {
       { id: "nav-services", label: "Go to Services", group: "Navigate", run: () => navigate("/#services") },
       { id: "nav-projects", label: "Go to Projects", group: "Navigate", run: () => navigate("/#projects") },
       { id: "nav-blog", label: "Go to Blog", group: "Navigate", run: () => navigate("/blog") },
+      { id: "nav-blog-search", label: "Search the blog", group: "Navigate", run: () => navigate("/blog#search") },
       { id: "nav-resume", label: "Go to Resume", group: "Navigate", run: () => navigate("/resume") },
       { id: "nav-experience", label: "Go to Experience", group: "Navigate", run: () => navigate("/#experience") },
       { id: "nav-about", label: "Go to About", group: "Navigate", run: () => navigate("/#about") },

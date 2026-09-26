@@ -5,6 +5,8 @@ import { projects } from "@/data/projects";
 import { ArchitectureDiagram } from "@/components/projects/architecture-diagram";
 import { DecisionCard } from "@/components/projects/decision-card";
 import { Footer } from "@/components/layout/footer";
+import { JsonLd } from "@/components/seo/json-ld";
+import { siteConfig, siteUrl } from "@/data/site-config";
 
 export function generateStaticParams() {
   return projects.map((p) => ({ slug: p.slug }));
@@ -17,6 +19,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   return {
     title: `${project.title} — Rahul Kumar`,
     description: project.description,
+    alternates: { canonical: `/projects/${project.slug}` },
     openGraph: { title: project.title, description: project.description },
   };
 }
@@ -26,8 +29,20 @@ export default async function ProjectPage({ params }: { params: Promise<{ slug: 
   const project = projects.find((p) => p.slug === slug);
   if (!project) notFound();
 
+  const projectJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "CreativeWork",
+    name: project.title,
+    description: project.description,
+    url: `${siteUrl}/projects/${project.slug}`,
+    keywords: project.technologies.join(", "),
+    author: { "@type": "Person", name: siteConfig.name, url: siteUrl },
+    sameAs: [project.github, project.liveUrl].filter((u): u is string => Boolean(u)),
+  };
+
   return (
     <>
+    <JsonLd data={projectJsonLd} />
     <main id="main-content">
       <div className="max-w-4xl mx-auto px-6 pt-8">
         <Link

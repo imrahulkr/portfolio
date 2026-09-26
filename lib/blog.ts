@@ -73,6 +73,13 @@ const SERIES_CONFIG: Record<string, Omit<SeriesInfo, "folder">> = {
 // `slug` is only present in two of the five. Filenames are the source of truth.
 const FILENAME_RE = /^(\d+)-(.+)\.mdx$/;
 
+// The LLD series ends with three "Interview Rapid-Fire Review" chapters named
+// `interview-N-slug.mdx` instead of `NN-slug.mdx`. They were silently skipped
+// by FILENAME_RE alone. They are the closing chapters of their series, so
+// they are numbered after the highest `NN-` chapter in the same folder
+// (interview-1 becomes max + 1, and so on) and keep their full stem as slug.
+const INTERVIEW_RE = /^interview-(\d+)-(.+)\.mdx$/;
+
 let cache: Map<string, Chapter[]> | null = null;
 
 // This content is plain Markdown written without any intent to embed real
@@ -112,12 +119,17 @@ function loadChaptersForFolder(folder: string): Chapter[] {
   const config = SERIES_CONFIG[folder];
   if (!config || !fs.existsSync(dir)) return [];
 
-  const files = fs.readdirSync(dir).filter((f) => FILENAME_RE.test(f));
+  const files = fs.readdirSync(dir).filter((f) => FILENAME_RE.test(f) || INTERVIEW_RE.test(f));
+  const highestNumbered = files.reduce((max, f) => {
+    const m = f.match(FILENAME_RE);
+    return m ? Math.max(max, parseInt(m[1], 10)) : max;
+  }, 0);
 
   const chapters: Chapter[] = files.map((file) => {
-    const match = file.match(FILENAME_RE)!;
-    const order = parseInt(match[1], 10);
-    const slug = match[2];
+    const numbered = file.match(FILENAME_RE);
+    const interview = numbered ? null : file.match(INTERVIEW_RE)!;
+    const order = numbered ? parseInt(numbered[1], 10) : highestNumbered + parseInt(interview![1], 10);
+    const slug = numbered ? numbered[2] : file.replace(/\.mdx$/, "");
     const raw = fs.readFileSync(path.join(dir, file), "utf8");
     const { data, content: rawContent } = matter(raw);
     const content = sanitizeForMdx(rawContent);
