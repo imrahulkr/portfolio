@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { FiGithub, FiLinkedin, FiMail, FiFileText } from "react-icons/fi";
+import { SiLeetcode } from "react-icons/si";
 import { siteConfig } from "@/data/site-config";
 import { Logo } from "@/components/layout/logo";
 
@@ -19,6 +20,7 @@ const moreLinks = [
 const socialLinks = [
   { label: "GitHub", href: siteConfig.links.github, icon: FiGithub },
   { label: "LinkedIn", href: siteConfig.links.linkedin, icon: FiLinkedin },
+  { label: "LeetCode", href: siteConfig.links.leetcode, icon: SiLeetcode },
   { label: "Email", href: `mailto:${siteConfig.email}`, icon: FiMail },
   { label: "Resume", href: "/resume", icon: FiFileText },
 ];

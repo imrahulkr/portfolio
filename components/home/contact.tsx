@@ -4,11 +4,16 @@ import { useState, useEffect } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import Script from "next/script";
-import { FiSend, FiCheck, FiChevronDown } from "react-icons/fi";
+import { FiSend, FiCheck, FiChevronDown, FiMail, FiGithub, FiLinkedin, FiFileText } from "react-icons/fi";
+import { SiLeetcode } from "react-icons/si";
 import { siteConfig } from "@/data/site-config";
 import { trackEvent } from "@/lib/analytics";
 import { topicOptions, timelineOptions } from "@/data/contact-options";
 import { SectionHeading } from "@/components/ui/section-heading";
+
+const linkBase =
+  "inline-flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface rounded-sm";
+const linkMuted = "text-text-soft hover:text-text focus-visible:text-text";
 
 type Status = "idle" | "sending" | "sent" | "error";
 
@@ -226,12 +231,27 @@ export function Contact() {
           </form>
         )}
 
-        <div className="mt-14 flex flex-wrap justify-center gap-5 text-sm">
-          <a href={`mailto:${siteConfig.email}`} className="text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface rounded-sm">{siteConfig.email}</a>
-          <a href={siteConfig.links.github} className="text-text-soft hover:text-text focus-visible:outline-none focus-visible:text-text focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface rounded-sm">GitHub</a>
-          <a href={siteConfig.links.linkedin} className="text-text-soft hover:text-text focus-visible:outline-none focus-visible:text-text focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface rounded-sm">LinkedIn</a>
-          <a href={siteConfig.links.leetcode} className="text-text-soft hover:text-text focus-visible:outline-none focus-visible:text-text focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface rounded-sm">LeetCode</a>
-          <Link href="/resume" className="text-text-soft hover:text-text focus-visible:outline-none focus-visible:text-text focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface rounded-sm">Resume</Link>
+        <div className="mt-14 flex flex-wrap justify-center gap-x-6 gap-y-3 text-sm">
+          <a href={`mailto:${siteConfig.email}`} className={`${linkBase} text-accent hover:underline`}>
+            <FiMail aria-hidden className="h-4 w-4 shrink-0" />
+            {siteConfig.email}
+          </a>
+          <a href={siteConfig.links.github} className={`${linkBase} ${linkMuted}`}>
+            <FiGithub aria-hidden className="h-4 w-4 shrink-0" />
+            GitHub
+          </a>
+          <a href={siteConfig.links.linkedin} className={`${linkBase} ${linkMuted}`}>
+            <FiLinkedin aria-hidden className="h-4 w-4 shrink-0" />
+            LinkedIn
+          </a>
+          <a href={siteConfig.links.leetcode} className={`${linkBase} ${linkMuted}`}>
+            <SiLeetcode aria-hidden className="h-4 w-4 shrink-0" />
+            LeetCode
+          </a>
+          <Link href="/resume" className={`${linkBase} ${linkMuted}`}>
+            <FiFileText aria-hidden className="h-4 w-4 shrink-0" />
+            Resume
+          </Link>
         </div>
       </div>
     </section>

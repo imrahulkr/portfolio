@@ -1,41 +1,7 @@
-import {
-  FiBox,
-  FiLayers,
-  FiCpu,
-  FiPackage,
-  FiCheckSquare,
-  FiLayout,
-  FiGlobe,
-  FiGitBranch,
-  FiDatabase,
-  FiLock,
-  FiZap,
-  FiCode,
-} from "react-icons/fi";
-import type { IconType } from "react-icons";
 import { skills } from "@/data/skills";
-import { skillIcons } from "@/data/skill-icons";
+import { skillIcons, genericSkillIcons } from "@/data/skill-icons";
 import { Reveal } from "@/components/ui/reveal";
 import { SectionHeading } from "@/components/ui/section-heading";
-
-// Items with no real brand logo (unlike data/skill-icons.ts' entries, which
-// are real official logos) — generic outline icons in the site's single
-// accent color instead, same treatment as components/home/focus-areas.tsx.
-const genericIcons: Record<string, IconType> = {
-  SQL: FiDatabase,
-  "REST APIs": FiGlobe,
-  OAuth2: FiLock,
-  Zustand: FiZap,
-  "VS Code": FiCode,
-  Microservices: FiBox,
-  "System design": FiLayers,
-  Multithreading: FiCpu,
-  OOP: FiPackage,
-  "SOLID principles": FiCheckSquare,
-  "Design patterns": FiLayout,
-  "RESTful architecture": FiGlobe,
-  DSA: FiGitBranch,
-};
 
 export function Skills() {
   return (
@@ -51,7 +17,7 @@ export function Skills() {
                   {group.items.map((item) => {
                     const entry = skillIcons[item];
                     const BrandIcon = entry?.icon;
-                    const GenericIcon = genericIcons[item];
+                    const GenericIcon = genericSkillIcons[item];
                     return (
                       <span
                         key={item}

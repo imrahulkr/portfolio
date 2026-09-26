@@ -8,6 +8,7 @@ import {
   FiGithub,
   FiLinkedin,
   FiDownload,
+  FiFileText,
   FiServer,
   FiCode,
   FiLayers,
@@ -19,12 +20,14 @@ import { SiLeetcode } from "react-icons/si";
 import { siteConfig } from "@/data/site-config";
 import { experience } from "@/data/experience";
 import { skills, focusAreas } from "@/data/skills";
-import { skillIcons } from "@/data/skill-icons";
+import { skillIcons, genericSkillIcons } from "@/data/skill-icons";
 import { stats } from "@/data/stats";
 import { projects } from "@/data/projects";
 import { achievements, certifications } from "@/data/achievements";
 import { aboutContent } from "@/components/home/about";
 import { Footer } from "@/components/layout/footer";
+import { LeetCodeCard } from "@/components/home/leetcode-card";
+import { CopyButton } from "@/components/ui/copy-button";
 
 export const metadata: Metadata = {
   title: "Resume — Rahul Kumar",
@@ -43,7 +46,21 @@ const focusAreaIcons: Record<string, ReactNode> = {
   AI: <FiCpu aria-hidden="true" />,
 };
 
-function ContactItem({ icon, label, value, href }: { icon: ReactNode; label: string; value: string; href?: string }) {
+function ContactItem({
+  icon,
+  label,
+  value,
+  href,
+  action,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  href?: string;
+  // Rendered beside the row rather than inside the link, since a button
+  // can't be nested in an anchor.
+  action?: ReactNode;
+}) {
   const content = (
     <>
       <span className="w-9 h-9 shrink-0 rounded-lg bg-accent/10 flex items-center justify-center text-accent">{icon}</span>
@@ -53,12 +70,17 @@ function ContactItem({ icon, label, value, href }: { icon: ReactNode; label: str
       </span>
     </>
   );
-  return href ? (
-    <a href={href} className={`flex items-center gap-3 hover:text-accent transition-colors ${focusRing}`}>
-      {content}
-    </a>
-  ) : (
-    <div className="flex items-center gap-3">{content}</div>
+  return (
+    <div className="flex items-center gap-2">
+      {href ? (
+        <a href={href} className={`flex min-w-0 flex-1 items-center gap-3 hover:text-accent transition-colors ${focusRing}`}>
+          {content}
+        </a>
+      ) : (
+        <div className="flex min-w-0 flex-1 items-center gap-3">{content}</div>
+      )}
+      {action}
+    </div>
   );
 }
 
@@ -85,7 +107,21 @@ export default function ResumePage() {
             </div>
 
             <div className="border border-border rounded-xl bg-surface p-6 flex flex-col gap-5">
-              <ContactItem icon={<FiMail aria-hidden="true" />} label="Email" value={siteConfig.email} href={`mailto:${siteConfig.email}`} />
+              <ContactItem
+                icon={<FiMail aria-hidden="true" />}
+                label="Email"
+                value={siteConfig.email}
+                href={`mailto:${siteConfig.email}`}
+                action={
+                  <CopyButton
+                    text={siteConfig.email}
+                    label="Copy email address"
+                    copiedLabel="Email address copied"
+                    size={16}
+                    className={`shrink-0 p-1 text-text-soft ${focusRing}`}
+                  />
+                }
+              />
               <ContactItem icon={<FiPhone aria-hidden="true" />} label="Phone" value={siteConfig.phone} href={`tel:${siteConfig.phone.replace(/\s+/g, "")}`} />
               <ContactItem icon={<FiCalendar aria-hidden="true" />} label="Experience" value={`${yearsExperience} years`} />
               <ContactItem icon={<FiMapPin aria-hidden="true" />} label="Location" value={currentRole.location} />
@@ -103,8 +139,16 @@ export default function ResumePage() {
                 <a href={siteConfig.links.leetcode} aria-label="LeetCode" className={`hover:text-text transition-colors ${focusRing}`}>
                   <SiLeetcode size={18} aria-hidden="true" />
                 </a>
+                <a href={`mailto:${siteConfig.email}`} aria-label="Email" className={`hover:text-text transition-colors ${focusRing}`}>
+                  <FiMail size={18} aria-hidden="true" />
+                </a>
+                <a href={siteConfig.links.resume} target="_blank" rel="noopener noreferrer" aria-label="Resume (PDF)" className={`hover:text-text transition-colors ${focusRing}`}>
+                  <FiFileText size={18} aria-hidden="true" />
+                </a>
               </div>
             </div>
+
+            <LeetCodeCard compact />
 
             <a
               href={siteConfig.links.resume}
@@ -133,7 +177,31 @@ export default function ResumePage() {
                     </span>
                     <div>
                       <h3 className="text-sm font-medium text-text mb-1">{area.title}</h3>
-                      <p className="text-xs text-text-soft">{area.description}</p>
+                      <ul className="flex flex-wrap gap-1.5" aria-label={area.description}>
+                        {area.highlights.map((item) => {
+                          const entry = skillIcons[item];
+                          const BrandIcon = entry?.icon;
+                          const GenericIcon = genericSkillIcons[item];
+                          return (
+                            <li
+                              key={item}
+                              className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border border-border bg-bg text-text-soft"
+                            >
+                              {BrandIcon && (
+                                <BrandIcon
+                                  aria-hidden="true"
+                                  className="w-3.5 h-3.5 shrink-0"
+                                  style={entry.color ? { color: entry.color } : undefined}
+                                />
+                              )}
+                              {!BrandIcon && GenericIcon && (
+                                <GenericIcon aria-hidden="true" className="w-3.5 h-3.5 shrink-0 text-accent" />
+                              )}
+                              {item}
+                            </li>
+                          );
+                        })}
+                      </ul>
                     </div>
                   </div>
                 ))}
@@ -150,6 +218,7 @@ export default function ResumePage() {
                       {group.items.map((item) => {
                         const entry = skillIcons[item];
                         const Icon = entry?.icon;
+                        const GenericIcon = genericSkillIcons[item];
                         return (
                           <span
                             key={item}
@@ -161,6 +230,9 @@ export default function ResumePage() {
                                 className="w-3.5 h-3.5 shrink-0"
                                 style={entry.color ? { color: entry.color } : undefined}
                               />
+                            )}
+                            {!Icon && GenericIcon && (
+                              <GenericIcon aria-hidden="true" className="w-3.5 h-3.5 shrink-0 text-accent" />
                             )}
                             {item}
                           </span>

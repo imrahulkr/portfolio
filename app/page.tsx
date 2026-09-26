@@ -27,9 +27,9 @@ export default function HomePage() {
         <Impact />
         <Process />
         <Experience />
-        <BlogTeaser />
         <Skills />
         <About />
+        <BlogTeaser />
         <Contact />
       </main>
       <Footer />

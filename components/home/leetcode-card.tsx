@@ -65,17 +65,28 @@ function Ring({ tiers, solved, total }: { tiers: { color: string; data: Difficul
   );
 }
 
-export async function LeetCodeCard() {
+// `compact` is the narrow variant used in the resume page's sidebar: same
+// live data and fallback, laid out in one column on the sidebar's surface
+// card style (no hover glow), with the label styled like its sibling boxes.
+export async function LeetCodeCard({ compact = false }: { compact?: boolean }) {
   const data = await getLeetCodeStats();
   const profileUrl = siteConfig.links.leetcode;
+
+  const wrapper = compact
+    ? "rounded-xl border border-border bg-surface p-6"
+    : "card-glow relative rounded-2xl border border-border bg-bg p-6";
+  const labelClass = compact
+    ? "text-xs font-medium uppercase tracking-wide text-text-soft"
+    : "text-sm font-medium text-text-soft";
+  const boxBg = compact ? "bg-bg" : "bg-surface";
 
   // Fallback when LeetCode can't be reached: the static figure from
   // data/stats.ts (which spans LeetCode, GfG, and CodeStudio).
   if (!data) {
     const fallback = stats[1];
     return (
-      <div className="card-glow relative rounded-2xl border border-border bg-bg p-6">
-        <p className="text-sm font-medium text-text-soft mb-3">LeetCode</p>
+      <div className={wrapper}>
+        <p className={`${labelClass} mb-3`}>LeetCode</p>
         <p className="font-heading text-3xl font-semibold text-accent">{fallback.value}</p>
         <p className="mt-1 text-base text-text">{fallback.label}</p>
         <a href={profileUrl} className={`mt-4 inline-block ${linkClass}`}>
@@ -88,19 +99,25 @@ export async function LeetCodeCard() {
   const tiers = TIERS.map((t) => ({ ...t, data: data[t.key] }));
 
   return (
-    <div className="card-glow relative rounded-2xl border border-border bg-bg p-6">
-      <div className="mb-4 flex items-center justify-between">
-        <p className="text-sm font-medium text-text-soft">LeetCode</p>
+    <div className={wrapper}>
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <p className={labelClass}>LeetCode</p>
         <a href={profileUrl} className={linkClass}>
           @{data.username} →
         </a>
       </div>
 
-      <div className="flex flex-wrap items-center gap-6">
+      <div className={compact ? "flex flex-col items-center gap-4" : "flex flex-wrap items-center gap-6"}>
         <Ring tiers={tiers.map((t) => ({ color: t.color, data: t.data }))} solved={data.solved} total={data.total} />
-        <ul className="grid min-w-[8rem] flex-1 grid-cols-1 gap-2">
+        <ul
+          className={
+            compact
+              ? "grid w-full grid-cols-3 gap-2"
+              : "grid min-w-[8rem] flex-1 grid-cols-1 gap-2"
+          }
+        >
           {tiers.map((t) => (
-            <li key={t.key} className="rounded-lg border border-border bg-surface px-3 py-2 text-center">
+            <li key={t.key} className={`rounded-lg border border-border ${boxBg} px-2 py-2 text-center`}>
               <span className="block text-xs font-medium" style={{ color: t.color }}>
                 {t.label}
               </span>
@@ -113,11 +130,11 @@ export async function LeetCodeCard() {
       </div>
 
       {data.badgeCount > 0 && (
-        <div className="mt-5 flex items-center justify-between gap-4 border-t border-border pt-4">
-          <div>
+        <div className="mt-5 flex items-center justify-between gap-3 border-t border-border pt-4">
+          <div className="min-w-0">
             <p className="text-xs text-text-soft">Badges</p>
             <p className="font-heading text-xl font-semibold text-text">{data.badgeCount}</p>
-            {data.recentBadges[0] && (
+            {!compact && data.recentBadges[0] && (
               <p className="mt-0.5 text-xs text-text-soft">Latest: {data.recentBadges[0].name}</p>
             )}
           </div>
@@ -132,7 +149,7 @@ export async function LeetCodeCard() {
                   width={44}
                   height={44}
                   loading="lazy"
-                  className="h-11 w-11 object-contain"
+                  className={compact ? "h-9 w-9 object-contain" : "h-11 w-11 object-contain"}
                 />
               </li>
             ))}

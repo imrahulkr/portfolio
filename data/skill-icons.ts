@@ -23,6 +23,24 @@ import {
   SiSpring,
 } from "react-icons/si";
 import { DiJava, DiMsqlServer } from "react-icons/di";
+import {
+  FiBox,
+  FiLayers,
+  FiCpu,
+  FiPackage,
+  FiCheckSquare,
+  FiLayout,
+  FiGlobe,
+  FiGitBranch,
+  FiDatabase,
+  FiLock,
+  FiZap,
+  FiCode,
+  FiTrendingUp,
+  FiShield,
+  FiTerminal,
+  FiTool,
+} from "react-icons/fi";
 
 // Real brand icons/colors for skills that have an official logo. Skills with
 // no real logo (concepts like "System design", tools with no icon in either
@@ -54,4 +72,31 @@ export const skillIcons: Record<string, { icon: IconType; color?: string }> = {
   Postman: { icon: SiPostman, color: "#FF6C37" },
   Jira: { icon: SiJira, color: "#0052CC" },
   "IntelliJ IDEA": { icon: SiIntellijidea },
+};
+
+// Items with no real brand logo (unlike skillIcons above, which are real official
+// logos): generic outline icons, rendered in the site's single accent color by
+// both components/home/skills.tsx and app/resume/page.tsx. Never invent a brand
+// logo or color for something that doesn't have one.
+export const genericSkillIcons: Record<string, IconType> = {
+  SQL: FiDatabase,
+  "REST APIs": FiGlobe,
+  OAuth2: FiLock,
+  Zustand: FiZap,
+  "VS Code": FiCode,
+  Microservices: FiBox,
+  "System design": FiLayers,
+  Multithreading: FiCpu,
+  OOP: FiPackage,
+  "SOLID principles": FiCheckSquare,
+  "Design patterns": FiLayout,
+  "RESTful architecture": FiGlobe,
+  DSA: FiGitBranch,
+  // Concept highlights shown on the resume page's "What I'm Doing" cards.
+  Scalability: FiTrendingUp,
+  Caching: FiDatabase,
+  "Fault tolerance": FiShield,
+  "Modern web development": FiGlobe,
+  "AI-assisted development": FiTerminal,
+  "AI tooling": FiTool,
 };

@@ -9,9 +9,9 @@ import { Logo } from "@/components/layout/logo";
 const navItems = [
   { label: "Services", href: "/#services", sectionId: "services" },
   { label: "Projects", href: "/#projects", sectionId: "projects" },
-  { label: "Blog", href: "/blog", sectionId: null },
   { label: "Experience", href: "/#experience", sectionId: "experience" },
   { label: "About", href: "/#about", sectionId: "about" },
+  { label: "Blog", href: "/blog", sectionId: null },
   { label: "Resume", href: "/resume", sectionId: null },
 ];
 
