@@ -50,6 +50,7 @@ export function CommandPalette() {
   const commands = useMemo<Command[]>(() => {
     const nav: Command[] = [
       { id: "nav-home", label: "Go to Home", group: "Navigate", run: () => navigate("/") },
+      { id: "nav-services", label: "Go to Services", group: "Navigate", run: () => navigate("/#services") },
       { id: "nav-projects", label: "Go to Projects", group: "Navigate", run: () => navigate("/#projects") },
       { id: "nav-blog", label: "Go to Blog", group: "Navigate", run: () => navigate("/blog") },
       { id: "nav-resume", label: "Go to Resume", group: "Navigate", run: () => navigate("/resume") },

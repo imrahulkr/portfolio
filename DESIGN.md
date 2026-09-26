@@ -49,8 +49,10 @@ to one spot each — don't extend any of them further without asking):
   tools absent from both icon sets) stay plain text — never invent an icon
   or color for something that doesn't have a real one.
 
+- **Hero and card-hover glow** (added 2026-09-26, explicitly approved) -- gradients and glows are allowed on the hero section (aurora background, faint masked grid, gradient-highlighted headline phrase, glowing primary CTA, glowing "Selected work" panel) and on card hover states (`.card-glow`: accent hairline, soft outer glow, faint top sheen; used on featured-project and service cards). All of it is built from `--accent-rgb` so it stays single-hue and theme-aware. Defined in `globals.css` (`.hero-aurora`, `.hero-grid`, `.text-gradient-accent`, `.glow-panel`, `.glow-button`, `.card-glow`). It does not extend to buttons elsewhere, inputs, badges, or other sections without asking.
+
 Otherwise: no gradients, glows, or shadows on UI elements beyond a hairline
-border, and no further second-accent usage beyond the three exceptions above.
+border, and no further second-accent usage beyond the exceptions above.
 
 ## Type scale (Tailwind keys — always use these, never text-[Npx])
 xs 13px · sm 14px · base 16px · lg 19px · xl 26px · 2xl 34px · 3xl 46px · 4xl 58px

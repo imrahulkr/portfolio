@@ -7,11 +7,12 @@ import { useTheme } from "next-themes";
 import { Logo } from "@/components/layout/logo";
 
 const navItems = [
+  { label: "Services", href: "/#services", sectionId: "services" },
   { label: "Projects", href: "/#projects", sectionId: "projects" },
   { label: "Blog", href: "/blog", sectionId: null },
   { label: "Experience", href: "/#experience", sectionId: "experience" },
   { label: "About", href: "/#about", sectionId: "about" },
-  { label: "Contact", href: "/#contact", sectionId: "contact" },
+  { label: "Resume", href: "/resume", sectionId: null },
 ];
 
 const focusRing =
@@ -58,7 +59,7 @@ export function Navbar() {
   }, [pathname]);
 
   const isActive = (item: (typeof navItems)[number]) =>
-    item.sectionId === null ? pathname.startsWith("/blog") : pathname === "/" && activeSection === item.sectionId;
+    item.sectionId === null ? pathname.startsWith(item.href) : pathname === "/" && activeSection === item.sectionId;
 
   return (
     <header
@@ -72,7 +73,7 @@ export function Navbar() {
           Rahul Kumar
         </Link>
 
-        <nav className="hidden md:flex items-center gap-7 text-base text-text-soft">
+        <nav className="hidden lg:flex items-center gap-7 text-base text-text-soft">
           {navItems.map((item) => (
             <Link
               key={item.href}
@@ -85,19 +86,12 @@ export function Navbar() {
           ))}
         </nav>
 
-        <div className="hidden md:flex items-center gap-4 text-sm">
-          <Link
-            href="/resume"
-            aria-current={pathname === "/resume" ? "page" : undefined}
-            className={`px-3 py-1.5 rounded border border-border hover:border-accent text-text transition-colors ${focusRing}`}
-          >
-            Resume
-          </Link>
+        <div className="hidden lg:flex items-center gap-4 text-sm">
           <button
             onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
             className={`flex items-center gap-2 px-3 py-1.5 rounded border border-border hover:border-accent text-text-soft transition-colors ${focusRing}`}
           >
-            <span>Search</span>
+            <span className="hidden xl:inline">Search</span>
             <kbd className="text-xs font-mono border border-border rounded px-1">⌘K</kbd>
           </button>
           {mounted && (
@@ -118,10 +112,16 @@ export function Navbar() {
               )}
             </button>
           )}
+          <Link
+            href="/#contact"
+            className={`px-4 py-1.5 rounded-lg bg-accent text-bg font-medium hover:brightness-110 transition ${focusRing}`}
+          >
+            Get in touch
+          </Link>
         </div>
 
         <button
-          className={`md:hidden text-text ${focusRing}`}
+          className={`lg:hidden text-text ${focusRing}`}
           aria-label={mobileOpen ? "Close menu" : "Open menu"}
           aria-expanded={mobileOpen}
           aria-controls="mobile-menu"
@@ -134,7 +134,7 @@ export function Navbar() {
       </div>
 
       {mobileOpen && (
-        <div id="mobile-menu" className="md:hidden mt-4 px-6 pb-4 flex flex-col gap-4 text-sm border-t border-border pt-4">
+        <div id="mobile-menu" className="lg:hidden mt-4 px-6 pb-4 flex flex-col gap-4 text-sm border-t border-border pt-4">
           {navItems.map((item) => (
             <Link
               key={item.href}
@@ -146,7 +146,6 @@ export function Navbar() {
               {item.label}
             </Link>
           ))}
-          <Link href="/resume" onClick={() => setMobileOpen(false)} className={`text-text-soft ${focusRing}`}>Resume</Link>
           <button
             onClick={() => {
               setMobileOpen(false);
@@ -156,6 +155,13 @@ export function Navbar() {
           >
             Search (⌘K)
           </button>
+          <Link
+            href="/#contact"
+            onClick={() => setMobileOpen(false)}
+            className={`self-start px-4 py-2 rounded-lg bg-accent text-bg font-medium ${focusRing}`}
+          >
+            Get in touch
+          </Link>
           {mounted && (
             <button className={`text-left text-text-soft ${focusRing}`} onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}>
               {resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}

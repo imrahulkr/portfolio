@@ -374,6 +374,8 @@ so work continues consistently without re-litigating settled decisions.
   state (`hover:border-accent hover:text-accent`) they didn't have
   before.
 
+- Revamp Phase 1 (2026-09-26), following a full-site review and three owner decisions: audience is a balanced recruiter/client split leaning slightly toward clients; wording is freelance-friendly; NEVER show rates or availability publicly (every CTA says get in touch); gradients/glow allowed on the hero and card hover only (see DESIGN.md). Shipped: new hero (`components/hero/hero.tsx`, copy in `data/hero.ts`) with aurora glow, gradient headline phrase, primary "Get in touch" CTA and a tilted "Selected work" panel built from real project data; solid "Get in touch" button in the navbar (Resume moved into the nav links, nav collapses to the hamburger below `lg` to fit); logo marquee (`components/home/tech-strip.tsx`, real brand icons only, static wrapped row under reduced motion); Services section (`components/home/services.tsx`, copy in `data/services.ts`) replacing `FocusAreas` on the homepage (the component file and `focusAreas` data remain: the resume page still uses the data); `.card-glow` hover on project and service cards; "Go to Services" in the command palette. Planned next (Phase 2): inquiry-style contact form (project type + timeline, NO budget field) with auto-reply and rate limiting, homepage blog teaser, impact strip, process section. Phase 3: blog search, analytics, RSS, structured data, CI. Testimonials/FAQ deliberately omitted until real content exists.
+
 **Not started:**
 - Real production domain — set `NEXT_PUBLIC_SITE_URL` once one exists
 - `components/home/about.tsx`'s three fields (`currentlyBuilding`,

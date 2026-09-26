@@ -15,7 +15,7 @@ export function FeaturedProjects() {
       <div className="flex flex-col gap-8">
         {featured.map((project) => (
           <Reveal key={project.slug}>
-            <article className="group grid grid-cols-1 md:grid-cols-[1fr_1.2fr] gap-0 border border-border rounded-2xl overflow-hidden hover:border-accent transition-colors">
+            <article className="group card-glow relative grid grid-cols-1 md:grid-cols-[1fr_1.2fr] gap-0 border border-border rounded-2xl overflow-hidden">
               <div
                 className="project-tint relative border-b md:border-b-0 md:border-r border-border min-h-[220px] flex items-center justify-center overflow-hidden"
                 style={
