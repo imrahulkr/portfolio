@@ -21,6 +21,25 @@ import {
   SiJira,
   SiIntellijidea,
   SiSpring,
+  SiRedis,
+  SiApachekafka,
+  SiMongodb,
+  SiMysql,
+  SiStripe,
+  SiRazorpay,
+  SiNodedotjs,
+  SiHostinger,
+  SiFlyway,
+  SiVite,
+  SiZod,
+  SiThymeleaf,
+  SiNextdotjs,
+  SiAxios,
+  SiReactrouter,
+  SiReacthookform,
+  SiShadcnui,
+  SiResend,
+  SiGoogle,
 } from "react-icons/si";
 import { DiJava, DiMsqlServer } from "react-icons/di";
 import {
@@ -40,6 +59,8 @@ import {
   FiShield,
   FiTerminal,
   FiTool,
+  FiCloud,
+  FiRefreshCw,
 } from "react-icons/fi";
 
 // Real brand icons/colors for skills that have an official logo. Skills with
@@ -72,6 +93,29 @@ export const skillIcons: Record<string, { icon: IconType; color?: string }> = {
   Postman: { icon: SiPostman, color: "#FF6C37" },
   Jira: { icon: SiJira, color: "#0052CC" },
   "IntelliJ IDEA": { icon: SiIntellijidea },
+  // Added for the project case-study pages. Same rule as above: real logos
+  // only, and near-black or navy marks (Kafka, Razorpay, Thymeleaf, Next.js,
+  // shadcn/ui, Resend) inherit the text color so they stay visible in dark mode.
+  React: { icon: SiReact, color: "#61DAFB" },
+  Redis: { icon: SiRedis, color: "#DC382D" },
+  "Apache Kafka": { icon: SiApachekafka },
+  MongoDB: { icon: SiMongodb, color: "#47A248" },
+  MySQL: { icon: SiMysql, color: "#4479A1" },
+  Stripe: { icon: SiStripe, color: "#635BFF" },
+  Razorpay: { icon: SiRazorpay },
+  "Node.js": { icon: SiNodedotjs, color: "#5FA04E" },
+  Hostinger: { icon: SiHostinger, color: "#673DE6" },
+  Flyway: { icon: SiFlyway, color: "#CC0200" },
+  Vite: { icon: SiVite, color: "#646CFF" },
+  Zod: { icon: SiZod, color: "#3E67B1" },
+  Thymeleaf: { icon: SiThymeleaf },
+  "Next.js": { icon: SiNextdotjs },
+  Axios: { icon: SiAxios, color: "#5A29E4" },
+  "React Router": { icon: SiReactrouter, color: "#CA4245" },
+  "React Hook Form": { icon: SiReacthookform, color: "#EC5990" },
+  "shadcn/ui": { icon: SiShadcnui },
+  Resend: { icon: SiResend },
+  "Google OAuth": { icon: SiGoogle, color: "#4285F4" },
 };
 
 // Items with no real brand logo (unlike skillIcons above, which are real official
@@ -99,4 +143,8 @@ export const genericSkillIcons: Record<string, IconType> = {
   "Modern web development": FiGlobe,
   "AI-assisted development": FiTerminal,
   "AI tooling": FiTool,
+  // Concept/library labels used by the project case-study pages.
+  Bucket4j: FiShield,
+  "Amazon S3": FiCloud,
+  "Spring Retry": FiRefreshCw,
 };

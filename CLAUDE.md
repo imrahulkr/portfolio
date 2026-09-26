@@ -384,8 +384,66 @@ so work continues consistently without re-litigating settled decisions.
 
 - About section redesigned again (2026-09-26, supersedes the earlier three-column text version): a card grid. Left, a large "Currently building" card for the in-progress project (FluxGate, found via `status: "in-progress"`) with an "In progress" pill, its real architecture diagram (`ArchitectureThumb` on the project's own `cardTint`), summary, tech chips and case-study link. Right, a LeetCode tile and a Recognition tile (INSTA award from `data/stats.ts` `stats[2]` plus `data/achievements.ts`). The LeetCode tile shows LIVE data, labeled "LeetCode": `lib/leetcode.ts` calls LeetCode's public, unofficial GraphQL endpoint server-side (username in `siteConfig.leetcodeUsername`), cached for an hour via `next: { revalidate: 3600 }`, so the page stays static and LeetCode is hit about hourly rather than per visit (browsers can't call it directly: CORS). It shows a three-arc ring (solved/total per difficulty), easy/medium/hard boxes, badge count and the three newest badge images. Any failure (network, timeout, changed response shape, zero counts) returns null and the tile falls back to the static `stats[1]` figure, so it can never break the page. Caveats: the endpoint could change or block requests without notice; a failed hourly refresh replaces good data with the static fallback rather than keeping the last good value; the LeetCode-only count (about 1,349) is intentionally different from the hero/stat wording "1,500+ across LeetCode, GfG, CodeStudio". The tile's difficulty colors are a scoped exception documented in DESIGN.md.
 
+- Project case-study pages redesigned (2026-09-26) and filled with VERIFIED facts. Owner asked for the pages to "look cool" and be filled with details for now; the never-invent rule still applies, so every new fact was checked against the real source instead of being written from imagination: the public GitHub repos (including the ecomProject `feature-add-frontend` branch, its own CLAUDE.md and FRONTEND_PLAN.md, `pom.xml`, `SecurityConfig`, Flyway migrations, `RefreshTokenService`), FluxGate's three service poms and configs, and the live sidhantdel.org site. New layout: hero with the same aurora glow, metrics strip, sticky scroll-spy in-page nav, Overview with Quick facts, branching architecture diagram, and (only when the data exists) a numbered lifecycle timeline, an access-model table, grouped feature cards, decision and challenge cards, an honest build-status list with an "as of" date, grouped tech stack with real logos, a Get-in-touch call to action and previous/next project cards. Sections vanish when their field is empty. Components live in `components/projects/*`; new optional fields on `Project` in `data/projects.ts` (`facts`, `metrics`, `metricsNote`, `flow`, `accessModel`, `featureGroups`, `challengeList`, `roadmap`, `techGroups`, and `tech`/`planned` on architecture nodes). Things to remember: `metrics` and `roadmap` are counted or judged AS OF a stated date (August 2026 for ecomProject, September 2026 for FluxGate, the live site for SIDHANT) and go stale, so re-check them when the projects move on; the ecomProject `github` link now deep-links to the `feature-add-frontend` branch because `master` is still the early skeleton; FluxGate roadmap items are marked "next" rather than "in progress" because the repo (as of 2026-09-14) only holds the scaffold; three ecom feature lines came from the owner and could not be found in code ("Delivery/shipping options", "Security measures (fraud checks, backups)", "Mobile-responsive design") and were kept as supplied; the live SIDHANT site is built with Next.js but the data still says React + Node.js. OWNER DECISION (2026-09-26): all of the above are "fine for now" and stay as they are: the ecomProject GitHub link keeps pointing at the `feature-add-frontend` branch, the FluxGate roadmap keeps its three built items and the rest as "next", the ecom React cart/checkout/orders/seller/admin screens stay marked "in progress", the three unverified ecom feature lines stay, and SIDHANT's stack stays "React + Node.js" (do not add Next.js unless the owner asks). `ArchitectureDiagram` treats node 1 as the entry, node 2 as the core and the rest as downstream systems.
+
 **Not started:**
+- Real screenshots for the ecomProject and FluxGate case studies (none exist yet, so no gallery section is shown; the owner can run the app and supply some, then add a `gallery` field). Also worth doing: deploy the ecommerce project so it can carry a live demo link.
+- Re-verify the dated case-study facts (`metrics`, `metricsNote`, `roadmap.asOf`, quick facts) when the projects move on; they were correct as of August/September 2026.
 - Real production domain — set `NEXT_PUBLIC_SITE_URL` once one exists
+
+## Backlog from the 2026-09-26 production-readiness audit
+
+Verdict at the time: fine as a first draft, and already live at iamrahulkr.vercel.app
+(Vercel). The audit built the production site in a scratch copy and checked the live
+site. Nothing below has been fixed yet. Work through it top to bottom when asked.
+
+Baseline to compare against later: production build passes (356 pages); all 340 sitemap
+URLs return 200; no console errors; largest contentful paint mostly under 1s; layout shift
+under 0.07; no sideways scroll on desktop or mobile; home HTML about 47 KB gzipped;
+first-load JS about 121 KB; no secrets in tracked files or git history; LeetCode fetch works
+from Vercel.
+
+**Fix before promoting the site (small, mostly quick)**
+1. Double slashes in the live sitemap (339 of 340 entries redirect with a 308), in the
+   robots `Sitemap:` line, and in JSON-LD URLs. Cause: the Vercel `NEXT_PUBLIC_SITE_URL`
+   value ends in a trailing slash. Fix both: correct the env var AND strip trailing
+   slashes from `siteUrl` in `data/site-config.ts` so it cannot recur.
+2. Commit and push the uncommitted work (case-study redesign, resume changes, docs).
+3. Send one real test message through the contact form on the LIVE site. The endpoint
+   responds and the reCAPTCHA public key is set on Vercel, but email delivery through
+   Resend and the reCAPTCHA secret on the live domain were not verified.
+4. Decide about the public phone number on `/resume` (and probably inside
+   `public/resume.pdf`); it invites spam. Owner's call.
+5. Blog: 56 chapters render a visible "Diagram placeholder" box (60 diagram files under
+   `/diagrams/` do not exist) and all 65 Java chapters carry `draft: true` in their own
+   frontmatter (published anyway by earlier instruction). Decide: hide, or create the
+   diagrams, or accept.
+6. Two serious accessibility failures from the axe run: the LeetCode "Easy" label colour
+   (`--lc-easy` in light mode, `globals.css`) fails contrast on the surface panel, and
+   blog `pre` code blocks that scroll are not keyboard-focusable (needs `tabindex="0"`,
+   e.g. via a rehype step in the chapter page).
+7. No browser security headers except HSTS. Add a safe set through `headers()` in
+   `next.config.js`: X-Content-Type-Options, Referrer-Policy, X-Frame-Options or
+   frame-ancestors, Permissions-Policy. A full CSP needs care (reCAPTCHA, inline JSON-LD).
+
+**Next round**
+- Analytics is not running: set `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` on Vercel.
+- `npm audit` reports 2 issues (moderate Next, high PostCSS) that both come from Next's
+  bundled PostCSS; the only fix is upgrading to Next 16 (breaking). Low real risk for a
+  static site; plan the upgrade, do not force it.
+- Auto-reply email needs a domain verified with Resend (`CONTACT_FROM_EMAIL`).
+- Add a one-line privacy notice by the contact form (it collects name and email).
+- The SIDHANT project page had a 5s cold first load (1 MB PNG through the image
+  optimizer): compress `public/projects/*.png` and add `sizes` to the `Image` components.
+- Cleanup: `components/home/focus-areas.tsx` is unused; README needs a refresh; the 404
+  page title is the generic site title; sitemap `lastModified` is always build time.
+- No automated tests, ESLint is not configured, CI only runs typecheck and build.
+- The in-memory contact rate limiter is per server instance (a speed bump on Vercel).
+- A failed hourly LeetCode refresh replaces good data with the static fallback.
+
+**Content only the owner can supply**: a photo, real testimonials, real screenshots for
+the ecomProject and FluxGate case studies, a deployed ecommerce demo, a custom domain,
+certifications, and a personal story for About.
 
 ## Locked decisions — do not re-litigate without explicit instruction
 

@@ -127,6 +127,8 @@ export default function ResumePage() {
               <ContactItem icon={<FiMapPin aria-hidden="true" />} label="Location" value={currentRole.location} />
             </div>
 
+            <LeetCodeCard compact />
+
             <div className="border border-border rounded-xl bg-surface p-6">
               <p className="text-xs text-text-soft uppercase tracking-wide mb-4">Elsewhere</p>
               <div className="flex gap-3 text-text-soft">
@@ -147,8 +149,6 @@ export default function ResumePage() {
                 </a>
               </div>
             </div>
-
-            <LeetCodeCard compact />
 
             <a
               href={siteConfig.links.resume}

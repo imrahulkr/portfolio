@@ -53,6 +53,8 @@ to one spot each — don't extend any of them further without asking):
 
 - **LeetCode tile difficulty colors** (added 2026-09-26, explicitly approved) -- the About section's LeetCode tile (`components/home/leetcode-card.tsx`) uses LeetCode's own teal / amber / red for its Easy / Medium / Hard ring arcs and labels, via `--lc-easy`, `--lc-medium`, `--lc-hard` in `globals.css` (darker variants in light mode so the amber stays legible). Same spirit as the Skills brand-icon colors: recognizable third-party colors, confined to this one tile. Not for use anywhere else.
 
+  The project case-study pages (`/projects/[slug]`) reuse this same hero glow on their page header and the same `.card-glow` hover on their cards, and the brand-icon exception above now also covers the extra logos in `data/skill-icons.ts` (Redis, Kafka, MongoDB, MySQL, Stripe, Razorpay, Node.js, and similar), all real marks only.
+
 Otherwise: no gradients, glows, or shadows on UI elements beyond a hairline
 border, and no further second-accent usage beyond the exceptions above.
 
