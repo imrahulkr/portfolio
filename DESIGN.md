@@ -51,6 +51,8 @@ to one spot each — don't extend any of them further without asking):
 
 - **Hero and card-hover glow** (added 2026-09-26, explicitly approved) -- gradients and glows are allowed on the hero section (aurora background, faint masked grid, gradient-highlighted headline phrase, glowing primary CTA, glowing "Selected work" panel) and on card hover states (`.card-glow`: accent hairline, soft outer glow, faint top sheen; used on featured-project and service cards). All of it is built from `--accent-rgb` so it stays single-hue and theme-aware. Defined in `globals.css` (`.hero-aurora`, `.hero-grid`, `.text-gradient-accent`, `.glow-panel`, `.glow-button`, `.card-glow`). It does not extend to buttons elsewhere, inputs, badges, or other sections without asking.
 
+- **LeetCode tile difficulty colors** (added 2026-09-26, explicitly approved) -- the About section's LeetCode tile (`components/home/leetcode-card.tsx`) uses LeetCode's own teal / amber / red for its Easy / Medium / Hard ring arcs and labels, via `--lc-easy`, `--lc-medium`, `--lc-hard` in `globals.css` (darker variants in light mode so the amber stays legible). Same spirit as the Skills brand-icon colors: recognizable third-party colors, confined to this one tile. Not for use anywhere else.
+
 Otherwise: no gradients, glows, or shadows on UI elements beyond a hairline
 border, and no further second-accent usage beyond the exceptions above.
 
