@@ -9,21 +9,26 @@ import { stats } from "@/data/stats";
 import { achievements } from "@/data/achievements";
 
 export type AboutContent = {
-  intro: string;
+  intro: string[];
   // One-line summary of the project currently in progress. Facts only,
   // taken from that project's own entry in data/projects.ts.
   currentlyBuilding: string;
 };
 
 export const aboutContent: AboutContent = {
-  intro:
-    "I'm a backend-leaning engineer who likes systems that stay boring in production — predictable, observable, and hard to break by accident.",
+  intro: [
+    "I'm a Technology Analyst at Infosys with 4+ years of experience building software across the full stack — currently focused on backend engineering with Java, Spring Boot, and modern web technologies.",
+    "I like solving problems at the system level: backend architecture, APIs, and the data structures behind them. If you're looking for a developer to build, improve, or scale an application, let's talk.",
+  ],
   currentlyBuilding:
     "An API gateway with a microservice architecture, built to consolidate authentication and to work hands-on with caching, rate limiting, and event streaming.",
 };
 
 const linkClass =
   "inline-flex items-center gap-1.5 text-sm font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm";
+
+const focusRing =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
 
 export function About({ content = aboutContent }: { content?: AboutContent }) {
   const building = projects.find((p) => p.status === "in-progress");
@@ -34,7 +39,29 @@ export function About({ content = aboutContent }: { content?: AboutContent }) {
     <section id="about" className="max-w-5xl mx-auto px-6 py-24">
       <Reveal>
         <SectionHeading title="About" />
-        <p className="text-lg text-text-soft max-w-[65ch] mx-auto text-center mb-12">{content.intro}</p>
+        <div className="max-w-[80ch] mx-auto mb-8 flex flex-col gap-3 text-center">
+          {content.intro.map((paragraph, i) => (
+            <p key={i} className="text-lg text-text-soft">
+              {paragraph}
+            </p>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-center gap-3 mb-12">
+          <a
+            href="#contact"
+            className={`glow-button inline-flex items-center gap-2 px-6 py-3 text-base font-medium rounded-lg bg-accent text-bg hover:brightness-110 transition ${focusRing}`}
+          >
+            Let&apos;s talk
+            <FiArrowRight aria-hidden className="h-4 w-4" />
+          </a>
+          <a
+            href="#projects"
+            className={`px-6 py-3 text-base font-medium rounded-lg border border-border text-text hover:border-accent transition-colors ${focusRing}`}
+          >
+            Explore projects
+          </a>
+        </div>
 
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.1fr_1fr]">
           {building && (

@@ -34,12 +34,12 @@ export default function HomePage() {
         <Hero />
         <TechStrip />
         <Services />
+        <About />
         <FeaturedProjects />
         <Impact />
         <Process />
         <Experience />
         <Skills />
-        <About />
         <BlogTeaser />
         <Contact />
       </main>

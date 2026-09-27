@@ -184,7 +184,13 @@ export default function ResumePage() {
             <div>
               <h2 className="font-heading text-2xl font-semibold text-text mb-4">About Me</h2>
               <div className="w-10 h-0.5 bg-accent mb-6" aria-hidden="true" />
-              <p className="text-base text-text-soft max-w-[65ch]">{aboutContent.intro}</p>
+              <div className="max-w-[65ch] flex flex-col gap-3">
+                {aboutContent.intro.map((paragraph, i) => (
+                  <p key={i} className="text-base text-text-soft">
+                    {paragraph}
+                  </p>
+                ))}
+              </div>
             </div>
 
             <div>
