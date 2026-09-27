@@ -35,6 +35,7 @@ export async function generateMetadata({
       type: "article",
       images: [{ url: `/blog/${series}/banner-image`, width: 1200, height: 400 }],
     },
+    twitter: { description: c.description },
   };
 }
 

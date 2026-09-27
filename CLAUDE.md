@@ -435,9 +435,12 @@ Fixed four gaps: `app/not-found.tsx` now has its own title and `noindex`; root l
 its own title instead of each hand-appending the suffix; blog series/chapter pages now use
 their own generated banner image (`/blog/[series]/banner-image`) as the Open Graph image
 instead of falling back to the generic site-wide one; added `app/manifest.ts` (reuses the
-existing `icon`/`apple-icon` routes, no new images). Left as nice-to-have, not done: no
-JSON-LD on `/resume`, no `WebSite`/`ProfilePage` schema on `/`, `/resume` and `/blog`
-meta descriptions are shorter than ideal, no explicit per-page `twitter.description`.
+existing `icon`/`apple-icon` routes, no new images). All remaining nice-to-haves done the
+same day: `WebSite` JSON-LD on `/`; `ProfilePage`-wrapped `Person` JSON-LD on `/resume`;
+richer meta descriptions on `/resume` (fixed) and `/blog` (`generateMetadata` now derives
+the chapter/series count from `getAllSeries()` instead of a hardcoded number, so it can't
+drift); explicit `twitter.description` on resume, blog index, series, chapter, and project
+pages (previously only inherited from `openGraph`).
 
 **Next round**
 - Analytics is not running: set `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` on Vercel.

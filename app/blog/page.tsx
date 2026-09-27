@@ -6,11 +6,18 @@ import { BlogSearch } from "@/components/blog/blog-search";
 import { JsonLd } from "@/components/seo/json-ld";
 import { siteConfig, siteUrl } from "@/data/site-config";
 
-export const metadata: Metadata = {
-  title: "Blog",
-  description: "In-depth, chapter-by-chapter series on Java, Spring Boot, system design, and AI systems.",
-  alternates: { canonical: "/blog" },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const series = getAllSeries();
+  const chapterCount = series.reduce((sum, s) => sum + s.chapters.length, 0);
+  const description = `In-depth, chapter-by-chapter engineering notes on Java, Spring Boot, system design (HLD and LLD), and AI system design — ${chapterCount} chapters across ${series.length} series.`;
+  return {
+    title: "Blog",
+    description,
+    alternates: { canonical: "/blog" },
+    openGraph: { description },
+    twitter: { description },
+  };
+}
 
 export default function BlogIndexPage() {
   const series = getAllSeries();

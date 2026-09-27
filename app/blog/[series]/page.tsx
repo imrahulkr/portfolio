@@ -22,6 +22,7 @@ export async function generateMetadata({ params }: { params: Promise<{ series: s
       description: s.description,
       images: [{ url: `/blog/${s.slug}/banner-image`, width: 1200, height: 400 }],
     },
+    twitter: { description: s.description },
   };
 }
 

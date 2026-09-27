@@ -17,7 +17,7 @@ import {
   FiExternalLink,
 } from "react-icons/fi";
 import { SiLeetcode } from "react-icons/si";
-import { siteConfig } from "@/data/site-config";
+import { siteConfig, siteUrl } from "@/data/site-config";
 import { experience } from "@/data/experience";
 import { skills, focusAreas } from "@/data/skills";
 import { skillIcons, genericSkillIcons } from "@/data/skill-icons";
@@ -28,10 +28,29 @@ import { aboutContent } from "@/components/home/about";
 import { Footer } from "@/components/layout/footer";
 import { LeetCodeCard } from "@/components/home/leetcode-card";
 import { CopyButton } from "@/components/ui/copy-button";
+import { JsonLd } from "@/components/seo/json-ld";
+
+const description =
+  "Rahul Kumar's resume: background, work experience, and skills as a backend and full-stack engineer working with Java, Spring Boot, and React.";
 
 export const metadata: Metadata = {
   title: "Resume",
-  description: "Rahul Kumar's background, skills, and work experience.",
+  description,
+  openGraph: { description },
+  twitter: { description },
+};
+
+const profileJsonLd = {
+  "@context": "https://schema.org",
+  "@type": "ProfilePage",
+  mainEntity: {
+    "@type": "Person",
+    name: siteConfig.name,
+    jobTitle: siteConfig.role,
+    email: siteConfig.email,
+    url: siteUrl,
+    sameAs: [siteConfig.links.github, siteConfig.links.linkedin, siteConfig.links.leetcode],
+  },
 };
 
 const focusRing =
@@ -90,6 +109,7 @@ export default function ResumePage() {
 
   return (
     <>
+      <JsonLd data={profileJsonLd} />
       <main id="main-content">
         <section className="max-w-5xl mx-auto px-6 pt-12 pb-24 grid grid-cols-1 md:grid-cols-[280px_1fr] gap-12 items-start">
           <aside className="flex flex-col gap-6 md:sticky md:top-24">
