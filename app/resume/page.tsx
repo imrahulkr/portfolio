@@ -30,7 +30,7 @@ import { LeetCodeCard } from "@/components/home/leetcode-card";
 import { CopyButton } from "@/components/ui/copy-button";
 
 export const metadata: Metadata = {
-  title: "Resume — Rahul Kumar",
+  title: "Resume",
   description: "Rahul Kumar's background, skills, and work experience.",
 };
 
@@ -256,7 +256,7 @@ export default function ResumePage() {
                     <h3 className="text-sm font-medium text-text">
                       {entry.role} · {entry.company}
                     </h3>
-                    <ul className="mt-2 flex flex-col gap-1.5 text-sm text-text-soft list-disc list-inside">
+                    <ul className="mt-2 space-y-1.5 pl-5 text-sm text-text-soft list-disc list-outside marker:text-text-soft">
                       {entry.achievements.map((achievement) => (
                         <li key={achievement}>{achievement}</li>
                       ))}

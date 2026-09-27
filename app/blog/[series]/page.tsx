@@ -14,10 +14,14 @@ export async function generateMetadata({ params }: { params: Promise<{ series: s
   const s = getSeriesBySlug(series);
   if (!s) return {};
   return {
-    title: `${s.title} — Rahul Kumar`,
+    title: s.title,
     description: s.description,
     alternates: { canonical: `/blog/${s.slug}` },
-    openGraph: { title: s.title, description: s.description },
+    openGraph: {
+      title: s.title,
+      description: s.description,
+      images: [{ url: `/blog/${s.slug}/banner-image`, width: 1200, height: 400 }],
+    },
   };
 }
 

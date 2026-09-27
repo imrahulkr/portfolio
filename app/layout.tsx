@@ -29,7 +29,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Rahul Kumar — Software Engineer",
+  title: { default: "Rahul Kumar — Software Engineer", template: "%s — Rahul Kumar" },
   description:
     "Backend and full-stack engineer building scalable systems with Java, Spring Boot, and React. Writing engineering notes on Spring Boot, system design, and Java.",
   metadataBase: new URL(siteUrl),

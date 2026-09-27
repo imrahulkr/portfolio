@@ -8,6 +8,7 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { getAllSeries, getSeriesBySlug, getChapter, getAdjacentChapters, extractHeadings } from "@/lib/blog";
 import { TableOfContents } from "@/components/blog/table-of-contents";
+import { ScrollablePre, ScrollableTable } from "@/components/blog/scrollable";
 import { Footer } from "@/components/layout/footer";
 import { JsonLd } from "@/components/seo/json-ld";
 import { siteConfig, siteUrl } from "@/data/site-config";
@@ -25,10 +26,15 @@ export async function generateMetadata({
   const c = getChapter(series, chapter);
   if (!c) return {};
   return {
-    title: `${c.title} — Rahul Kumar`,
+    title: c.title,
     description: c.description,
     alternates: { canonical: `/blog/${series}/${chapter}` },
-    openGraph: { title: c.title, description: c.description, type: "article" },
+    openGraph: {
+      title: c.title,
+      description: c.description,
+      type: "article",
+      images: [{ url: `/blog/${series}/banner-image`, width: 1200, height: 400 }],
+    },
   };
 }
 
@@ -128,7 +134,7 @@ export default async function ChapterPage({
             it just scrolls away with the page instead of staying put. */}
         <section className="max-w-5xl mx-auto px-6 py-12 grid grid-cols-1 md:grid-cols-[1fr_260px] gap-12">
           <article className="prose prose-sm max-w-none">
-            <MDXContent components={{ img: ChapterImage }} />
+            <MDXContent components={{ img: ChapterImage, pre: ScrollablePre, table: ScrollableTable }} />
           </article>
 
           <aside className="hidden md:block order-first md:order-none">

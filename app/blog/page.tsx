@@ -7,7 +7,7 @@ import { JsonLd } from "@/components/seo/json-ld";
 import { siteConfig, siteUrl } from "@/data/site-config";
 
 export const metadata: Metadata = {
-  title: "Blog — Rahul Kumar",
+  title: "Blog",
   description: "In-depth, chapter-by-chapter series on Java, Spring Boot, system design, and AI systems.",
   alternates: { canonical: "/blog" },
 };

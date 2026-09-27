@@ -404,6 +404,7 @@ first-load JS about 121 KB; no secrets in tracked files or git history; LeetCode
 from Vercel.
 
 **Fix before promoting the site (small, mostly quick)**
+STATUS 2026-09-27: 1, 6, 7 DONE in code and verified on a production build (0 CSP violations, reCAPTCHA and LeetCode images load, axe clean, sitemap/robots/JSON-LD have no double slashes, headers present). `siteUrl` strips trailing slashes; `--lc-*` colours adjusted; `components/blog/scrollable.tsx` makes overflowing code blocks/tables focusable; `next.config.js` sets security headers plus a production-only CSP (add new third-party origins there or the browser blocks them). STILL TO DO BY OWNER: remove the trailing slash from `NEXT_PUBLIC_SITE_URL` on Vercel (code is safe either way).
 1. Double slashes in the live sitemap (339 of 340 entries redirect with a 308), in the
    robots `Sitemap:` line, and in JSON-LD URLs. Cause: the Vercel `NEXT_PUBLIC_SITE_URL`
    value ends in a trailing slash. Fix both: correct the env var AND strip trailing
@@ -425,6 +426,18 @@ from Vercel.
 7. No browser security headers except HSTS. Add a safe set through `headers()` in
    `next.config.js`: X-Content-Type-Options, Referrer-Policy, X-Frame-Options or
    frame-ancestors, Permissions-Policy. A full CSP needs care (reCAPTCHA, inline JSON-LD).
+
+**SEO pass (2026-09-27)**: full audit found the foundation already solid (unique
+metadata/JSON-LD/canonicals on every route, sitemap covers all 329 chapters with sensible
+priority/changeFrequency, robots.txt correct, single `<h1>` per page, no missing alt text).
+Fixed four gaps: `app/not-found.tsx` now has its own title and `noindex`; root layout
+`metadata.title` is now `{ default, template: "%s — Rahul Kumar" }` so every page sets just
+its own title instead of each hand-appending the suffix; blog series/chapter pages now use
+their own generated banner image (`/blog/[series]/banner-image`) as the Open Graph image
+instead of falling back to the generic site-wide one; added `app/manifest.ts` (reuses the
+existing `icon`/`apple-icon` routes, no new images). Left as nice-to-have, not done: no
+JSON-LD on `/resume`, no `WebSite`/`ProfilePage` schema on `/`, `/resume` and `/blog`
+meta descriptions are shorter than ideal, no explicit per-page `twitter.description`.
 
 **Next round**
 - Analytics is not running: set `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` on Vercel.
